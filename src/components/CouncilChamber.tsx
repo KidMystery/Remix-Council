@@ -2607,10 +2607,11 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                       onClick={() => speak(resp.content, copyKey)}
                                       className={`transition-colors p-1.5 rounded hover:bg-slate-100/80 ${
                                         speakingId === copyKey ? 'text-cyan-400 bg-cyan-950/60 animate-pulse' : 'text-slate-500 hover:text-slate-700'
-                                      }`}
+                                      } flex items-center gap-1 font-medium text-[10px]`}
                                       title={speakingId === copyKey ? 'Stop reading' : 'Read response aloud'}
                                     >
                                       {speakingId === copyKey ? <VolumeX size={13} /> : <Volume2 size={13} />}
+                                      <span>{speakingId === copyKey ? 'Stop' : 'Speak'}</span>
                                     </button>
                                     <button
                                       type="button"
@@ -2751,12 +2752,13 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                           type="button"
                                           onClick={() => speak(resp.content, copyKey)}
                                           className={`transition-colors p-1.5 rounded hover:bg-slate-100/80 ${
-                                            speakingId === copyKey ? 'text-purple-400 bg-purple-950/60 animate-pulse' : 'text-slate-500 hover:text-slate-700'
-                                          }`}
+                                        speakingId === copyKey ? 'text-purple-400 bg-purple-950/60 animate-pulse' : 'text-slate-500 hover:text-slate-700'
+                                      } flex items-center gap-1 font-medium text-[10px]`}
                                           title={speakingId === copyKey ? 'Stop reading' : 'Read response aloud'}
                                         >
-                                          {speakingId === copyKey ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                                        </button>
+                                      {speakingId === copyKey ? <VolumeX size={13} /> : <Volume2 size={13} />}
+                                      <span>{speakingId === copyKey ? 'Stop' : 'Speak'}</span>
+                                    </button>
                                         <button
                                           type="button"
                                           onClick={() => handleCopy(copyKey, resp.content)}
@@ -2825,7 +2827,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                               title={speakingId === `${round.id}-synthesis` ? 'Stop reading' : 'Read synthesis aloud'}
                             >
                               {speakingId === `${round.id}-synthesis` ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                              <span>{speakingId === `${round.id}-synthesis` ? 'Stop' : 'Read Aloud'}</span>
+                              <span>{speakingId === `${round.id}-synthesis` ? 'Stop' : 'Speak'}</span>
                             </button>
                             <button
                               onClick={() => handleCopy(`${round.id}-synthesis`, round.synthesis.content)}
