@@ -1,0 +1,47 @@
+--- src/components/SettingsPanel.tsx
++++ src/components/SettingsPanel.tsx
+@@ -1,8 +1,7 @@
+ import React, { useState, useEffect } from 'react';
+ import { Settings, X, Save, RefreshCw, Key, Bot, Shield, Code, CheckCircle2 } from 'lucide-react';
+ import { Persona } from '../types';
+-import { MODEL_PRESETS, applyPreset, checkDuplicateModels, updatePresetsFromFetchedModels, cleanModelName } from '../lib/presets';
+-import { getCachedModels, setCachedModels } from '../lib/modelCache';
++import { MODEL_PRESETS, applyPreset, checkDuplicateModels, updatePresetsFromFetchedModels, cleanModelName, updatePresetsFromMappedModels } from '../lib/presets';
++import { fetchAndProcessModels } from '../lib/modelService';
+ 
+ interface SettingsPanelProps {
+   isOpen: boolean;
+@@ -62,38 +61,21 @@
+   }, [isOpen, apiKey, activeTab]);
+ 
+   const fetchModels = async (forceRefresh = false) => {
+     setIsFetchingModels(true);
+     setFetchStatusMessage('');
+ 
+     try {
+-      const res = await fetch('https://openrouter.ai/api/v1/models?sort=newest');
+-      const data = await res.json();
+-      if (data && data.data && Array.isArray(data.data)) {
+-        setCachedModels(data.data);
+-        updatePresetsFromFetchedModels(data.data);
+-        const models = data.data.map((m: any) => ({
+-          id: m.id,
+-          name: cleanModelName(m.id, m.name)
+-        }));
+-        setAvailableModels(models);
+-        setFetchStatusMessage(`Refreshed ${models.length} live models & updated presets!`);
+-      }
++      const { models, mapped } = await fetchAndProcessModels(forceRefresh);
++      updatePresetsFromMappedModels(mapped, models);
++      const available = models.map((m: any) => ({
++        id: m.id,
++        name: cleanModelName(m.id, m.name)
++      }));
++      setAvailableModels(available);
++      setFetchStatusMessage(forceRefresh ? `Refreshed ${available.length} models & updated presets!` : `Loaded ${available.length} models from cache & updated presets!`);
+     } catch (e) {
+       console.error(e);
+       setFetchStatusMessage('Failed to fetch models from OpenRouter.');
+     } finally {
+       setIsFetchingModels(false);
+     }
