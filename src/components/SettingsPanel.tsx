@@ -64,7 +64,7 @@ export function SettingsPanel({
 
   useEffect(() => {
     if (isOpen && activeTab === 'account') {
-      fetch('/api/openrouter/account', {
+      fetch('/api/council/account', {
         headers: { ...(apiKey ? { 'X-Api-Key-Override': apiKey } : {}) }
       })
       .then(r => r.json())

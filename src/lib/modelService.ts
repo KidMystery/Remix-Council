@@ -74,9 +74,9 @@ export async function refreshModelRecommendations(
   const refreshPromise = (async (): Promise<RefreshRecommendationsResult> => {
     try {
       const [newestRes, throughputRes, latencyRes] = await Promise.all([
-        fetch('https://openrouter.ai/api/v1/models?sort=newest', { signal }),
-        fetch('https://openrouter.ai/api/v1/models?sort=throughput-high-to-low', { signal }),
-        fetch('https://openrouter.ai/api/v1/models?sort=latency-low-to-high', { signal }),
+        fetch('/api/council/models?sort=newest', { signal }),
+        fetch('/api/council/models?sort=throughput-high-to-low', { signal }),
+        fetch('/api/council/models?sort=latency-low-to-high', { signal }),
       ]);
 
       if (!newestRes.ok) {

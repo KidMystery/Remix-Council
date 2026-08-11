@@ -27,7 +27,7 @@ export async function* streamOpenRouter(
   apiKey: string,
   signal?: AbortSignal
 ): AsyncGenerator<string, void, unknown> {
-  const response = await fetch('/api/openrouter', {
+  const response = await fetch('/api/council', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -160,7 +160,7 @@ export async function streamOpenRouterCompletion(options: {
       body.max_tokens = limit;
     }
 
-    return fetch('/api/openrouter', {
+    return fetch('/api/council', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

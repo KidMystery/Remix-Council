@@ -4,13 +4,17 @@ import { createServer as createViteServer } from "vite";
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
   // Middleware to parse JSON bodies
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-  app.post("/api/openrouter", async (req, res) => {
+    app.get("/api/health", (req, res) => {
+    res.json({ status: "ok" });
+  });
+
+app.post("/api/council", async (req, res) => {
     const apiKey = req.headers['x-api-key-override'] || process.env.OPENROUTER_API_KEY;
     if (!apiKey) {
       return res.status(500).json({ error: "OPENROUTER_API_KEY is not set on the server." });
@@ -66,7 +70,18 @@ async function startServer() {
     }
   });
 
-  app.get("/api/openrouter/account", async (req, res) => {
+    app.get("/api/council/models", async (req, res) => {
+    try {
+      const sort = req.query.sort || 'newest';
+      const response = await fetch(`https://openrouter.ai/api/v1/models?sort=${sort}`);
+      const data = await response.json();
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+app.get("/api/council/account", async (req, res) => {
     const apiKey = req.headers['x-api-key-override'] || process.env.OPENROUTER_API_KEY;
     if (!apiKey) {
       return res.status(500).json({ error: "OPENROUTER_API_KEY is not set" });

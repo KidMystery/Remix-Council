@@ -152,7 +152,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     try {
       const savedKey =
         localStorage.getItem('openrouter_api_key') ||
-        (import.meta as any).env.VITE_OPENROUTER_API_KEY ||
+        
         '';
       const savedModels = localStorage.getItem('council_default_models');
       const savedMaxTokens = localStorage.getItem('council_max_tokens');
@@ -181,7 +181,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       };
     } catch {
       return {
-        apiKey: (import.meta as any).env.VITE_OPENROUTER_API_KEY || '',
+        apiKey:  '',
         defaultModels: {
           skeptic: 'google/gemini-2.0-flash-001',
           visionary: 'anthropic/claude-3.5-haiku',
