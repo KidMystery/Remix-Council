@@ -45,8 +45,10 @@ import {
   FallbackEvent,
   computeOrderedBackupList,
 } from '../lib/fallbackManager';
+import { GroundingSourcesCard } from './GroundingSourcesCard';
 import {
   Settings as SettingsIcon,
+  Globe,
   Play,
   Square,
   Copy,
@@ -71,7 +73,7 @@ import {
   PanelLeftClose,
   Search,
   Clock,
-  Loader2,
+  Loader2, Send,
   Edit3,
   Zap,
   Activity,
@@ -82,6 +84,9 @@ import {
   Layers,
   Shuffle,
   ShieldAlert,
+  Eye,
+  EyeOff,
+  Sliders,
 } from 'lucide-react';
 
 interface ThinkingIndicatorProps {
@@ -118,14 +123,14 @@ const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
   }[accentColor];
 
   return (
-    <div className={`p-4 rounded-xl bg-white/80 border ${colorMap.border} space-y-3 animate-pulse shadow-sm`}>
+    <div className={`p-4 rounded-xl bg-white dark:bg-slate-900/80 border ${colorMap.border} space-y-3 animate-pulse shadow-sm`}>
       <div className="flex items-center justify-between text-[11px] font-mono">
         <div className="flex items-center space-x-2">
           <Loader2 size={13} className={`animate-spin ${colorMap.text}`} />
           <span className={`font-semibold ${colorMap.text}`}>{stageLabel}</span>
         </div>
         {model && (
-          <span className="text-[10px] text-slate-500 bg-white px-2 py-0.5 rounded border border-slate-200 font-mono truncate max-w-[140px]">
+          <span className="text-[10px] text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono truncate max-w-[140px]">
             {model}
           </span>
         )}
@@ -164,10 +169,10 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       const defaultModels = savedModels
         ? JSON.parse(savedModels)
         : {
-            skeptic: 'google/gemini-2.0-flash-001',
+            skeptic: 'google/gemini-2.5-flash',
             visionary: 'anthropic/claude-3.5-haiku',
             pragmatist: 'openai/gpt-4o-mini',
-            synthesizer: 'google/gemini-2.0-flash-001',
+            synthesizer: 'google/gemini-2.5-flash',
           };
       return {
         apiKey: savedKey,
@@ -183,10 +188,10 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       return {
         apiKey:  '',
         defaultModels: {
-          skeptic: 'google/gemini-2.0-flash-001',
+          skeptic: 'google/gemini-2.5-flash',
           visionary: 'anthropic/claude-3.5-haiku',
           pragmatist: 'openai/gpt-4o-mini',
-          synthesizer: 'google/gemini-2.0-flash-001',
+          synthesizer: 'google/gemini-2.5-flash',
         },
         temperature: 0.7,
         maxTokens: 4000,
@@ -240,6 +245,16 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   const [query, setQuery] = useState('');
   const [isDeliberating, setIsDeliberating] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [basicMode, setBasicMode] = useState(() => {
+    return localStorage.getItem('council_basic_mode') === 'true';
+  });
+
+  const toggleBasicMode = () => {
+    const next = !basicMode;
+    setBasicMode(next);
+    localStorage.setItem('council_basic_mode', next.toString());
+  };
+
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isSessionListOpen, setIsSessionListOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -324,6 +339,13 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     if (onUpdateSettings) onUpdateSettings(updated);
   };
 
+  const updateEnableSearchGrounding = (enabled: boolean) => {
+    localStorage.setItem('council_search_grounding', enabled.toString());
+    const updated = { ...settings, enableSearchGrounding: enabled };
+    setInternalSettings(updated);
+    if (onUpdateSettings) onUpdateSettings(updated);
+  };
+
   const filteredSessions = sessions.filter((s) => {
     if (!sessionSearchQuery.trim()) return true;
     const q = sessionSearchQuery.toLowerCase();
@@ -370,7 +392,9 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Theme Preference State
-  const [theme, setTheme] = useState<'dark' | 'light' | 'system'>('light');
+  const [theme, setTheme] = useState<'dark' | 'light' | 'system'>(() => {
+    return (localStorage.getItem('council-theme') as 'dark' | 'light' | 'system') || 'light';
+  });
 
   useEffect(() => {
     localStorage.setItem('council-theme', theme);
@@ -565,7 +589,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
   useEffect(() => {
     const models: Record<string, string> = {
-      synthesizer: synthesizer.model || 'google/gemini-2.0-flash-001'
+      synthesizer: synthesizer.model || 'google/gemini-2.5-flash'
     };
     personas.forEach(p => {
       if (p.model) {
@@ -712,17 +736,21 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     let fullSynthesis = '';
 
     try {
-      console.log(`[Synthesis Phase] Initiating stream with model: ${synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.0-flash-001'}`);
+      console.log(`[Synthesis Phase] Initiating stream with model: ${synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash'}`);
       console.log(`[Synthesis Phase] Messages payload length: ${JSON.stringify(chairmanMessages).length} chars`);
       
+      let streamGroundingData: any = undefined;
+
       const streamPromise = streamPersona({
         personaId: 'synthesizer',
         apiKey: settings.apiKey,
-        model: synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.0-flash-001',
+        model: synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash',
         messages: chairmanMessages,
         temperature: 0.5,
         maxTokens: Math.min(Math.max((settings.maxTokens || 4000) * 2, 8000), 8192),
+        enableSearchGrounding: Boolean(settings.enableSearchGrounding || synthesizer.enableSearchGrounding),
         signal,
+        onGrounding: (gData) => { streamGroundingData = gData; },
         onToken: (chunk) => {
           if (!fullSynthesis) {
             console.log(`[Synthesis Phase] First token received for round ${targetRoundId}`);
@@ -740,13 +768,15 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       });
 
       console.log(`[Synthesis Phase] Awaiting stream completion for round ${targetRoundId}...`);
-      await streamPromise;
+      const synthRes = await streamPromise;
       console.log(`[Synthesis Phase] Stream completed successfully. Total length: ${fullSynthesis.length} characters.`);
 
-      dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId: targetRoundId } });
+      const finalSynthGrounding = synthRes?.grounding || streamGroundingData;
+
+      dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId: targetRoundId, grounding: finalSynthGrounding } });
       updateRoundInActiveSession(targetRoundId, (r) => ({
         ...r,
-        synthesis: { ...r.synthesis, content: fullSynthesis, status: 'completed' },
+        synthesis: { ...r.synthesis, content: fullSynthesis, status: 'completed', grounding: finalSynthGrounding },
       }));
       console.log(`[Synthesis Phase] Finished successfully for round ${targetRoundId}`);
       return fullSynthesis;
@@ -792,7 +822,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
     // Stage 1 & 2 Persona Audits
     activePersonas.forEach((p) => {
-      const selectedModelId = p.model || settings.defaultModels[p.id] || 'google/gemini-2.0-flash-001';
+      const selectedModelId = p.model || settings.defaultModels[p.id] || 'google/gemini-2.5-flash';
       const s1Resp = stage1Outputs[p.id];
       const resolvedModelId = s1Resp?.model || selectedModelId;
       const authorOrg = getAuthorOrganization(resolvedModelId);
@@ -821,7 +851,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     });
 
     // Synthesizer Audit
-    const synthSelectedModel = synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.0-flash-001';
+    const synthSelectedModel = synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash';
     const synthResolvedModel = synthesisResponse.model || synthSelectedModel;
     const synthPromptTokens = estimateTokens(userQuery);
     const synthCompletionTokens = estimateTokens(synthesisResponse.content || '');
@@ -989,15 +1019,18 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         });
 
         let fullContent = '';
+        let streamGroundingData: any = undefined;
 
-        await streamPersona({
+        const res1 = await streamPersona({
           personaId,
           apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[personaId] || 'google/gemini-2.0-flash-001',
+          model: persona.model || settings.defaultModels[personaId] || 'google/gemini-2.5-flash',
           messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens,
+          enableSearchGrounding: Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding),
           signal: abortController.signal,
+          onGrounding: (gData) => { streamGroundingData = gData; },
           onToken: (chunk) => {
             fullContent += chunk;
             dispatch({
@@ -1021,9 +1054,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           },
         });
 
+        const finalGrounding1 = res1?.grounding || streamGroundingData;
+
         dispatch({
           type: 'FINISH_STAGE1_PERSONA',
-          payload: { roundId, personaId, content: fullContent },
+          payload: { roundId, personaId, content: fullContent, grounding: finalGrounding1 },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -1032,7 +1067,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage1: {
               ...r.deliberation?.stage1,
-              [personaId]: { personaId, content: fullContent, status: 'completed' },
+              [personaId]: { personaId, content: fullContent, status: 'completed', grounding: finalGrounding1 },
             },
           },
         }));
@@ -1080,15 +1115,18 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         });
 
         let fullContent = '';
+        let streamGroundingData2: any = undefined;
 
-        await streamPersona({
+        const res2 = await streamPersona({
           personaId,
           apiKey: settings.apiKey,
           model: persona.model || settings.defaultModels[personaId] || 'google/gemini-2.5-flash',
           messages: stage2Messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens,
+          enableSearchGrounding: Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding),
           signal: abortController.signal,
+          onGrounding: (gData) => { streamGroundingData2 = gData; },
           onToken: (chunk) => {
             fullContent += chunk;
             dispatch({
@@ -1112,9 +1150,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           },
         });
 
+        const finalGrounding2 = res2?.grounding || streamGroundingData2;
+
         dispatch({
           type: 'FINISH_STAGE2_PERSONA',
-          payload: { roundId, personaId, content: fullContent },
+          payload: { roundId, personaId, content: fullContent, grounding: finalGrounding2 },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -1123,7 +1163,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage2: {
               ...r.deliberation?.stage2,
-              [personaId]: { personaId, content: fullContent, status: 'completed' },
+              [personaId]: { personaId, content: fullContent, status: 'completed', grounding: finalGrounding2 },
             },
           },
         }));
@@ -1243,7 +1283,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             await streamPersona({
               personaId: persona.id,
               apiKey: settings.apiKey,
-              model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.0-flash-001',
+              model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.5-flash',
               messages,
               temperature: settings.temperature,
               maxTokens: settings.maxTokens,
@@ -1347,7 +1387,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
               await streamPersona({
                 personaId: persona.id,
                 apiKey: settings.apiKey,
-                model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.0-flash-001',
+                model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.5-flash',
                 messages: stage2Messages,
                 temperature: settings.temperature,
                 maxTokens: settings.maxTokens,
@@ -1458,6 +1498,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       });
 
       let content = '';
+      let streamGroundingData: any = undefined;
 
       try {
         const res = await streamPersonaWithFallback({
@@ -1465,15 +1506,17 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           personaName: persona.name,
           roundId,
           apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.0-flash-001',
+          model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.5-flash',
           messages,
           temperature: settings.temperature,
           maxTokens: mode === 'quick_panel' ? (settings.quickPanelMaxTokens || 350) : settings.maxTokens,
+          enableSearchGrounding: Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding),
           signal: perCallSignal,
           activePersonas,
           synthesizer,
           isFreeOnlyPreset: activePersonas.every((p) => (p.model || '').includes(':free')),
           onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
+          onGrounding: (gData) => { streamGroundingData = gData; },
           onToken: (chunk) => {
             content += chunk;
             dispatch({
@@ -1500,15 +1543,18 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           },
         });
 
+        const finalGrounding = res?.grounding || streamGroundingData;
+
         stage1Outputs[persona.id] = {
           personaId: persona.id,
-          content: res.content,
+          content: res.content || content,
           status: 'completed',
+          grounding: finalGrounding,
         };
 
         dispatch({
           type: 'FINISH_STAGE1_PERSONA',
-          payload: { roundId, personaId: persona.id, content },
+          payload: { roundId, personaId: persona.id, content: res.content || content, grounding: finalGrounding },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -1517,7 +1563,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage1: {
               ...r.deliberation?.stage1,
-              [persona.id]: { personaId: persona.id, content, status: 'completed' },
+              [persona.id]: { personaId: persona.id, content: res.content || content, status: 'completed', grounding: finalGrounding },
             },
           },
         }));
@@ -1608,6 +1654,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       }
 
       let content = '';
+      let streamGroundingData2: any = undefined;
 
       try {
         const res = await streamPersonaWithFallback({
@@ -1615,15 +1662,17 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           personaName: persona.name,
           roundId,
           apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.0-flash-001',
+          model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.5-flash',
           messages: stage2Messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens,
+          enableSearchGrounding: Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding),
           signal: abortController.signal,
           activePersonas,
           synthesizer,
           isFreeOnlyPreset: activePersonas.every((p) => (p.model || '').includes(':free')),
           onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
+          onGrounding: (gData) => { streamGroundingData2 = gData; },
           onToken: (chunk) => {
             content += chunk;
             dispatch({
@@ -1647,15 +1696,18 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           },
         });
 
+        const finalGrounding2 = res?.grounding || streamGroundingData2;
+
         stage2Outputs[persona.id] = {
           personaId: persona.id,
-          content: res.content,
+          content: res.content || content,
           status: 'completed',
+          grounding: finalGrounding2,
         };
 
         dispatch({
           type: 'FINISH_STAGE2_PERSONA',
-          payload: { roundId, personaId: persona.id, content },
+          payload: { roundId, personaId: persona.id, content: res.content || content, grounding: finalGrounding2 },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -1664,7 +1716,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage2: {
               ...r.deliberation?.stage2,
-              [persona.id]: { personaId: persona.id, content, status: 'completed' },
+              [persona.id]: { personaId: persona.id, content: res.content || content, status: 'completed', grounding: finalGrounding2 },
             },
           },
         }));
@@ -1761,7 +1813,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       ];
 
       let fullSynthesis = '';
-      const synthModel = synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.0-flash-001';
+      const synthModel = synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash';
 
       await streamPersona({
         personaId: 'synthesizer',
@@ -1859,9 +1911,8 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     setAttachedFiles([]);
     setIsDeliberating(true);
 
+    const mode = resolveExecutionMode(settings.executionMode || 'auto', currentQuery, textFiles);
     const roundId = `round-${Date.now()}`;
-    const abortController = new AbortController();
-    abortControllerRef.current = abortController;
 
     const initialStage1: Record<string, PersonaResponse> = {};
     const initialStage2: Record<string, PersonaResponse> = {};
@@ -1874,6 +1925,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       id: roundId,
       userQuery: currentQuery,
       timestamp: Date.now(),
+      resolvedMode: mode,
       deliberation: {
         stage1: initialStage1,
         stage2: initialStage2,
@@ -1882,300 +1934,32 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       attachedImages: imageFiles.length > 0 ? imageFiles : undefined,
     };
 
-    // Append round via reducer & active session manager
     dispatch({ type: 'ADD_ROUND', payload: newRound });
     addRoundToActiveSession(newRound);
 
-    // PHASE 1: Initial Proposals (using Archivist Context with Hierarchical Memory)
-    const stage1Outputs: Record<string, PersonaResponse> = {};
-
-    const stage1Promises = activePersonas.map(async (persona) => {
-      const messages = await buildArchivistContext({
-        systemPrompt: persona.systemPrompt,
-        userQuery: currentQuery,
-        attachedImages: newRound.attachedImages,
-        rounds,
-        apiKey: settings.apiKey,
-        signal: abortController.signal,
-      });
-
-      let content = '';
-
-      try {
-        await streamPersona({
-          personaId: persona.id,
-          apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.0-flash-001',
-          messages,
-          temperature: settings.temperature,
-          maxTokens: settings.maxTokens,
-          signal: abortController.signal,
-          onToken: (chunk) => {
-            content += chunk;
-            dispatch({
-              type: 'UPDATE_STAGE1_TOKEN',
-              payload: { roundId, personaId: persona.id, chunk },
-            });
-            updateRoundInActiveSession(roundId, (r) => {
-              const existing = r.deliberation?.stage1?.[persona.id];
-              return {
-                ...r,
-                deliberation: {
-                  ...r.deliberation,
-                  stage1: {
-                    ...r.deliberation?.stage1,
-                    [persona.id]: {
-                      ...existing,
-                      content: (existing?.content || '') + chunk,
-                    },
-                  },
-                },
-              };
-            });
-          },
-        });
-
-        stage1Outputs[persona.id] = {
-          personaId: persona.id,
-          content,
-          status: 'completed',
-        };
-
-        dispatch({
-          type: 'FINISH_STAGE1_PERSONA',
-          payload: { roundId, personaId: persona.id, content },
-        });
-
-        updateRoundInActiveSession(roundId, (r) => {
-          const existing = r.deliberation?.stage1?.[persona.id];
-          return {
-            ...r,
-            deliberation: {
-              ...r.deliberation,
-              stage1: {
-                ...r.deliberation?.stage1,
-                [persona.id]: { ...existing, content, status: 'completed' },
-              },
-            },
-          };
-        });
-      } catch (err: any) {
-        if (err.name === 'AbortError') return;
-        const errorMsg = err.message || 'Failed Stage 1 query';
-        stage1Outputs[persona.id] = {
-          personaId: persona.id,
-          content,
-          status: 'error',
-          error: errorMsg,
-        };
-        dispatch({
-          type: 'ERROR_STAGE1_PERSONA',
-          payload: { roundId, personaId: persona.id, error: errorMsg },
-        });
-        updateRoundInActiveSession(roundId, (r) => {
-          const existing = r.deliberation?.stage1?.[persona.id];
-          return {
-            ...r,
-            deliberation: {
-              ...r.deliberation,
-              stage1: {
-                ...r.deliberation?.stage1,
-                [persona.id]: {
-                  ...existing,
-                  status: 'error',
-                  error: errorMsg,
-                },
-              },
-            },
-          };
-        });
-      }
-    });
-
-    await Promise.allSettled(stage1Promises);
-
-    if (abortController.signal.aborted) return;
-
-    // Single Council Member Check: Skip Stage 2 Peer Review & Stage 3 Synthesis
-    if (activePersonas.length === 1) {
-      setIsDeliberating(false);
-      abortControllerRef.current = null;
-      return;
-    }
-
-    // PHASE 2: Peer Review & Cross-Exam
-    const activeStage2: Record<string, PersonaResponse> = {};
-    activePersonas.forEach((p) => {
-      activeStage2[p.id] = { personaId: p.id, content: '', status: 'streaming' };
-    });
-
-    dispatch({ type: 'START_STAGE2', payload: { roundId, initialStage2: activeStage2 } });
-    updateRoundInActiveSession(roundId, (r) => ({
-      ...r,
-      deliberation: {
-        ...r.deliberation,
-        stage2: activeStage2,
-      },
-    }));
-
-    const stage2Outputs: Record<string, PersonaResponse> = {};
-
-    const stage2Promises = activePersonas.map(async (persona) => {
-      const peerProposals = Object.values(stage1Outputs)
-        .filter((resp) => resp.personaId !== persona.id && resp.personaId !== 'synthesizer')
-        .map((resp) => {
-          const p = personas.find((item) => item.id === resp.personaId);
-          return `### ${p?.name || resp.personaId} (${p?.role}):\n${resp.content || '[No output/Error]'}`;
-        })
-        .join('\n\n');
-
-      const queryContentStr = `User Question: "${currentQuery}"\n\n--- Initial Stage 1 Proposals from Other Council Members ---\n${peerProposals}\n\nTask: Peer review the proposals above. Point out unaddressed risks, test assumptions, highlight valuable ideas, and refine your position.`;
-
-      const stage2Messages: { role: 'system' | 'user' | 'assistant'; content: any }[] = [
-        { role: 'system', content: persona.systemPrompt },
-      ];
-      
-      if (newRound.attachedImages && newRound.attachedImages.length > 0) {
-        stage2Messages.push({
-          role: 'user' as const,
-          content: [
-            { type: 'text', text: queryContentStr },
-            ...newRound.attachedImages.map(img => ({ type: 'image_url', image_url: { url: img.url } }))
-          ] as any
-        });
-      } else {
-        stage2Messages.push({
-          role: 'user' as const,
-          content: queryContentStr as any
-        });
-      }
-
-      let content = '';
-
-      try {
-        await streamPersona({
-          personaId: persona.id,
-          apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.0-flash-001',
-          messages: stage2Messages,
-          temperature: settings.temperature,
-          maxTokens: settings.maxTokens,
-          signal: abortController.signal,
-          onToken: (chunk) => {
-            content += chunk;
-            dispatch({
-              type: 'UPDATE_STAGE2_TOKEN',
-              payload: { roundId, personaId: persona.id, chunk },
-            });
-            updateRoundInActiveSession(roundId, (r) => {
-              const existing = r.deliberation?.stage2?.[persona.id];
-              return {
-                ...r,
-                deliberation: {
-                  ...r.deliberation,
-                  stage2: {
-                    ...r.deliberation?.stage2,
-                    [persona.id]: {
-                      ...existing,
-                      content: (existing?.content || '') + chunk,
-                    },
-                  },
-                },
-              };
-            });
-          },
-        });
-
-        stage2Outputs[persona.id] = {
-          personaId: persona.id,
-          content,
-          status: 'completed',
-        };
-
-        dispatch({
-          type: 'FINISH_STAGE2_PERSONA',
-          payload: { roundId, personaId: persona.id, content },
-        });
-
-        updateRoundInActiveSession(roundId, (r) => {
-          const existing = r.deliberation?.stage2?.[persona.id];
-          return {
-            ...r,
-            deliberation: {
-              ...r.deliberation,
-              stage2: {
-                ...r.deliberation?.stage2,
-                [persona.id]: { ...existing, content, status: 'completed' },
-              },
-            },
-          };
-        });
-      } catch (err: any) {
-        if (err.name === 'AbortError') return;
-        const errorMsg = err.message || 'Failed Stage 2 peer review';
-        stage2Outputs[persona.id] = {
-          personaId: persona.id,
-          content,
-          status: 'error',
-          error: errorMsg,
-        };
-        dispatch({
-          type: 'ERROR_STAGE2_PERSONA',
-          payload: { roundId, personaId: persona.id, error: errorMsg },
-        });
-        updateRoundInActiveSession(roundId, (r) => {
-          const existing = r.deliberation?.stage2?.[persona.id];
-          return {
-            ...r,
-            deliberation: {
-              ...r.deliberation,
-              stage2: {
-                ...r.deliberation?.stage2,
-                [persona.id]: {
-                  ...existing,
-                  status: 'error',
-                  error: errorMsg,
-                },
-              },
-            },
-          };
-        });
-      }
-    });
-
-    await Promise.allSettled(stage2Promises);
-
-    if (abortController.signal.aborted) return;
-
-    // PHASE 3: Synthesis
-    try {
-      await runSynthesisPhase(roundId, currentQuery, newRound.attachedImages, stage1Outputs, stage2Outputs, abortController.signal);
-    } finally {
-      setIsDeliberating(false);
-      abortControllerRef.current = null;
-    }
+    await runRoundExecution(roundId, currentQuery, imageFiles.length > 0 ? imageFiles : undefined, mode);
   };
 
   return (
-    <div className="flex h-screen bg-[#f5f5f0] text-slate-800 font-sans antialiased overflow-hidden selection:bg-cyan-500/20 selection:text-cyan-200">
+    <div className="flex h-screen bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 dark:text-slate-200 font-sans antialiased overflow-hidden selection:bg-cyan-500/20 selection:text-cyan-200">
       {/* Sidebar for Deliberation Threads */}
       <aside
         className={`${
           isSidebarOpen ? 'w-72 border-r' : 'w-0 border-r-0'
-        } shrink-0 bg-white/95 backdrop-blur-md border-slate-200/80 transition-all duration-300 ease-in-out flex flex-col h-full z-40 overflow-hidden relative`}
+        } shrink-0 bg-white dark:bg-slate-900/95 dark:bg-slate-900/95 backdrop-blur-md border-slate-200 dark:border-slate-700/80 dark:border-slate-800 transition-all duration-300 ease-in-out flex flex-col h-full z-40 overflow-hidden relative`}
       >
         {/* Sidebar Header */}
-        <div className="p-3.5 border-b border-slate-200/80 flex items-center justify-between gap-2">
+        <div className="p-3.5 border-b border-slate-200 dark:border-slate-700/80 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <MessageSquare size={16} className="text-cyan-400 shrink-0" />
-            <span className="font-bold text-xs uppercase tracking-wider text-slate-700 font-mono truncate">
+            <span className="font-bold text-xs uppercase tracking-wider text-slate-700 dark:text-slate-200 font-mono truncate">
               Deliberation Threads
             </span>
           </div>
           <button
             type="button"
             onClick={() => setIsSidebarOpen(false)}
-            className="p-1 rounded-lg text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors shrink-0"
+            className="p-1 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 hover:bg-slate-100 transition-colors shrink-0"
             title="Close sidebar"
           >
             <PanelLeftClose size={16} />
@@ -2183,7 +1967,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         </div>
 
         {/* Sidebar Action & Search */}
-        <div className="p-3 border-b border-slate-200/50 space-y-2">
+        <div className="p-3 border-b border-slate-200 dark:border-slate-700/50 space-y-2">
           <button
             type="button"
             onClick={() => createNewSession()}
@@ -2193,19 +1977,19 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
           </button>
 
           <div className="relative">
-            <Search size={12} className="absolute left-2.5 top-2.5 text-slate-500" />
+            <Search size={12} className="absolute left-2.5 top-2.5 text-slate-500 dark:text-slate-400" />
             <input
               type="text"
               placeholder="Filter threads..."
               value={sessionSearchQuery}
               onChange={(e) => setSessionSearchQuery(e.target.value)}
-              className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-[#f5f5f0] border border-slate-200 text-xs text-slate-700 placeholder-slate-500 focus:outline-none focus:border-cyan-500/50 font-sans"
+              className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs text-slate-700 dark:text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500/50 font-sans"
             />
             {sessionSearchQuery && (
               <button
                 type="button"
                 onClick={() => setSessionSearchQuery('')}
-                className="absolute right-2 top-2 text-slate-500 hover:text-slate-600"
+                className="absolute right-2 top-2 text-slate-500 dark:text-slate-400 hover:text-slate-600"
               >
                 <X size={12} />
               </button>
@@ -2216,7 +2000,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         {/* Thread List */}
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
           {filteredSessions.length === 0 ? (
-            <div className="text-xs text-slate-500 text-center py-8 font-mono">
+            <div className="text-xs text-slate-500 dark:text-slate-400 text-center py-8 font-mono">
               {sessionSearchQuery ? 'No matching threads' : 'No saved threads'}
             </div>
           ) : (
@@ -2228,13 +2012,13 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                   onClick={() => selectSession(s.id)}
                   className={`group relative p-2.5 rounded-lg text-xs cursor-pointer transition-all flex items-start justify-between gap-2 border ${
                     isActive
-                      ? 'bg-slate-100/90 border-cyan-500/50 text-slate-800 shadow-sm'
-                      : 'bg-[#f5f5f0]/40 hover:bg-slate-100/50 border-slate-200/40 text-slate-500 hover:text-slate-700'
+                      ? 'bg-slate-100/90 border-cyan-500/50 text-slate-800 dark:text-slate-100 shadow-sm'
+                      : 'bg-slate-50 dark:bg-slate-900/40 hover:bg-slate-100/50 border-slate-200 dark:border-slate-700/40 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
                   }`}
                 >
                   <div className="min-w-0 flex-1 space-y-1">
                     <div className="font-medium truncate leading-snug">{s.title || 'Untitled Session'}</div>
-                    <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono">
+                    <div className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400 font-mono">
                       <span className="flex items-center gap-1">
                         <Clock size={10} />
                         {new Date(s.updatedAt || s.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
@@ -2252,7 +2036,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                         deleteSession(s.id);
                       }
                     }}
-                    className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 p-1 rounded hover:bg-red-950/40 transition-all shrink-0"
+                    className="opacity-0 group-hover:opacity-100 text-slate-500 dark:text-slate-400 hover:text-red-400 p-1 rounded hover:bg-red-950/40 transition-all shrink-0"
                     title="Delete thread"
                   >
                     <Trash2 size={13} />
@@ -2265,7 +2049,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
 
         {/* Sidebar Footer */}
         {sessions.length > 0 && (
-          <div className="p-2 border-t border-slate-200/80 bg-white/60">
+          <div className="p-2 border-t border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-900/60">
             <button
               type="button"
               onClick={() => {
@@ -2284,13 +2068,13 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       {/* Main Workspace Area */}
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-y-auto relative" onScroll={handleMainScroll}>
         {/* Header */}
-        <header className="sticky top-0 z-30 bg-[#f5f5f0]/90 backdrop-blur-md border-b border-slate-200/80 px-4 py-3 flex items-center justify-between">
+        <header className="sticky top-0 z-30 bg-slate-50 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-700/80 px-4 py-3 flex items-center justify-between">
           <div className="flex items-center space-x-3">
             {!isSidebarOpen && (
               <button
                 type="button"
                 onClick={() => setIsSidebarOpen(true)}
-                className="p-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 transition-colors flex items-center gap-1.5 text-xs font-mono"
+                className="p-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 border border-slate-200 dark:border-slate-700 text-slate-600 transition-colors flex items-center gap-1.5 text-xs font-mono"
                 title="Open Deliberation Threads"
               >
                 <PanelLeft size={16} className="text-cyan-400" />
@@ -2301,41 +2085,93 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               <Sparkles size={18} />
             </div>
             <div>
-              <h1 className="font-bold text-base tracking-tight text-slate-800 flex items-center gap-2">
+              <h1 className="font-bold text-base tracking-tight text-slate-800 dark:text-slate-100 flex items-center gap-2">
                 AI Council Chamber
               </h1>
-              <p className="text-[11px] text-slate-500 flex items-center gap-2">
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
                 <span>Multi-Model Deliberation Engine</span>
-                <span
-                  className="inline-flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded-md border border-emerald-800/60 shadow-sm"
-                  title={`Total Tokens: ${sessionCostMetrics.totalTokens.toLocaleString()}\n• Prompt Tokens: ${sessionCostMetrics.promptTokens.toLocaleString()} (${formatCost(sessionCostMetrics.promptCost)})\n• Completion Tokens: ${sessionCostMetrics.completionTokens.toLocaleString()} (${formatCost(sessionCostMetrics.completionCost)})`}
-                >
-                  <DollarSign size={11} className="text-emerald-400" />
-                  <span className="font-bold">{formatCost(sessionCostMetrics.totalCost)}</span>
-                  <span className="text-slate-500 text-[9px] border-l border-emerald-800/80 pl-1.5">
-                    {sessionCostMetrics.promptTokens > 1000 ? `${(sessionCostMetrics.promptTokens / 1000).toFixed(1)}k in` : `${sessionCostMetrics.promptTokens} in`} / {sessionCostMetrics.completionTokens > 1000 ? `${(sessionCostMetrics.completionTokens / 1000).toFixed(1)}k out` : `${sessionCostMetrics.completionTokens} out`}
+                {!basicMode && (
+                  <span
+                    className="inline-flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded-md border border-emerald-800/60 shadow-sm"
+                    title={`Total Tokens: ${sessionCostMetrics.totalTokens.toLocaleString()}
+• Prompt Tokens: ${sessionCostMetrics.promptTokens.toLocaleString()} (${formatCost(sessionCostMetrics.promptCost)})
+• Completion Tokens: ${sessionCostMetrics.completionTokens.toLocaleString()} (${formatCost(sessionCostMetrics.completionCost)})`}
+                  >
+                    <DollarSign size={11} className="text-emerald-400" />
+                    <span className="font-bold">{formatCost(sessionCostMetrics.totalCost)}</span>
+                    <span className="text-slate-500 dark:text-slate-400 text-[9px] border-l border-emerald-800/80 pl-1.5">
+                      {sessionCostMetrics.promptTokens > 1000 ? `${(sessionCostMetrics.promptTokens / 1000).toFixed(1)}k in` : `${sessionCostMetrics.promptTokens} in`} / {sessionCostMetrics.completionTokens > 1000 ? `${(sessionCostMetrics.completionTokens / 1000).toFixed(1)}k out` : `${sessionCostMetrics.completionTokens} out`}
+                    </span>
                   </span>
-                </span>
+                )}
               </p>
             </div>
           </div>
 
           {/* Header Actions */}
           <div className="flex items-center space-x-2">
+            {/* Google Search Grounding Quick Toggle */}
             <button
-              onClick={() => createNewSession()}
-              className="p-2 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 transition-colors"
-              title="New Deliberation"
+              type="button"
+              onClick={() => updateEnableSearchGrounding(!settings.enableSearchGrounding)}
+              className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-sm ${
+                settings.enableSearchGrounding
+                  ? 'bg-emerald-500/10 dark:bg-emerald-950/60 border-emerald-500/50 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
+              title={settings.enableSearchGrounding ? "Search Grounding active: Gemini models will fact-check using live Google Search" : "Enable Search Grounding for live web fact-checking"}
             >
-              <Plus size={16} />
+              <Globe size={14} className={settings.enableSearchGrounding ? 'text-emerald-500 shrink-0 animate-pulse' : 'text-slate-400 shrink-0'} />
+              <span className="hidden md:inline">Google Search</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${settings.enableSearchGrounding ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 font-bold' : 'bg-slate-200 dark:bg-slate-800 text-slate-500'}`}>
+                {settings.enableSearchGrounding ? 'ON' : 'OFF'}
+              </span>
             </button>
 
+            {/* Basic Mode / Detailed Mode Toggle */}
             <button
+              type="button"
+              onClick={toggleBasicMode}
+              className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-sm ${
+                basicMode
+                  ? 'bg-cyan-500/10 dark:bg-cyan-950/60 border-cyan-500/50 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-500/30'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
+              title={basicMode ? "Basic Mode active (showing Consensus only). Click to switch to Detailed Mode." : "Detailed Mode active (showing full debate & peer review). Click to switch to Basic Mode."}
+            >
+              {basicMode ? (
+                <>
+                  <Eye size={14} className="text-cyan-500 shrink-0" />
+                  <span>Basic Mode</span>
+                </>
+              ) : (
+                <>
+                  <EyeOff size={14} className="text-slate-400 shrink-0" />
+                  <span>Detailed Mode</span>
+                </>
+              )}
+            </button>
+
+            {/* Settings Button */}
+            <button
+              type="button"
               onClick={() => setIsSettingsOpen(true)}
-              className="p-2 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 transition-colors relative"
+              className="px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm"
               title="Open Settings"
             >
-              <SettingsIcon size={16} />
+              <SettingsIcon size={14} className="text-slate-500 dark:text-slate-400" />
+              <span>Settings</span>
+            </button>
+
+            {/* New Thread Button */}
+            <button
+              type="button"
+              onClick={() => createNewSession()}
+              className="p-1.5 sm:px-3 sm:py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm"
+              title="Start New Deliberation Thread"
+            >
+              <Plus size={15} />
+              <span className="hidden sm:inline">New Thread</span>
             </button>
           </div>
         </header>
@@ -2343,6 +2179,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       {/* Main Content Feed */}
       <main className="flex-1 max-w-5xl w-full mx-auto p-4 md:p-6 space-y-6 pb-32">
         {(() => {
+          if (basicMode) return null;
           const activePersonas = personas.filter((p) => p.enabled !== false);
           const firstIncomplete = rounds.find((r) => getRoundIncompleteStage(r, activePersonas).isIncomplete);
           if (!firstIncomplete) return null;
@@ -2371,12 +2208,12 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
 
         {rounds.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center space-y-4">
-            <div className="w-16 h-16 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-cyan-400 shadow-xl">
+            <div className="w-16 h-16 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-cyan-400 shadow-xl">
               <Sparkles size={32} />
             </div>
             <div className="max-w-md space-y-2">
-              <h2 className="text-xl font-bold text-slate-700">Convened for Deliberation</h2>
-              <p className="text-xs text-slate-500 leading-relaxed">
+              <h2 className="text-xl font-bold text-slate-700 dark:text-slate-200">Convened for Deliberation</h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
                 Submit any question or complex decision. A council of distinct AI personas will analyze it across 3 structured stages to build synthesis and consensus.
               </p>
             </div>
@@ -2393,7 +2230,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                       setCollapsedRoundIds(new Set(rounds.slice(0, -1).map(r => r.id)));
                     }
                   }}
-                  className="text-xs font-mono text-slate-500 hover:text-slate-700 transition-colors flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-white/50 hover:bg-slate-100/80 border border-slate-200"
+                  className="text-xs font-mono text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 transition-colors flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-white dark:bg-slate-900/50 hover:bg-slate-100/80 border border-slate-200 dark:border-slate-700"
                 >
                   {collapsedRoundIds.size > 0 ? (
                     <><ChevronDown size={14} /> Show All History</>
@@ -2412,10 +2249,10 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                 : round.userQuery;
 
             return (
-            <div key={round.id} className="space-y-6 border-b border-slate-200/80 pb-8 last:border-0">
+            <div key={round.id} className="space-y-6 border-b border-slate-200 dark:border-slate-700/80 pb-8 last:border-0">
               {/* User Query Banner */}
               <div 
-                className="p-4 rounded-xl bg-white/90 hover:bg-slate-100/90 border border-slate-200 flex items-start justify-between space-x-4 shadow-md transition-colors cursor-pointer"
+                className="p-4 rounded-xl bg-white dark:bg-slate-900/90 dark:bg-slate-800/90 hover:bg-slate-100/90 border border-slate-200 dark:border-slate-700 flex items-start justify-between space-x-4 shadow-md transition-colors cursor-pointer"
                 onClick={() => toggleRoundCollapse(round.id)}
               >
                 <div className="space-y-1 flex-1 min-w-0">
@@ -2430,7 +2267,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                         setCopiedId(`prompt-${round.id}`);
                         setTimeout(() => setCopiedId(null), 2000);
                       }}
-                      className="text-slate-500 hover:text-slate-600 transition-colors flex items-center justify-center"
+                      className="text-slate-500 dark:text-slate-400 hover:text-slate-600 transition-colors flex items-center justify-center"
                       title="Copy prompt"
                     >
                       {copiedId === `prompt-${round.id}` ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
@@ -2459,7 +2296,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                             <button
                               onClick={() => reRunRoundDeliberation(round.id)}
                               disabled={isDeliberating}
-                              className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 hover:text-slate-700 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200/60 transition-colors disabled:opacity-50"
+                              className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700/60 transition-colors disabled:opacity-50"
                               title="Re-run all stages from scratch"
                             >
                               <RefreshCw size={10} />
@@ -2468,7 +2305,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                             <button
                               onClick={() => handleEditPrompt(round.id)}
                               disabled={isDeliberating}
-                              className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 hover:text-slate-700 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200/60 transition-colors disabled:opacity-50"
+                              className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700/60 transition-colors disabled:opacity-50"
                               title="Edit this prompt"
                             >
                               <Edit3 size={10} />
@@ -2495,7 +2332,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                           <button
                             onClick={() => reRunRoundDeliberation(round.id)}
                             disabled={isDeliberating}
-                            className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 hover:text-cyan-300 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200/60 transition-colors disabled:opacity-50"
+                            className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 dark:text-slate-400 hover:text-cyan-300 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700/60 transition-colors disabled:opacity-50"
                             title="Re-run deliberation for this query"
                           >
                             <RefreshCw size={10} />
@@ -2504,7 +2341,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                           <button
                             onClick={() => handleEditPrompt(round.id)}
                             disabled={isDeliberating}
-                            className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 hover:text-cyan-300 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200/60 transition-colors disabled:opacity-50"
+                            className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 dark:text-slate-400 hover:text-cyan-300 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700/60 transition-colors disabled:opacity-50"
                             title="Edit this prompt"
                           >
                             <Edit3 size={10} />
@@ -2527,16 +2364,16 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                       );
                     })()}
                   </div>
-                  <p className={`text-sm font-semibold text-slate-800 ${isCollapsed ? 'truncate' : 'line-clamp-3'}`}>
+                  <p className={`text-sm font-semibold text-slate-800 dark:text-slate-100 ${isCollapsed ? 'truncate' : 'line-clamp-3'}`}>
                     {isCollapsed ? (displayQuery.length > 80 ? displayQuery.substring(0, 80) + '...' : displayQuery) : displayQuery}
                   </p>
                   {!isCollapsed && round.attachedImages && round.attachedImages.length > 0 && (
                     <div className="flex flex-wrap gap-2 mt-2">
                       {round.attachedImages.map((img, i) => (
-                        <div key={i} className="relative group rounded border border-slate-200 bg-[#f5f5f0] overflow-hidden">
+                        <div key={i} className="relative group rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 overflow-hidden">
                           <img src={img.url} alt={img.name} className="w-12 h-12 object-cover" />
                           <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-50">
-                            <img src={img.url} alt={img.name} className="max-w-[300px] max-h-[300px] object-contain rounded border border-slate-200 shadow-2xl bg-[#f5f5f0]" />
+                            <img src={img.url} alt={img.name} className="max-w-[300px] max-h-[300px] object-contain rounded border border-slate-200 dark:border-slate-700 shadow-2xl bg-slate-50 dark:bg-slate-900" />
                           </div>
                         </div>
                       ))}
@@ -2544,33 +2381,39 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                   )}
                 </div>
                 <div className="flex flex-col items-end gap-2 shrink-0">
-                  <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono whitespace-nowrap">
                     {new Date(round.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
-                  {isCollapsed ? <ChevronDown size={14} className="text-slate-500" /> : <ChevronUp size={14} className="text-slate-500" />}
+                  {isCollapsed ? <ChevronDown size={14} className="text-slate-500 dark:text-slate-400" /> : <ChevronUp size={14} className="text-slate-500 dark:text-slate-400" />}
                 </div>
               </div>
 
               {!isCollapsed && (
                 <>
               {/* Stage 1: Initial Proposals / Quick Panel Answers */}
+              {!basicMode && (
               <div className="space-y-3 min-w-0">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 flex items-center gap-2">
+                  <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
                     {round.resolvedMode === 'quick_panel' ? (
                       <span className="text-amber-300 flex items-center gap-1.5">
                         <Zap size={13} className="text-amber-400" />
-                        Quick Panel Responses
+                        Stage 1: Quick Panel Responses
                       </span>
                     ) : Object.keys(round.deliberation?.stage1 || {}).length <= 1 ? (
-                      'Single Council Member Evaluation'
+                      'Stage 1: Single Council Member Evaluation'
                     ) : (
                       'Stage 1: Initial Proposals'
                     )}
+                    {basicMode && (
+                      <span className="text-[10px] lowercase font-normal px-2 py-0.5 rounded bg-cyan-950/40 text-cyan-400 border border-cyan-800/50 ml-1">
+                        ✓ {Object.keys(round.deliberation?.stage1 || {}).length} responses logged
+                      </span>
+                    )}
                   </h3>
                 </div>
-                <div className="flex flex-col gap-3 md:gap-4 min-w-0 w-full transition-all duration-300 ease-in-out">
+                <div className={`flex flex-col gap-3 md:gap-4 min-w-0 w-full transition-all duration-300 ease-in-out ${basicMode ? "hidden" : ""}`}>
                   {personas
                     .filter((persona) => round.deliberation?.stage1?.[persona.id] || persona.enabled !== false)
                     .map((persona) => {
@@ -2579,15 +2422,15 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                       return (
                         <div
                           key={persona.id}
-                          className={`p-4 sm:p-5 rounded-xl bg-white/90 dark:bg-white/80 border ${persona.color} flex flex-col justify-between space-y-4 shadow-sm hover:shadow-md transition-all duration-200 min-w-0 max-w-full overflow-hidden break-words h-full`}
+                          className={`p-4 sm:p-5 rounded-xl bg-white dark:bg-slate-900/90 dark:bg-slate-800/90 dark:bg-white dark:bg-slate-900/80 border ${persona.color} flex flex-col justify-between space-y-4 shadow-sm hover:shadow-md transition-all duration-200 min-w-0 max-w-full overflow-hidden break-words h-full`}
                         >
                           <div className="space-y-3 min-w-0">
-                            <div className="flex items-center justify-between border-b border-slate-200/60 pb-2.5 min-w-0 gap-2">
+                            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-700/60 pb-2.5 min-w-0 gap-2">
                               <div className="flex items-center space-x-2.5 min-w-0 truncate">
                                 <span className="text-xl shrink-0">{persona.avatar}</span>
                                 <div className="min-w-0 truncate">
-                                  <h3 className="font-bold text-sm text-slate-800 leading-tight truncate">{persona.name}</h3>
-                                  <p className="text-[11px] text-slate-500 truncate">{persona.role}</p>
+                                  <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100 leading-tight truncate">{persona.name}</h3>
+                                  <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">{persona.role}</p>
                                 </div>
                               </div>
                               <div className="flex items-center space-x-1 shrink-0">
@@ -2595,7 +2438,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                   type="button"
                                   disabled={isDeliberating}
                                   onClick={() => handleRegeneratePersona(round.id, persona.id, 1)}
-                                  className="text-slate-500 hover:text-cyan-300 disabled:opacity-30 transition-colors p-1.5 rounded hover:bg-slate-100/80"
+                                  className="text-slate-500 dark:text-slate-400 hover:text-cyan-300 disabled:opacity-30 transition-colors p-1.5 rounded hover:bg-slate-100/80"
                                   title="Regenerate persona proposal"
                                 >
                                   <RefreshCw size={13} className={resp?.status === 'streaming' ? 'animate-spin text-cyan-400' : ''} />
@@ -2606,17 +2449,17 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                       type="button"
                                       onClick={() => speak(resp.content, copyKey)}
                                       className={`transition-colors p-1.5 rounded hover:bg-slate-100/80 ${
-                                        speakingId === copyKey ? 'text-cyan-400 bg-cyan-950/60 animate-pulse' : 'text-slate-500 hover:text-slate-700'
+                                        speakingId === copyKey ? 'text-cyan-400 bg-cyan-950/60 animate-pulse' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
                                       } flex items-center gap-1 font-medium text-[10px]`}
                                       title={speakingId === copyKey ? 'Stop reading' : 'Read response aloud'}
                                     >
                                       {speakingId === copyKey ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                                      <span>{speakingId === copyKey ? 'Stop' : 'Speak'}</span>
+                                      <span>{speakingId === copyKey ? 'Stop' : 'Listen'}</span>
                                     </button>
                                     <button
                                       type="button"
                                       onClick={() => handleCopy(copyKey, resp.content)}
-                                      className="text-slate-500 hover:text-slate-700 transition-colors p-1.5 rounded hover:bg-slate-100/80"
+                                      className="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 transition-colors p-1.5 rounded hover:bg-slate-100/80"
                                       title="Copy response"
                                     >
                                       {copiedId === copyKey ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
@@ -2633,6 +2476,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                             ) : resp?.content ? (
                               <div className="min-w-0 max-w-full overflow-x-auto break-words">
                                 <MessageMarkdown content={resp.content} />
+                                <GroundingSourcesCard grounding={resp.grounding} />
                               </div>
                             ) : (
                               <ThinkingIndicator
@@ -2665,8 +2509,8 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
 
                 {/* Quick Panel Actions Bar */}
                 {round.resolvedMode === 'quick_panel' && (
-                  <div className="flex flex-wrap items-center justify-between gap-3 pt-2 p-3 bg-white/60 border border-slate-200 rounded-xl">
-                    <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <div className="flex flex-wrap items-center justify-between gap-3 pt-2 p-3 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 rounded-xl">
+                    <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                       <Zap size={14} className="text-amber-400" />
                       <span>Quick Panel Execution Complete</span>
                     </div>
@@ -2700,9 +2544,11 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                   </div>
                 )}
               </div>
+              )}
 
               {/* Stage 2: Peer Review & Cross-Examination (Deep Council mode only) */}
-              {round.resolvedMode === 'deep_council' &&
+              {!basicMode &&
+                round.resolvedMode === 'deep_council' &&
                 Object.keys(round.deliberation?.stage1 || {}).length > 1 &&
                 round.deliberation?.stage2 &&
                 Object.values(round.deliberation.stage2).some(
@@ -2713,9 +2559,14 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                       <h3 className="text-xs font-mono uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
                         <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
                         Stage 2: Peer Review & Cross-Examination
+                        {basicMode && (
+                          <span className="text-[10px] lowercase font-normal px-2 py-0.5 rounded bg-purple-950/40 text-purple-300 border border-purple-800/50 ml-1">
+                            ✓ Peer review completed
+                          </span>
+                        )}
                       </h3>
                     </div>
-                    <div className="flex flex-col gap-3 md:gap-4 min-w-0 w-full transition-all duration-300 ease-in-out">
+                    <div className={`flex flex-col gap-3 md:gap-4 min-w-0 w-full transition-all duration-300 ease-in-out ${basicMode ? "hidden" : ""}`}>
                       {personas
                         .filter((persona) => round.deliberation?.stage2?.[persona.id])
                         .map((persona) => {
@@ -2725,14 +2576,14 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                           return (
                             <div
                               key={`s2-${persona.id}`}
-                              className={`p-4 sm:p-5 rounded-xl bg-white/90 dark:bg-white/80 border ${persona.color} flex flex-col justify-between space-y-4 shadow-sm hover:shadow-md transition-all duration-200 min-w-0 max-w-full overflow-hidden break-words h-full`}
+                              className={`p-4 sm:p-5 rounded-xl bg-white dark:bg-slate-900/90 dark:bg-slate-800/90 dark:bg-white dark:bg-slate-900/80 border ${persona.color} flex flex-col justify-between space-y-4 shadow-sm hover:shadow-md transition-all duration-200 min-w-0 max-w-full overflow-hidden break-words h-full`}
                             >
                               <div className="space-y-3 min-w-0">
-                                <div className="flex items-center justify-between border-b border-slate-200/60 pb-2.5 min-w-0 gap-2">
+                                <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-700/60 pb-2.5 min-w-0 gap-2">
                                   <div className="flex items-center space-x-2.5 min-w-0 truncate">
                                     <span className="text-xl shrink-0">{persona.avatar}</span>
                                     <div className="min-w-0 truncate">
-                                      <h3 className="font-bold text-sm text-slate-800 leading-tight truncate">{persona.name}</h3>
+                                      <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100 leading-tight truncate">{persona.name}</h3>
                                       <p className="text-[11px] text-purple-300/80 truncate">Peer Review</p>
                                     </div>
                                   </div>
@@ -2741,7 +2592,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                       type="button"
                                       disabled={isDeliberating}
                                       onClick={() => handleRegeneratePersona(round.id, persona.id, 2)}
-                                      className="text-slate-500 hover:text-purple-300 disabled:opacity-30 transition-colors p-1.5 rounded hover:bg-slate-100/80"
+                                      className="text-slate-500 dark:text-slate-400 hover:text-purple-300 disabled:opacity-30 transition-colors p-1.5 rounded hover:bg-slate-100/80"
                                       title="Regenerate peer review"
                                     >
                                       <RefreshCw size={13} className={resp?.status === 'streaming' ? 'animate-spin text-purple-400' : ''} />
@@ -2752,17 +2603,17 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                           type="button"
                                           onClick={() => speak(resp.content, copyKey)}
                                           className={`transition-colors p-1.5 rounded hover:bg-slate-100/80 ${
-                                        speakingId === copyKey ? 'text-purple-400 bg-purple-950/60 animate-pulse' : 'text-slate-500 hover:text-slate-700'
+                                        speakingId === copyKey ? 'text-purple-400 bg-purple-950/60 animate-pulse' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
                                       } flex items-center gap-1 font-medium text-[10px]`}
                                           title={speakingId === copyKey ? 'Stop reading' : 'Read response aloud'}
                                         >
                                       {speakingId === copyKey ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                                      <span>{speakingId === copyKey ? 'Stop' : 'Speak'}</span>
+                                      <span>{speakingId === copyKey ? 'Stop' : 'Listen'}</span>
                                     </button>
                                         <button
                                           type="button"
                                           onClick={() => handleCopy(copyKey, resp.content)}
-                                          className="text-slate-500 hover:text-slate-700 transition-colors p-1.5 rounded hover:bg-slate-100/80"
+                                          className="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 transition-colors p-1.5 rounded hover:bg-slate-100/80"
                                           title="Copy response"
                                         >
                                           {copiedId === copyKey ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
@@ -2779,6 +2630,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                 ) : resp?.content ? (
                                   <div className="min-w-0 max-w-full overflow-x-auto break-words">
                                     <MessageMarkdown content={resp.content} />
+                                    <GroundingSourcesCard grounding={resp.grounding} />
                                   </div>
                                 ) : (
                                   <ThinkingIndicator
@@ -2798,12 +2650,11 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                 )}
 
               {/* Stage 3: Chairman Synthesis Section */}
-              {Object.keys(round.deliberation?.stage1 || {}).length > 1 &&
-                (round.synthesis?.content || round.synthesis?.status === 'streaming') && (
+              {(round.synthesis?.content || round.synthesis?.status === 'streaming') && (
                   <div className="p-6 rounded-2xl bg-gradient-to-b from-amber-950/30 to-slate-900 border border-amber-500/30 shadow-lg space-y-4">
                     <div className="flex items-center justify-between border-b border-amber-500/20 pb-3">
                       <h3 className="text-base font-bold text-amber-300 flex items-center gap-2">
-                        <span className="text-lg">⚖️</span> {round.resolvedMode === 'quick_panel' ? 'Quick Panel Synthesis' : 'Stage 3: Council Verdict & Synthesis'}
+                        <span className="text-lg">⚖️</span> {round.resolvedMode === 'quick_panel' ? 'Quick Panel Synthesis' : Object.keys(round.deliberation?.stage1 || {}).length === 1 ? 'Council Member Response' : 'Stage 3: Council Verdict & Synthesis'}
                       </h3>
                       <div className="flex items-center space-x-3">
                         {!isDeliberating && (
@@ -2827,7 +2678,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                               title={speakingId === `${round.id}-synthesis` ? 'Stop reading' : 'Read synthesis aloud'}
                             >
                               {speakingId === `${round.id}-synthesis` ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                              <span>{speakingId === `${round.id}-synthesis` ? 'Stop' : 'Speak'}</span>
+                              <span>{speakingId === `${round.id}-synthesis` ? 'Stop' : 'Listen'}</span>
                             </button>
                             <button
                               onClick={() => handleCopy(`${round.id}-synthesis`, round.synthesis.content)}
@@ -2853,7 +2704,10 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                         </button>
                       </div>
                     ) : round.synthesis.content ? (
-                      <MessageMarkdown content={round.synthesis.content} />
+                      <div>
+                        <MessageMarkdown content={round.synthesis.content} />
+                        <GroundingSourcesCard grounding={round.synthesis.grounding} />
+                      </div>
                     ) : (
                       <ThinkingIndicator
                         stageLabel="Synthesis Phase"
@@ -2866,8 +2720,35 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                   </div>
                 )}
 
+              {/* Basic Mode Active Deliberation / Consensus Loading State */}
+              {basicMode && (!round.synthesis?.content && round.synthesis?.status !== 'streaming') && (
+                <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-cyan-500/30 shadow-lg space-y-3">
+                  <div className="flex items-center gap-3 text-cyan-500 dark:text-cyan-400 font-semibold text-sm">
+                    <RefreshCw size={18} className="animate-spin text-cyan-500 shrink-0" />
+                    <span>
+                      {isDeliberating
+                        ? 'Council is deliberating on your question...'
+                        : 'Consensus response pending...'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Consulting council members in the background. Your final verdict will appear here shortly.
+                  </p>
+                  {!isDeliberating && Object.keys(round.deliberation?.stage1 || {}).length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => runQuickPanelSynthesis(round.id)}
+                      className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold text-xs flex items-center gap-2 transition-colors"
+                    >
+                      <Sparkles size={14} />
+                      <span>Synthesize Consensus Now</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
               {/* Phase 2: Blind Pro Side-by-Side Comparison Card */}
-              {round.proComparisonData && (
+              {!basicMode && round.proComparisonData && (
                 <CompareProCard
                   auditLogId={round.proComparisonData.auditLogId}
                   userQuery={round.userQuery}
@@ -2905,7 +2786,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       )}
 
       {/* Sticky Input Anchor */}
-      <div className="sticky bottom-0 z-20 bg-[#f5f5f0]/95 backdrop-blur-md border-t border-slate-200/80 p-3 sm:p-4">
+      <div className="sticky bottom-0 z-20 bg-slate-50 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-700/80 p-3 sm:p-4">
         <div className="max-w-4xl mx-auto space-y-2.5">
           {fileError && (
             <div className="text-xs text-red-400 bg-red-950/50 p-2 rounded-lg border border-red-800/50 flex items-center justify-between">
@@ -2917,15 +2798,16 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
           )}
 
           {/* Mode Selector & Estimate Bar */}
+          {!basicMode && (
           <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 pb-1 text-xs">
-            <div className="flex items-center gap-1 bg-white border border-slate-200 p-1 rounded-xl">
+            <div className="flex items-center gap-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-1 rounded-xl">
               <button
                 type="button"
                 onClick={() => updateExecutionMode('auto')}
                 className={`px-2.5 py-1 rounded-lg transition-all flex items-center gap-1 font-medium text-xs ${
                   settings.executionMode === 'auto'
                     ? 'bg-cyan-950 text-cyan-200 border border-cyan-700/60 shadow-sm'
-                    : 'text-slate-500 hover:text-slate-700'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
                 }`}
                 title="Automatically choose Quick Panel or Deep Council based on query context"
               >
@@ -2938,7 +2820,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                 className={`px-2.5 py-1 rounded-lg transition-all flex items-center gap-1 font-medium text-xs ${
                   settings.executionMode === 'quick_panel'
                     ? 'bg-amber-950 text-amber-200 border border-amber-700/60 shadow-sm'
-                    : 'text-slate-500 hover:text-slate-700'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
                 }`}
                 title="Concurrent independent answers with low token limits and manual synthesis"
               >
@@ -2951,7 +2833,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                 className={`px-2.5 py-1 rounded-lg transition-all flex items-center gap-1 font-medium text-xs ${
                   settings.executionMode === 'deep_council'
                     ? 'bg-purple-950 text-purple-200 border border-purple-700/60 shadow-sm'
-                    : 'text-slate-500 hover:text-slate-700'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
                 }`}
                 title="Full 3-stage deliberation with peer review and consensus synthesis"
               >
@@ -2969,8 +2851,8 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               return (
                 <div className="flex items-center gap-2 font-mono">
                   {settings.executionMode === 'auto' && (
-                    <span className="text-[11px] px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-600 flex items-center gap-1.5">
-                      <span className="text-slate-500">Auto →</span>
+                    <span className="text-[11px] px-2.5 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 flex items-center gap-1.5">
+                      <span className="text-slate-500 dark:text-slate-400">Auto →</span>
                       {predicted === 'quick_panel' ? (
                         <span className="text-amber-300 font-semibold flex items-center gap-1">
                           <Zap size={11} /> Quick Panel
@@ -2994,18 +2876,20 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               );
             })()}
           </div>
+          )}
 
           {/* Quick Persona Toggle Bar */}
+          {!basicMode && (
           <div className="flex items-center justify-between gap-2 overflow-x-auto pb-1 text-xs">
             <div className="flex items-center gap-2 shrink-0">
-              <span className="text-slate-500 font-mono text-[11px] uppercase tracking-wider">
+              <span className="text-slate-500 dark:text-slate-400 font-mono text-[11px] uppercase tracking-wider">
                 Council ({personas.filter((p) => p.enabled !== false).length}/{personas.length}):
               </span>
               <button
                 type="button"
                 disabled={isDeliberating || personas.filter((p) => p.enabled !== false).length < 2}
                 onClick={rotateRoleAssignments}
-                className="px-2 py-0.5 rounded-md bg-white hover:bg-slate-100 border border-slate-200/80 text-slate-600 hover:text-cyan-300 text-[11px] font-mono flex items-center gap-1 transition-colors disabled:opacity-40"
+                className="px-2 py-0.5 rounded-md bg-white dark:bg-slate-900 hover:bg-slate-100 border border-slate-200 dark:border-slate-700/80 text-slate-600 hover:text-cyan-300 text-[11px] font-mono flex items-center gap-1 transition-colors disabled:opacity-40"
                 title="Rotate model assignments across active personas to ensure roles are independent from model capabilities"
               >
                 <Shuffle size={11} className="text-cyan-400" />
@@ -3017,11 +2901,11 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                 className={`px-2 py-0.5 rounded-md border text-[11px] font-mono flex items-center gap-1 transition-colors ${
                   fallbackLogs.length > 0
                     ? 'bg-amber-950/60 border-amber-700/80 text-amber-300 hover:bg-amber-900/80'
-                    : 'bg-white border-slate-200 text-slate-500 hover:text-slate-700'
+                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
                 }`}
                 title="View automatic fallback events audit log"
               >
-                <ShieldAlert size={11} className={fallbackLogs.length > 0 ? 'text-amber-400' : 'text-slate-500'} />
+                <ShieldAlert size={11} className={fallbackLogs.length > 0 ? 'text-amber-400' : 'text-slate-500 dark:text-slate-400'} />
                 <span>Fallback Audit ({fallbackLogs.length})</span>
               </button>
             </div>
@@ -3042,8 +2926,8 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                     }}
                     className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-all shrink-0 ${
                       isEnabled
-                        ? 'bg-white border-cyan-500/50 text-cyan-200 shadow-sm shadow-cyan-950/40'
-                        : 'bg-white/60 border-slate-200 text-slate-500 line-through opacity-50 hover:opacity-80'
+                        ? 'bg-white dark:bg-slate-900 border-cyan-500/50 text-cyan-200 shadow-sm shadow-cyan-950/40'
+                        : 'bg-white dark:bg-slate-900/60 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 line-through opacity-50 hover:opacity-80'
                     }`}
                     title={isEnabled ? `Disable ${p.name}` : `Enable ${p.name}`}
                   >
@@ -3055,6 +2939,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               })}
             </div>
           </div>
+          )}
 
           {personas.filter((p) => p.enabled !== false).length === 0 && (
             <div className="text-xs text-amber-300 bg-amber-950/50 border border-amber-800/60 px-3 py-1.5 rounded-lg flex items-center justify-between">
@@ -3076,7 +2961,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                 <div key={fIdx} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs shadow-sm relative group ${
                   file.unzippedResult
                     ? 'bg-purple-950/40 border-purple-500/40 text-purple-200'
-                    : 'bg-white border-slate-200 text-slate-700'
+                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200'
                 }`}>
                   {file.type?.startsWith('image/') ? (
                     <img src={file.content} alt={file.name} className="w-4 h-4 object-cover rounded shrink-0" />
@@ -3099,19 +2984,19 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                       {file.unzippedResult.extractedCodeFilesCount} code files
                     </button>
                   ) : (
-                    <span className="text-[10px] text-slate-500 font-mono">({(file.size / 1024).toFixed(1)} KB)</span>
+                    <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">({(file.size / 1024).toFixed(1)} KB)</span>
                   )}
                   <button
                     type="button"
                     onClick={() => removeAttachedFile(fIdx)}
-                    className="text-slate-500 hover:text-red-400 transition-colors p-0.5 ml-1 cursor-pointer"
+                    className="text-slate-500 dark:text-slate-400 hover:text-red-400 transition-colors p-0.5 ml-1 cursor-pointer"
                     title="Remove file"
                   >
                     <X size={12} />
                   </button>
                   {file.type?.startsWith('image/') && (
                     <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block z-50">
-                      <img src={file.content} alt={file.name} className="max-w-[200px] max-h-[200px] object-contain rounded border border-slate-200 shadow-xl bg-[#f5f5f0]" />
+                      <img src={file.content} alt={file.name} className="max-w-[200px] max-h-[200px] object-contain rounded border border-slate-200 dark:border-slate-700 shadow-xl bg-slate-50 dark:bg-slate-900" />
                     </div>
                   )}
                 </div>
@@ -3119,12 +3004,13 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
             </div>
           )}
 
-          {(query.length > 0 || attachedFiles.length > 0) && (
+          {!basicMode && (query.length > 0 || attachedFiles.length > 0) && (
             <div className="flex items-center justify-between px-1 text-[11px] font-mono text-emerald-400/90">
-              <span>Prompt Input ({queryTokens.toLocaleString()} tokens): {formatCost(calculateCallCost(queryTokens, 0, 'google/gemini-2.0-flash-001'))}</span>
+              <span>Prompt Input ({queryTokens.toLocaleString()} tokens): {formatCost(calculateCallCost(queryTokens, 0, 'google/gemini-2.5-flash'))}</span>
               <span>Accumulated Session Cost: {formatCost(sessionCostMetrics.totalCost)}</span>
             </div>
           )}
+
           <form 
             onSubmit={handleDeliberate} 
             className="flex items-end gap-2.5"
@@ -3141,9 +3027,17 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
             />
             <button
               type="button"
+              onClick={() => setIsSettingsOpen(true)}
+              className="p-3 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-cyan-400 transition-colors shrink-0"
+              title="Open Settings"
+            >
+              <SettingsIcon size={18} />
+            </button>
+            <button
+              type="button"
               disabled={isDeliberating}
               onClick={() => fileInputRef.current?.click()}
-              className="p-3 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-500 hover:text-cyan-400 transition-colors shrink-0 disabled:opacity-40"
+              className="p-3 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-cyan-400 transition-colors shrink-0 disabled:opacity-40"
               title="Upload context document or code file"
             >
               <Paperclip size={18} />
@@ -3178,23 +3072,25 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               }
               rows={2}
               disabled={isDeliberating}
-              className="flex-1 bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-800 placeholder-slate-500 focus:outline-none focus:border-cyan-500/80 transition-colors disabled:opacity-50 resize-y min-h-[48px] max-h-[160px]"
+              className="flex-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-800 dark:text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500/80 transition-colors disabled:opacity-50 resize-y min-h-[48px] max-h-[160px]"
             />
             {isDeliberating ? (
               <button
                 type="button"
                 onClick={handleStop}
-                className="px-5 py-3 rounded-xl bg-red-600 hover:bg-red-500 text-white font-medium text-sm flex items-center gap-2 transition-colors shadow-lg shadow-red-950/50 shrink-0"
+                className="h-[48px] w-[48px] rounded-xl bg-red-600 hover:bg-red-500 text-white flex items-center justify-center transition-colors shadow-md shrink-0"
+                title="Stop Deliberation"
               >
-                <Square size={16} /> Stop
+                <Square size={18} />
               </button>
             ) : (
               <button
                 type="submit"
                 disabled={!query.trim() && attachedFiles.length === 0}
-                className="px-5 py-3 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-medium text-sm flex items-center gap-2 transition-all shadow-lg shadow-cyan-950/50 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                className="h-[48px] w-[48px] rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white flex items-center justify-center transition-all shadow-md shadow-cyan-950/30 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 active:scale-95"
+                title="Send Question"
               >
-                <Play size={16} /> Deliberate
+                <Send size={18} className="ml-0.5" />
               </button>
             )}
           </form>
@@ -3226,6 +3122,8 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         setSynthesisMaxTokens={updateSynthesisMaxTokens}
         panelTimeoutSeconds={settings.panelTimeoutSeconds}
         setPanelTimeoutSeconds={updatePanelTimeoutSeconds}
+        enableSearchGrounding={settings.enableSearchGrounding}
+        setEnableSearchGrounding={updateEnableSearchGrounding}
       />
 
       {/* Fallback Audit Modal */}
@@ -3251,11 +3149,13 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
 
       {/* Toast Notification Banner */}
       {toastMessage && (
-        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-white border border-cyan-500/60 text-cyan-200 px-4 py-2.5 rounded-xl shadow-2xl text-xs font-mono flex items-center gap-2 animate-bounce">
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-white dark:bg-slate-900 border border-cyan-500/60 text-cyan-200 px-4 py-2.5 rounded-xl shadow-2xl text-xs font-mono flex items-center gap-2 animate-bounce">
           <span>{toastMessage}</span>
         </div>
       )}
     </div>
   </div>
+
+              
   );
 };

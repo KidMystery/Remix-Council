@@ -72,7 +72,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
       skeptic: { model: 'deepseek/deepseek-chat', name: 'DeepSeek V3' },
       visionary: { model: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B Instruct' },
       pragmatist: { model: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct' },
-      synthesizer: { model: 'google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash' },
+      synthesizer: { model: 'google/gemini-2.5-flash', name: 'Gemini 2.0 Flash' },
     },
   },
   {

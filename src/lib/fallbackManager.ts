@@ -1,4 +1,4 @@
-import { Persona, PersonaId } from '../types';
+import { Persona, PersonaId, GroundingData } from '../types';
 import { RawOpenRouterModel, cleanModelName } from './presets';
 import { isFreeModel, getAuthorOrganization, getFamily, getCanonicalTarget } from './modelMapper';
 import { streamOpenRouterCompletion } from './openrouter';
@@ -135,7 +135,7 @@ const DEFAULT_FREE_BACKUPS: BackupCandidate[] = [
 ];
 
 const DEFAULT_PAID_BACKUPS: BackupCandidate[] = [
-  { model: 'google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash', org: 'google', family: 'gemini-2.0-flash', isFree: false },
+  { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', org: 'google', family: 'gemini-2.5-flash', isFree: false },
   { model: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', org: 'openai', family: 'gpt-4o-mini', isFree: false },
   { model: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', org: 'anthropic', family: 'claude-3.5-haiku', isFree: false },
   { model: 'deepseek/deepseek-chat', name: 'DeepSeek V3', org: 'deepseek', family: 'deepseek-v3', isFree: false },
@@ -258,8 +258,10 @@ export interface StreamPersonaWithFallbackOptions {
   messages: { role: 'system' | 'user' | 'assistant'; content: any }[];
   temperature?: number;
   maxTokens?: number;
+  enableSearchGrounding?: boolean;
   signal?: AbortSignal;
   onToken?: (chunk: string) => void;
+  onGrounding?: (grounding: GroundingData) => void;
   activePersonas: Persona[];
   synthesizer?: Persona;
   rawModels?: RawOpenRouterModel[];
@@ -283,6 +285,7 @@ export async function streamPersonaWithFallback(
   finalModel: string;
   fallbackOccurred: boolean;
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+  grounding?: GroundingData;
 }> {
   const {
     personaId,
@@ -292,8 +295,10 @@ export async function streamPersonaWithFallback(
     messages,
     temperature,
     maxTokens,
+    enableSearchGrounding,
     signal,
     onToken,
+    onGrounding,
     activePersonas,
     synthesizer,
     rawModels,
@@ -312,7 +317,7 @@ export async function streamPersonaWithFallback(
     attempts++;
     attemptedModels.add(currentModel);
 
-    let streamResult: { content: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number } } = { content: '' };
+    let streamResult: { content: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }; grounding?: GroundingData } = { content: '' };
     let hasTokenStreamed = false;
 
     try {
@@ -322,11 +327,13 @@ export async function streamPersonaWithFallback(
         messages,
         temperature,
         maxTokens,
+        enableSearchGrounding,
         signal,
         onToken: (chunk) => {
           if (chunk) hasTokenStreamed = true;
           if (onToken) onToken(chunk);
         },
+        onGrounding,
       });
 
       const streamContent = streamResult.content;
@@ -342,6 +349,7 @@ export async function streamPersonaWithFallback(
         finalModel: currentModel,
         fallbackOccurred: attempts > 1,
         usage: streamResult.usage,
+        grounding: streamResult.grounding,
       };
     } catch (err: any) {
       lastError = err;

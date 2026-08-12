@@ -1,4 +1,4 @@
-import { X, Cpu, Palette, Bell, User, RefreshCw, Zap, Award, AlertTriangle, CheckCircle2, Coins, Scale } from 'lucide-react';
+import { X, Cpu, Palette, Bell, User, RefreshCw, Zap, Award, AlertTriangle, CheckCircle2, Coins, Scale, Globe } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { Persona } from '../types';
 import { MODEL_PRESETS, applyPreset, checkDuplicateModels, checkDuplicateOrganizations, PresetId } from '../lib/presets';
@@ -30,12 +30,15 @@ interface SettingsPanelProps {
   isProCompareEnabled?: boolean;
   handleToggleProCompare?: () => void;
   setIsAuditModalOpen?: (val: boolean) => void;
+  enableSearchGrounding?: boolean;
+  setEnableSearchGrounding?: (enabled: boolean) => void;
 }
 
 export function SettingsPanel({ 
   isOpen, onClose, apiKey, setApiKey, personas, setPersonas, synthesizer, setSynthesizer, theme, setTheme, maxTokens = 4000, setMaxTokens,
   executionMode = 'auto', setExecutionMode, quickPanelMaxTokens = 350, setQuickPanelMaxTokens, synthesisMaxTokens = 500, setSynthesisMaxTokens, panelTimeoutSeconds = 30, setPanelTimeoutSeconds,
-  isProCompareEnabled, handleToggleProCompare, setIsAuditModalOpen
+  isProCompareEnabled, handleToggleProCompare, setIsAuditModalOpen,
+  enableSearchGrounding = true, setEnableSearchGrounding
 }: SettingsPanelProps) {
   
   const [activeTab, setActiveTab] = useState<'personas' | 'advanced' | 'theme' | 'notifications' | 'account'>('personas');
@@ -300,6 +303,35 @@ export function SettingsPanel({
                         className="w-full accent-indigo-600 cursor-pointer"
                       />
                     )}
+                  </div>
+
+                  {/* Google Search Grounding Section */}
+                  <div className="pt-3 space-y-2 border-t border-slate-200/60 dark:border-slate-800/60">
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5 pr-2">
+                        <label className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                          <Globe size={14} className="text-emerald-500 shrink-0" />
+                          <span>Google Search Grounding</span>
+                        </label>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                          Live web search lookup & fact-checking via Google Search for Gemini models (e.g., gemini-3.6-flash & gemini-2.5-flash).
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setEnableSearchGrounding?.(!enableSearchGrounding)}
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                          enableSearchGrounding ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
+                        }`}
+                        title={enableSearchGrounding ? "Grounding active" : "Grounding disabled"}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                            enableSearchGrounding ? 'translate-x-4' : 'translate-x-0'
+                          }`}
+                        />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </section>

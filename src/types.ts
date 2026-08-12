@@ -1,5 +1,15 @@
 export type PersonaId = 'skeptic' | 'visionary' | 'pragmatist' | 'synthesizer';
 
+export interface GroundingSource {
+  title?: string;
+  url?: string;
+}
+
+export interface GroundingData {
+  queries?: string[];
+  sources?: GroundingSource[];
+}
+
 export interface Persona {
   id: PersonaId;
   name: string;
@@ -9,6 +19,7 @@ export interface Persona {
   systemPrompt: string;
   color: string;
   enabled?: boolean;
+  enableSearchGrounding?: boolean;
 }
 
 export type StreamStatus = 'idle' | 'streaming' | 'completed' | 'error';
@@ -22,6 +33,7 @@ export interface PersonaResponse {
   promptTokens?: number;
   completionTokens?: number;
   cost?: number;
+  grounding?: GroundingData;
 }
 
 export interface DeliberationStage {
@@ -47,6 +59,7 @@ export interface CouncilRound {
     promptTokens?: number;
     completionTokens?: number;
     cost?: number;
+    grounding?: GroundingData;
   };
   attachedImages?: { name: string; url: string; type: string }[];
   auditLogId?: string;
@@ -79,4 +92,5 @@ export interface Settings {
   quickPanelMaxTokens?: number;
   synthesisMaxTokens?: number;
   panelTimeoutSeconds?: number;
+  enableSearchGrounding?: boolean;
 }

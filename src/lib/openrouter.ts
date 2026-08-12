@@ -114,6 +114,8 @@ export function buildOptimizedContext(
   return messages;
 }
 
+import { GroundingData } from '../types';
+
 export interface OpenRouterCompletionResult {
   content: string;
   usage?: {
@@ -121,6 +123,7 @@ export interface OpenRouterCompletionResult {
     completionTokens?: number;
     totalTokens?: number;
   };
+  grounding?: GroundingData;
 }
 
 export async function streamOpenRouterCompletion(options: {
@@ -129,15 +132,17 @@ export async function streamOpenRouterCompletion(options: {
   messages: { role: 'system' | 'user' | 'assistant'; content: any }[];
   temperature?: number;
   maxTokens?: number;
+  enableSearchGrounding?: boolean;
   signal?: AbortSignal;
   onToken?: (chunk: string) => void;
+  onGrounding?: (grounding: GroundingData) => void;
 }): Promise<OpenRouterCompletionResult> {
-  const { apiKey, messages, temperature, maxTokens, signal, onToken } = options;
+  const { apiKey, messages, temperature, maxTokens, enableSearchGrounding, signal, onToken, onGrounding } = options;
   let targetModel = options.model;
 
   // Sanitize non-existent or legacy model strings
-  if (!targetModel || targetModel.includes('gemini-2.5')) {
-    targetModel = 'google/gemini-2.0-flash-001';
+  if (!targetModel || targetModel.includes('gemini-2.0') || targetModel.includes('gemini-1.5')) {
+    targetModel = 'google/gemini-2.5-flash';
   }
 
   const makeRequest = async (modelToUse: string) => {
@@ -145,6 +150,7 @@ export async function streamOpenRouterCompletion(options: {
       model: modelToUse,
       messages: messages,
       stream: true,
+      enableSearchGrounding,
       stream_options: { include_usage: true },
     };
     if (temperature !== undefined) body.temperature = temperature;
@@ -184,14 +190,14 @@ export async function streamOpenRouterCompletion(options: {
   let firstErrorText = '';
   let firstStatus = 0;
 
-  // Fallback 1: If 400/404 invalid model error, retry with google/gemini-2.0-flash-001
-  if (!response.ok && (response.status === 400 || response.status === 404) && targetModel !== 'google/gemini-2.0-flash-001') {
+  // Fallback 1: If 400/404 invalid model error, retry with google/gemini-2.5-flash
+  if (!response.ok && (response.status === 400 || response.status === 404) && targetModel !== 'google/gemini-2.5-flash') {
     firstErrorText = await response.clone().text();
     firstStatus = response.status;
     const parsed = parseOpenRouterError(firstStatus, firstErrorText);
     if (!parsed.toLowerCase().includes('context length') && !parsed.toLowerCase().includes('tokens')) {
-      console.warn(`Model "${targetModel}" failed (${response.status}). Retrying with google/gemini-2.0-flash-001...`);
-      response = await makeRequest('google/gemini-2.0-flash-001');
+      console.warn(`Model "${targetModel}" failed (${response.status}). Retrying with google/gemini-2.5-flash...`);
+      response = await makeRequest('google/gemini-2.5-flash');
     }
   }
 
@@ -223,6 +229,7 @@ export async function streamOpenRouterCompletion(options: {
   let buffer = '';
   let fullText = '';
   let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | undefined = undefined;
+  let groundingData: GroundingData | undefined = undefined;
 
   try {
     while (true) {
@@ -250,10 +257,17 @@ export async function streamOpenRouterCompletion(options: {
                 totalTokens: data.usage.total_tokens,
               };
             }
-            if (data.choices && data.choices[0] && data.choices[0].delta && data.choices[0].delta.content) {
-              const chunk = data.choices[0].delta.content;
-              fullText += chunk;
-              if (onToken) onToken(chunk);
+            if (data.choices && data.choices[0] && data.choices[0].delta) {
+              const delta = data.choices[0].delta;
+              if (delta.grounding) {
+                groundingData = delta.grounding;
+                if (onGrounding) onGrounding(delta.grounding);
+              }
+              if (delta.content) {
+                const chunk = delta.content;
+                fullText += chunk;
+                if (onToken) onToken(chunk);
+              }
             }
           } catch (e: any) {
             if (e.message && !e.message.includes('Unexpected token') && !e.message.includes('Expected')) {
@@ -268,5 +282,5 @@ export async function streamOpenRouterCompletion(options: {
     reader.releaseLock();
   }
 
-  return { content: fullText, usage };
+  return { content: fullText, usage, grounding: groundingData };
 }

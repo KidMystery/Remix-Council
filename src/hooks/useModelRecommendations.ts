@@ -32,7 +32,7 @@ export function useModelRecommendations() {
     }
     // Fallback default models if no cache exists
     return [
-      { id: 'google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash' },
+      { id: 'google/gemini-2.5-flash', name: 'Gemini 2.0 Flash' },
       { id: 'google/gemini-2.0-pro-exp-02-05', name: 'Gemini 2.0 Pro' },
       { id: 'anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet' },
       { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku' },

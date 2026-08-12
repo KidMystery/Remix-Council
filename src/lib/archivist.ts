@@ -14,7 +14,7 @@ export interface ModelRates {
 
 export const MODEL_PRICING: Record<string, ModelRates> = {
   // Google
-  'google/gemini-2.0-flash-001': { prompt: 0.10, completion: 0.40 },
+  'google/gemini-2.5-flash': { prompt: 0.10, completion: 0.40 },
   'google/gemini-2.0-flash': { prompt: 0.10, completion: 0.40 },
   'google/gemini-1.5-flash': { prompt: 0.075, completion: 0.30 },
   'google/gemini-pro-1.5': { prompt: 1.25, completion: 5.00 },
@@ -58,7 +58,7 @@ export function getModelRates(modelId?: string): ModelRates {
   const normalized = modelId.toLowerCase().trim();
   if (MODEL_PRICING[normalized]) return MODEL_PRICING[normalized];
 
-  if (normalized.includes('gemini') && normalized.includes('flash')) return MODEL_PRICING['google/gemini-2.0-flash-001'];
+  if (normalized.includes('gemini') && normalized.includes('flash')) return MODEL_PRICING['google/gemini-2.5-flash'];
   if (normalized.includes('gemini') && normalized.includes('pro')) return MODEL_PRICING['google/gemini-pro-1.5'];
   if (normalized.includes('haiku')) return MODEL_PRICING['anthropic/claude-3.5-haiku'];
   if (normalized.includes('sonnet')) return MODEL_PRICING['anthropic/claude-3.5-sonnet'];
@@ -102,7 +102,7 @@ export function countRoundCost(round: CouncilRound): RoundCostMetrics {
 
   const processResponse = (r?: PersonaResponse | { content: string; model?: string; promptTokens?: number; completionTokens?: number; cost?: number }) => {
     if (!r || !r.content) return;
-    const model = r.model || 'google/gemini-2.0-flash-001';
+    const model = r.model || 'google/gemini-2.5-flash';
     const rates = getModelRates(model);
 
     let pTokens = r.promptTokens ?? userQueryTokens;
@@ -227,7 +227,7 @@ export async function buildArchivistContext(options: {
       try {
         const summaryRes = await streamOpenRouterCompletion({
           apiKey,
-          model: 'google/gemini-2.0-flash-001',
+          model: 'google/gemini-2.5-flash',
           messages: [
             {
               role: 'system',
