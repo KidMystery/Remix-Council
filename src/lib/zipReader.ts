@@ -1,8 +1,8 @@
 import JSZip from 'jszip';
 
-export const MAX_EXTRACTED_FILES = 100;
-export const MAX_FILE_CHARS = 100_000;
-export const MAX_TOTAL_CONTEXT_CHARS = 500_000;
+export const MAX_EXTRACTED_FILES = 150;
+export const MAX_FILE_CHARS = 150_000;
+export const MAX_TOTAL_CONTEXT_CHARS = 750_000;
 
 export interface ExtractedZipFile {
   path: string;

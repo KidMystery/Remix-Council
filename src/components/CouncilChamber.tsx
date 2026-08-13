@@ -539,8 +539,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         continue;
       }
 
-      if (file.size > 20 * 1024 * 1024) {
-        setFileError(`File too large: ${file.name}. Maximum size is 20MB.`);
+      if (file.size > 30 * 1024 * 1024) {
+        setFileError(`File too large: ${file.name}. Maximum size is 30MB.`);
         continue;
       }
 
@@ -573,9 +573,9 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
         try {
           let text = await extractTextFromPDF(file);
-          if (text.length > 100_000) {
-            text = text.slice(0, 100_000) + '\n\n... [PDF TRUNCATED AFTER 100,000 CHARS]';
-            showToast(`⚠️ PDF ${file.name} truncated to 100,000 characters.`);
+          if (text.length > 150_000) {
+            text = text.slice(0, 150_000) + '\n\n... [PDF TRUNCATED AFTER 150,000 CHARS]';
+            showToast(`⚠️ PDF ${file.name} truncated to 150,000 characters.`);
           }
           setAttachedFiles((prev) => [
             ...prev,
@@ -602,9 +602,9 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           const result = event.target?.result;
           if (typeof result === 'string') {
             let text = result;
-            if (text.length > 100_000) {
-              text = text.slice(0, 100_000) + '\n\n... [FILE TRUNCATED AFTER 100,000 CHARS]';
-              showToast(`⚠️ File ${file.name} truncated to 100,000 characters.`);
+            if (text.length > 150_000) {
+              text = text.slice(0, 150_000) + '\n\n... [FILE TRUNCATED AFTER 150,000 CHARS]';
+              showToast(`⚠️ File ${file.name} truncated to 150,000 characters.`);
             }
             setAttachedFiles((prev) => [
               ...prev,
