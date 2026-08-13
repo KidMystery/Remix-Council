@@ -5,6 +5,7 @@ export type CouncilAction =
   | { type: 'SET_ROUNDS'; payload: CouncilRound[] }
   | { type: 'ADD_ROUND'; payload: CouncilRound }
   | { type: 'DELETE_ROUND'; payload: { roundId: string } }
+  | { type: 'START_STAGE1'; payload: { roundId: string; initialStage1: Record<PersonaId, PersonaResponse> } }
   | { type: 'UPDATE_STAGE1_TOKEN'; payload: { roundId: string; personaId: PersonaId; chunk: string } }
   | { type: 'FINISH_STAGE1_PERSONA'; payload: { roundId: string; personaId: PersonaId; content: string; grounding?: any; model?: string } }
   | { type: 'ERROR_STAGE1_PERSONA'; payload: { roundId: string; personaId: PersonaId; error: string } }
@@ -27,6 +28,20 @@ function councilReducer(state: CouncilRound[], action: CouncilAction): CouncilRo
 
     case 'DELETE_ROUND': {
       return state.filter((r) => r.id !== action.payload.roundId);
+    }
+
+    case 'START_STAGE1': {
+      const { roundId, initialStage1 } = action.payload;
+      return state.map((r) => {
+        if (r.id !== roundId) return r;
+        return {
+          ...r,
+          deliberation: {
+            ...r.deliberation,
+            stage1: initialStage1,
+          },
+        };
+      });
     }
 
     case 'UPDATE_STAGE1_TOKEN': {

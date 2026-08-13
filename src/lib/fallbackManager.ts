@@ -135,6 +135,7 @@ const DEFAULT_FREE_BACKUPS: BackupCandidate[] = [
 ];
 
 const DEFAULT_PAID_BACKUPS: BackupCandidate[] = [
+  { model: 'google/gemini-3.5-flash', name: 'Gemini 3.5 Flash', org: 'google', family: 'gemini-3.5-flash', isFree: false },
   { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', org: 'google', family: 'gemini-2.5-flash', isFree: false },
   { model: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', org: 'openai', family: 'gpt-4o-mini', isFree: false },
   { model: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', org: 'anthropic', family: 'claude-3.5-haiku', isFree: false },

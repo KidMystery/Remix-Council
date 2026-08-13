@@ -43,6 +43,7 @@ export interface DeliberationStage {
 
 export type ExecutionMode = 'auto' | 'quick_panel' | 'deep_council';
 export type ResolvedExecutionMode = 'quick_panel' | 'deep_council';
+export type { TaskDomain } from './lib/smartModelSelector';
 
 export interface CouncilRound {
   id: string;
@@ -93,4 +94,7 @@ export interface Settings {
   synthesisMaxTokens?: number;
   panelTimeoutSeconds?: number;
   enableSearchGrounding?: boolean;
+  maxRoundCostCeiling?: number;
+  stopAfterStage1?: boolean;
+  useSingleModelForSimple?: boolean;
 }

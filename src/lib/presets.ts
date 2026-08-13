@@ -1,6 +1,7 @@
 import { Persona, PersonaId } from '../types';
 import { registerModelPricing } from './archivist';
 import { mapOpenRouterModels, AssignedModel, getAuthorOrganization } from './modelMapper';
+import { routeCouncilModels, TaskDomain } from './smartModelSelector';
 
 export type PresetId = 'fastest_cheapest' | 'fast_and_free' | 'fast_and_cheap' | 'best_value' | 'highest_quality';
 
@@ -72,7 +73,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
       skeptic: { model: 'deepseek/deepseek-chat', name: 'DeepSeek V3' },
       visionary: { model: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B Instruct' },
       pragmatist: { model: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct' },
-      synthesizer: { model: 'google/gemini-2.5-flash', name: 'Gemini 2.0 Flash' },
+      synthesizer: { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
     },
   },
   {
@@ -84,7 +85,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
       skeptic: { model: 'deepseek/deepseek-r1', name: 'DeepSeek R1' },
       visionary: { model: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku' },
       pragmatist: { model: 'openai/gpt-4o-mini', name: 'GPT-4o Mini' },
-      synthesizer: { model: 'google/gemini-2.0-flash-thinking-exp:free', name: 'Gemini 2.0 Flash Thinking' },
+      synthesizer: { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
     },
   },
   {
@@ -96,7 +97,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
       skeptic: { model: 'anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet' },
       visionary: { model: 'openai/gpt-4o', name: 'GPT-4o' },
       pragmatist: { model: 'deepseek/deepseek-r1', name: 'DeepSeek R1' },
-      synthesizer: { model: 'google/gemini-2.0-pro-exp-02-05', name: 'Gemini 2.0 Pro' },
+      synthesizer: { model: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
     },
   },
 ];
@@ -232,113 +233,23 @@ export function applyPreset(
   presetId: PresetId,
   currentPersonas: Persona[],
   currentSynthesizer: Persona,
-  rawModels?: RawOpenRouterModel[]
+  rawModels?: RawOpenRouterModel[],
+  domain: TaskDomain = 'general'
 ): { updatedPersonas: Persona[]; updatedSynthesizer: Persona } {
   const targetId = presetId === 'fastest_cheapest' ? 'fast_and_free' : presetId;
 
-  // Tier candidate model pools ordered by suitability
-  let tierCandidates: string[] = [];
-  if (targetId === 'fast_and_free') {
-    tierCandidates = [
-      'nvidia/nemotron-3.5-content-safety:free',
-      'poolside/laguna-xs-2.1:free',
-      'inclusionai/ling-3.0-tiny:free',
-      'google/gemma-4-31b-it:free',
-      'google/gemini-2.0-flash-thinking-exp:free',
-      'google/gemma-2-9b-it:free',
-      'meta-llama/llama-3.2-3b-instruct:free',
-    ];
-    if (rawModels) {
-      const extraFree = rawModels.filter(m => m.id.endsWith(':free') || (m.pricing && parseFloat(String(m.pricing.prompt || 0)) === 0)).map(m => m.id);
-      tierCandidates = Array.from(new Set([...tierCandidates, ...extraFree]));
-    }
-  } else if (targetId === 'fast_and_cheap') {
-    tierCandidates = [
-      'deepseek/deepseek-chat',
-      'qwen/qwen-2.5-72b-instruct',
-      'meta-llama/llama-3.3-70b-instruct',
-      'google/gemini-2.5-flash',
-      'anthropic/claude-3.5-haiku',
-      'openai/gpt-4o-mini',
-      'deepseek/deepseek-coder',
-    ];
-  } else if (targetId === 'best_value') {
-    tierCandidates = [
-      'deepseek/deepseek-r1',
-      'anthropic/claude-3.5-haiku',
-      'openai/gpt-4o-mini',
-      'google/gemini-2.0-flash-thinking-exp:free',
-      'qwen/qwen-2.5-72b-instruct',
-      'google/gemini-2.5-flash',
-      'anthropic/claude-3.5-sonnet',
-    ];
-  } else { // highest_quality
-    tierCandidates = [
-      'anthropic/claude-3.7-sonnet',
-      'openai/gpt-4o',
-      'deepseek/deepseek-r1',
-      'google/gemini-2.0-pro-exp-02-05',
-      'openai/o3-mini',
-      'anthropic/claude-3.5-sonnet',
-      'meta-llama/llama-3.3-70b-instruct',
-    ];
-  }
+  const result = routeCouncilModels({
+    domain,
+    personas: currentPersonas,
+    synthesizer: currentSynthesizer,
+    rawModelsCatalog: rawModels,
+    catalog: rawModels,
+    budget: targetId,
+    autoSelectModels: true,
+  });
 
-  const usedModels = new Set<string>();
-
-  const pickBestModelForPersona = (persona: Persona): string => {
-    const text = `${persona.id} ${persona.name} ${persona.role} ${persona.systemPrompt}`.toLowerCase();
-    
-    let bestCandidate = '';
-    let bestScore = -1;
-
-    for (const candidate of tierCandidates) {
-      if (usedModels.has(candidate)) continue;
-
-      let score = 50;
-      const cLower = candidate.toLowerCase();
-
-      if (text.includes('code') || text.includes('skeptic') || text.includes('critic') || text.includes('audit') || text.includes('bug') || text.includes('security')) {
-        if (cLower.includes('claude-3.7') || cLower.includes('claude-3.5-sonnet')) score += 50;
-        else if (cLower.includes('deepseek-r1') || cLower.includes('deepseek-coder') || cLower.includes('nemotron')) score += 40;
-        else if (cLower.includes('qwen-2.5')) score += 30;
-      } else if (text.includes('math') || text.includes('logic') || text.includes('reason') || text.includes('calcul')) {
-        if (cLower.includes('deepseek-r1') || cLower.includes('o3-mini')) score += 50;
-        else if (cLower.includes('flash-thinking') || cLower.includes('gemini-2.0-pro')) score += 40;
-      } else if (text.includes('vision') || text.includes('creative') || text.includes('design') || text.includes('innovat')) {
-        if (cLower.includes('laguna') || cLower.includes('gemini-2.5') || cLower.includes('gpt-4o')) score += 50;
-        else if (cLower.includes('haiku') || cLower.includes('claude-3.5')) score += 40;
-      } else if (text.includes('pragmat') || text.includes('speed') || text.includes('execution') || text.includes('cost')) {
-        if (cLower.includes('ling') || cLower.includes('llama') || cLower.includes('gpt-4o-mini') || cLower.includes('haiku')) score += 50;
-        else if (cLower.includes('deepseek-chat') || cLower.includes('qwen')) score += 40;
-      } else {
-        if (cLower.includes('gemma-4') || cLower.includes('gemini-2.0-pro') || cLower.includes('gemini-2.5-flash') || cLower.includes('gpt-4o')) score += 50;
-        else if (cLower.includes('claude-3.7') || cLower.includes('deepseek-r1')) score += 40;
-      }
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestCandidate = candidate;
-      }
-    }
-
-    if (!bestCandidate) {
-      bestCandidate = tierCandidates[0] || 'google/gemini-2.5-flash';
-    }
-
-    usedModels.add(bestCandidate);
-    return bestCandidate;
-  };
-
-  const updatedPersonas = currentPersonas.map(p => ({
-    ...p,
-    model: pickBestModelForPersona(p),
-  }));
-
-  const updatedSynthesizer = {
-    ...currentSynthesizer,
-    model: pickBestModelForPersona(currentSynthesizer),
-  };
+  const updatedPersonas = result.updatedPersonas;
+  const updatedSynthesizer = result.updatedSynthesizer;
 
   // Sync MODEL_PRESETS object assignments for standard persona IDs
   const presetObj = MODEL_PRESETS.find(p => p.id === targetId);
@@ -356,15 +267,6 @@ export function applyPreset(
       synthesizer: findAssigned('synthesizer'),
     };
   }
-
-  // Line 1 debug logging for dynamic preset evaluation
-  console.log('[Line 1 Debug] Dynamic Preset Model Assignments calculated across active council personalities:', {
-    timestamp: new Date().toISOString(),
-    presetId: targetId,
-    personaAssignments: updatedPersonas.map(p => ({ persona: p.name || p.id, role: p.role, modelAssigned: p.model })),
-    synthesizerAssignment: { persona: updatedSynthesizer.name || 'Chairman', modelAssigned: updatedSynthesizer.model },
-    zeroDuplicatesVerified: usedModels.size === updatedPersonas.length + 1,
-  });
 
   return { updatedPersonas, updatedSynthesizer };
 }

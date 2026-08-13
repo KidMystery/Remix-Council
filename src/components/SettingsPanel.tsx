@@ -48,6 +48,12 @@ interface SettingsPanelProps {
   selectedTaskDomain?: 'auto' | string;
   autoSelectModels?: boolean;
   setAutoSelectModels?: (val: boolean) => void;
+  maxRoundCostCeiling?: number;
+  setMaxRoundCostCeiling?: (val: number) => void;
+  stopAfterStage1?: boolean;
+  setStopAfterStage1?: (val: boolean) => void;
+  useSingleModelForSimple?: boolean;
+  setUseSingleModelForSimple?: (val: boolean) => void;
 }
 
 export function SettingsPanel({ 
@@ -58,7 +64,10 @@ export function SettingsPanel({
   onRefreshModels, activePresetId: propActivePresetId, setActivePresetId: propSetActivePresetId, onApplyPreset,
   rawModelsCatalog: propRawModelsCatalog, availableModels: propAvailableModels, recommendationMetadata: propRecommendationMetadata,
   isRefreshing: propIsRefreshing, isDebounced: propIsDebounced, presetWarnings: propPresetWarnings,
-  autoSelectModels = true, setAutoSelectModels
+  autoSelectModels = true, setAutoSelectModels,
+  maxRoundCostCeiling = 0, setMaxRoundCostCeiling,
+  stopAfterStage1 = false, setStopAfterStage1,
+  useSingleModelForSimple = false, setUseSingleModelForSimple
 }: SettingsPanelProps) {
   
   const [activeTab, setActiveTab] = useState<'personas' | 'presets' | 'advanced' | 'theme' | 'notifications' | 'account'>('personas');
@@ -338,6 +347,61 @@ export function SettingsPanel({
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        Per-Round Cost Ceiling
+                      </label>
+                      <span className="text-xs font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                        {maxRoundCostCeiling > 0 ? `${maxRoundCostCeiling.toFixed(2)} USD` : 'Unlimited'}
+                      </span>
+                    </div>
+                    {setMaxRoundCostCeiling && (
+                      <input
+                        type="range"
+                        min={0}
+                        max={1.00}
+                        step={0.05}
+                        value={maxRoundCostCeiling}
+                        onChange={(e) => setMaxRoundCostCeiling(parseFloat(e.target.value))}
+                        className="w-full accent-indigo-600 cursor-pointer"
+                      />
+                    )}
+                    <p className="text-[11px] text-slate-500">
+                      Auto-abort remaining stages if round cumulative cost exceeds ceiling.
+                    </p>
+                  </div>
+
+                  <div className="pt-2 space-y-2 border-t border-slate-200/60 dark:border-slate-800/60">
+                    <label className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
+                      <span>Stop after Stage 1 (Skip Peer Review)</span>
+                      <input
+                        type="checkbox"
+                        checked={stopAfterStage1}
+                        onChange={(e) => setStopAfterStage1?.(e.target.checked)}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                    </label>
+                    <p className="text-[11px] text-slate-500">
+                      Bypasses Stage 2 peer review and proceeds directly to consensus synthesis.
+                    </p>
+                  </div>
+
+                  <div className="pt-2 space-y-2 border-t border-slate-200/60 dark:border-slate-800/60">
+                    <label className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
+                      <span>Use Single Model for Simple Questions</span>
+                      <input
+                        type="checkbox"
+                        checked={useSingleModelForSimple}
+                        onChange={(e) => setUseSingleModelForSimple?.(e.target.checked)}
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                    </label>
+                    <p className="text-[11px] text-slate-500">
+                      For quick panel requests, uses 1 single primary model instead of full multi-panel deliberation.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                         Panelist Timeout Limit
                       </label>
                       <span className="text-xs font-mono font-bold text-indigo-600 dark:text-indigo-400">
@@ -366,7 +430,7 @@ export function SettingsPanel({
                           <span>Google Search Grounding</span>
                         </label>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
-                          Live web search lookup & fact-checking via Google Search for Gemini models (e.g., gemini-3.6-flash & gemini-2.5-flash).
+                          Live web search lookup & fact-checking via Google Search for Gemini models (e.g., gemini-2.5-flash & gemini-2.0-flash).
                         </p>
                       </div>
                       <button

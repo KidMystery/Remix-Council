@@ -197,6 +197,66 @@ export function useSessionManager() {
     });
   }, []);
 
+  const exportSessionsJSON = useCallback(() => {
+    const bundle = {
+      version: '2.0',
+      exportedAt: Date.now(),
+      sessions: data.sessions,
+      activeSessionId: data.activeSessionId,
+    };
+    const jsonStr = JSON.stringify(bundle, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `council-chamber-sessions-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [data]);
+
+  const importSessionsJSON = useCallback((jsonContent: string): { success: boolean; count: number; error?: string } => {
+    try {
+      const parsed = JSON.parse(jsonContent);
+      let importedSessions: Session[] = [];
+      let activeId: string | null = null;
+
+      if (Array.isArray(parsed)) {
+        importedSessions = parsed;
+      } else if (parsed && Array.isArray(parsed.sessions)) {
+        importedSessions = parsed.sessions;
+        activeId = parsed.activeSessionId || null;
+      } else {
+        return { success: false, count: 0, error: 'Invalid JSON structure.' };
+      }
+
+      if (importedSessions.length === 0) {
+        return { success: false, count: 0, error: 'No sessions found in file.' };
+      }
+
+      setData((prev) => {
+        const existingIds = new Set(prev.sessions.map((s) => s.id));
+        const merged = [...prev.sessions];
+        importedSessions.forEach((s) => {
+          if (!existingIds.has(s.id)) {
+            merged.push(s);
+          } else {
+            const idx = merged.findIndex((m) => m.id === s.id);
+            if (idx !== -1) merged[idx] = s;
+          }
+        });
+        const nextActiveId = activeId || importedSessions[0]?.id || prev.activeSessionId;
+        return {
+          sessions: merged,
+          activeSessionId: nextActiveId,
+        };
+      });
+
+      return { success: true, count: importedSessions.length };
+    } catch (err: any) {
+      return { success: false, count: 0, error: err.message || 'Failed to parse JSON file.' };
+    }
+  }, []);
+
   return {
     sessions: data.sessions,
     activeSessionId: data.activeSessionId,
@@ -209,5 +269,7 @@ export function useSessionManager() {
     addRoundToActiveSession,
     updateRoundInActiveSession,
     deleteRoundFromActiveSession,
+    exportSessionsJSON,
+    importSessionsJSON,
   };
 }

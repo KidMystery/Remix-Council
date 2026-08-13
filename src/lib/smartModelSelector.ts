@@ -24,8 +24,8 @@ export const DOMAIN_MODEL_MAPPINGS: Record<TaskDomain, DomainModelMap> = {
   math: {
     skeptic: 'deepseek/deepseek-r1',
     visionary: 'openai/o3-mini',
-    pragmatist: 'google/gemini-2.0-flash-thinking-exp:free',
-    synthesizer: 'google/gemini-2.0-pro-exp-02-05',
+    pragmatist: 'google/gemini-2.5-flash',
+    synthesizer: 'google/gemini-2.5-pro',
     defaultFallback: 'deepseek/deepseek-r1',
   },
   finance: {
@@ -249,6 +249,7 @@ export interface RouteCouncilModelsParams {
   personas: Persona[];
   synthesizer: Persona;
   catalog?: RawOpenRouterModel[] | { id: string; name?: string }[];
+  rawModelsCatalog?: RawOpenRouterModel[];
   budget?: 'free' | 'paid' | 'fastAndFree' | 'fastAndCheap' | 'bestValue' | 'highestQuality' | 'fast_and_free' | 'fast_and_cheap' | 'best_value' | 'highest_quality' | string;
   manualOverrides?: Record<string, string | undefined>;
   autoSelectModels?: boolean;
@@ -308,6 +309,7 @@ export interface RouteCouncilModelsResult {
 
 export interface SmartSelectionOptions {
   availableModels?: { id: string; name: string }[];
+  rawModelsCatalog?: RawOpenRouterModel[];
   isFreeOnly?: boolean;
   autoSelectModels?: boolean;
 }
@@ -374,7 +376,7 @@ const STANDARD_ROLE_CANDIDATES: Record<'skeptic' | 'visionary' | 'pragmatist' | 
   synthesizer: [
     'anthropic/claude-3.7-sonnet',
     'google/gemini-2.5-flash',
-    'google/gemini-2.0-pro-exp-02-05',
+    'google/gemini-2.5-pro',
     'openai/gpt-4o',
     'deepseek/deepseek-r1',
   ],
@@ -417,7 +419,7 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
 
   const budgetMode = params.budget || 'all';
   const autoSelectEnabled = params.autoSelectModels !== false;
-  const rawCatalog = params.catalog || [];
+  const rawCatalog = params.rawModelsCatalog || (params.catalog as RawOpenRouterModel[]) || [];
   const manualOverrides = params.manualOverrides || {};
   const warnings: string[] = [];
 
@@ -571,11 +573,10 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
         });
       }
 
-      // Sort candidate pool by domain score
+      // Sort candidate pool by domain score with deterministic tie-breaker
       eligibleCatalog.sort((a, b) => {
-        const scoreA = scoredModelMap.get(a.id) ?? 0;
-        const scoreB = scoredModelMap.get(b.id) ?? 0;
-        return scoreB - scoreA;
+        const d = (scoredModelMap.get(b.id) ?? 0) - (scoredModelMap.get(a.id) ?? 0);
+        return Math.abs(d) > 1e-6 ? d : a.id.localeCompare(b.id);
       });
 
       // Pass 1: Strict Uniqueness (Distinct Model, Org, Family)
@@ -742,6 +743,19 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
 
   const timestamp = Date.now();
 
+  if (typeof console !== 'undefined' && console.table) {
+    console.table(
+      selectionDetails.map((d) => ({
+        role: d.roleKey,
+        prev: d.previousModel,
+        selected: d.selectedModel,
+        source: d.source,
+        score: d.score !== undefined ? d.score.toFixed(3) : 'N/A',
+        reason: d.reason,
+      }))
+    );
+  }
+
   return {
     assignments,
     updatedPersonas,
@@ -772,6 +786,7 @@ export function applySmartModelSelection(
   options?: SmartSelectionOptions | { id: string; name: string }[]
 ): SmartSelectionResult {
   let availableModels: { id: string; name: string }[] = [];
+  let rawModelsCatalog: RawOpenRouterModel[] | undefined = undefined;
   let isFreeOnly = false;
   let autoSelectEnabled = true;
 
@@ -779,6 +794,7 @@ export function applySmartModelSelection(
     availableModels = options;
   } else if (options) {
     availableModels = options.availableModels || [];
+    rawModelsCatalog = options.rawModelsCatalog;
     isFreeOnly = !!options.isFreeOnly;
     if (options.autoSelectModels !== undefined) {
       autoSelectEnabled = options.autoSelectModels;
@@ -789,7 +805,8 @@ export function applySmartModelSelection(
     domain,
     personas,
     synthesizer,
-    catalog: availableModels,
+    catalog: rawModelsCatalog || availableModels,
+    rawModelsCatalog,
     budget: isFreeOnly ? 'free' : undefined,
     autoSelectModels: autoSelectEnabled,
   });

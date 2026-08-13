@@ -14,6 +14,9 @@ export interface ModelRates {
 
 export const MODEL_PRICING: Record<string, ModelRates> = {
   // Google
+  'google/gemini-3.6-flash': { prompt: 0.15, completion: 0.60 },
+  'google/gemini-3.5-flash': { prompt: 0.15, completion: 0.60 },
+  'google/gemini-2.5-pro': { prompt: 1.25, completion: 5.00 },
   'google/gemini-2.5-flash': { prompt: 0.10, completion: 0.40 },
   'google/gemini-2.0-flash': { prompt: 0.10, completion: 0.40 },
   'google/gemini-1.5-flash': { prompt: 0.075, completion: 0.30 },

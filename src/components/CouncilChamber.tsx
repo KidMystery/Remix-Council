@@ -28,6 +28,7 @@ import { ExecutionMode, ResolvedExecutionMode, classifyQueryMode, resolveExecuti
 import { FallbackAuditModal } from './FallbackAuditModal';
 import { CouncilSummaryBar } from './CouncilSummaryBar';
 import { ModelDetailsCard } from './ModelDetailsCard';
+import { SynthesizeConsensusPanel } from './SynthesizeConsensusPanel';
 import { AuditLogModal } from './AuditLogModal';
 import { CompareProCard } from './CompareProCard';
 import {
@@ -48,6 +49,10 @@ import {
   computeOrderedBackupList,
 } from '../lib/fallbackManager';
 import { GroundingSourcesCard } from './GroundingSourcesCard';
+import { HeaderActions } from './HeaderActions';
+import { Composer } from './Composer';
+import { CouncilRoundView } from './CouncilRoundView';
+import { SynthesisCard } from './SynthesisCard';
 import {
   Settings as SettingsIcon,
   Globe,
@@ -171,6 +176,9 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       const savedQuickTokens = localStorage.getItem('council_quick_tokens');
       const savedSynthTokens = localStorage.getItem('council_synth_tokens');
       const savedTimeout = localStorage.getItem('council_panel_timeout');
+      const savedCostCeiling = localStorage.getItem('council_cost_ceiling');
+      const savedStopStage1 = localStorage.getItem('council_stop_after_stage1');
+      const savedSingleModelSimple = localStorage.getItem('council_single_model_simple');
 
       const defaultModels = savedModels
         ? JSON.parse(savedModels)
@@ -189,6 +197,9 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         quickPanelMaxTokens: savedQuickTokens ? parseInt(savedQuickTokens, 10) : 350,
         synthesisMaxTokens: savedSynthTokens ? parseInt(savedSynthTokens, 10) : 500,
         panelTimeoutSeconds: savedTimeout ? parseInt(savedTimeout, 10) : 30,
+        maxRoundCostCeiling: savedCostCeiling ? parseFloat(savedCostCeiling) : 0,
+        stopAfterStage1: savedStopStage1 === 'true',
+        useSingleModelForSimple: savedSingleModelSimple === 'true',
       };
     } catch {
       return {
@@ -205,6 +216,9 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         quickPanelMaxTokens: 350,
         synthesisMaxTokens: 500,
         panelTimeoutSeconds: 30,
+        maxRoundCostCeiling: 0,
+        stopAfterStage1: false,
+        useSingleModelForSimple: false,
       };
     }
   });
@@ -223,6 +237,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     addRoundToActiveSession,
     updateRoundInActiveSession,
     deleteRoundFromActiveSession,
+    exportSessionsJSON,
+    importSessionsJSON,
   } = useSessionManager();
 
   // Council Reducer for decoupled state updates
@@ -287,21 +303,30 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   };
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [isSessionListOpen, setIsSessionListOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [sessionSearchQuery, setSessionSearchQuery] = useState('');
-  const [expandedTranscriptIds, setExpandedTranscriptIds] = useState<Set<string>>(new Set());
   const [fallbackLogs, setFallbackLogs] = useState<FallbackEvent[]>(() => getStoredFallbackEvents());
   const [isFallbackModalOpen, setIsFallbackModalOpen] = useState(false);
   const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
   const [isProCompareEnabled, setIsProCompareEnabled] = useState<boolean>(() => getProCompareSetting());
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const showToast = (msg: string, duration = 3500) => {
+    setToastMessage(msg);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToastMessage(null), duration);
+  };
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
 
   const handleToggleProCompare = () => {
     const nextVal = !isProCompareEnabled;
     setIsProCompareEnabled(nextVal);
     setProCompareSetting(nextVal);
-    setToastMessage(nextVal ? '⚡ Blind Pro Compare (Phase 2) Enabled' : '⏸️ Blind Pro Compare Disabled');
+    showToast(nextVal ? '⚡ Blind Pro Compare (Phase 2) Enabled' : '⏸️ Blind Pro Compare Disabled');
   };
 
   const rotateRoleAssignments = () => {
@@ -329,18 +354,10 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     setInternalSettings(updatedSettings);
     if (onUpdateSettings) onUpdateSettings(updatedSettings);
 
-    setToastMessage('🔄 Role model assignments rotated across active council members');
-    setTimeout(() => setToastMessage(null), 3500);
+    showToast('🔄 Role model assignments rotated across active council members', 3500);
   };
 
-  const toggleTranscriptExpand = (roundId: string) => {
-    setExpandedTranscriptIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(roundId)) next.delete(roundId);
-      else next.add(roundId);
-      return next;
-    });
-  };
+  ;
 
   const updateExecutionMode = (mode: ExecutionMode) => {
     localStorage.setItem('council_execution_mode', mode);
@@ -377,6 +394,43 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     if (onUpdateSettings) onUpdateSettings(updated);
   };
 
+  const updateMaxRoundCostCeiling = (val: number) => {
+    localStorage.setItem('council_cost_ceiling', val.toString());
+    const updated = { ...settings, maxRoundCostCeiling: val };
+    setInternalSettings(updated);
+    if (onUpdateSettings) onUpdateSettings(updated);
+  };
+
+  const updateStopAfterStage1 = (val: boolean) => {
+    localStorage.setItem('council_stop_after_stage1', val.toString());
+    const updated = { ...settings, stopAfterStage1: val };
+    setInternalSettings(updated);
+    if (onUpdateSettings) onUpdateSettings(updated);
+  };
+
+  const updateUseSingleModelForSimple = (val: boolean) => {
+    localStorage.setItem('council_single_model_simple', val.toString());
+    const updated = { ...settings, useSingleModelForSimple: val };
+    setInternalSettings(updated);
+    if (onUpdateSettings) onUpdateSettings(updated);
+  };
+
+  const handleImportSessionsFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      if (text) {
+        const result = importSessionsJSON(text);
+        if (result.success) {
+          showToast(`Imported ${result.count} session(s) successfully!`);
+        } else {
+          showToast(`Import failed: ${result.error}`, 4000);
+        }
+      }
+    };
+    reader.readAsText(file);
+  };
+
   const filteredSessions = sessions.filter((s) => {
     if (!sessionSearchQuery.trim()) return true;
     const q = sessionSearchQuery.toLowerCase();
@@ -401,8 +455,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   const handleClearActiveHistory = () => {
     dispatch({ type: 'SET_ROUNDS', payload: [] });
     clearSessionHistory(activeSessionId || undefined);
-    setToastMessage('🗑️ Chat history cleared for this thread');
-    setTimeout(() => setToastMessage(null), 3000);
+    showToast('🗑️ Chat history cleared for this thread', 3000);
   };
 
   const handleEditPrompt = (roundId: string) => {
@@ -508,14 +561,22 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
               unzippedResult: zipResult,
             },
           ]);
-          setToastMessage(`📦 Extracted ${zipResult.extractedCodeFilesCount} code files from ${file.name}`);
+          if (zipResult.wasTruncated) {
+            showToast(`📦 Extracted ${zipResult.extractedCodeFilesCount} files from ${file.name} (capped by guardrails)`);
+          } else {
+            showToast(`📦 Extracted ${zipResult.extractedCodeFilesCount} code files from ${file.name}`);
+          }
         } catch (error) {
           console.error("Error reading zip archive:", error);
           setFileError(`Could not read code from zip file: ${file.name}`);
         }
       } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
         try {
-          const text = await extractTextFromPDF(file);
+          let text = await extractTextFromPDF(file);
+          if (text.length > 100_000) {
+            text = text.slice(0, 100_000) + '\n\n... [PDF TRUNCATED AFTER 100,000 CHARS]';
+            showToast(`⚠️ PDF ${file.name} truncated to 100,000 characters.`);
+          }
           setAttachedFiles((prev) => [
             ...prev,
             { name: file.name, content: text, size: file.size, type: 'application/pdf' },
@@ -538,8 +599,13 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       } else {
         const reader = new FileReader();
         reader.onload = (event) => {
-          const text = event.target?.result;
-          if (typeof text === 'string') {
+          const result = event.target?.result;
+          if (typeof result === 'string') {
+            let text = result;
+            if (text.length > 100_000) {
+              text = text.slice(0, 100_000) + '\n\n... [FILE TRUNCATED AFTER 100,000 CHARS]';
+              showToast(`⚠️ File ${file.name} truncated to 100,000 characters.`);
+            }
             setAttachedFiles((prev) => [
               ...prev,
               { name: file.name, content: text, size: file.size, type: file.type || 'text/plain' },
@@ -577,7 +643,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     }
   };
 
-  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+  const handleDrop = async (e: React.DragEvent<HTMLElement>) => {
     e.preventDefault();
     e.stopPropagation();
     if (e.dataTransfer && e.dataTransfer.items) {
@@ -587,7 +653,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     }
   };
 
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+  const handleDragOver = (e: React.DragEvent<HTMLElement>) => {
     e.preventDefault();
     e.stopPropagation();
   };
@@ -662,6 +728,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
     const result = applySmartModelSelection(domainToApply, personas, synthesizer, {
       availableModels,
+      rawModelsCatalog,
       isFreeOnly,
       autoSelectModels,
     });
@@ -718,6 +785,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         synthesizer,
         {
           availableModels: freshAvailableModels,
+          rawModelsCatalog: freshModels,
           isFreeOnly,
           autoSelectModels,
         }
@@ -758,7 +826,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   );
 
   const sessionCostMetrics = countTotalSessionCost(rounds);
-  const dupInfo = checkDuplicateModels(personas, synthesizer);
 
   const handleApplyPreset = (presetId: PresetId) => {
     setActivePresetId(presetId);
@@ -790,6 +857,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       synthesizer,
       {
         availableModels,
+        rawModelsCatalog,
         isFreeOnly,
         autoSelectModels: true,
       }
@@ -829,7 +897,12 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   const [collapsedRoundIds, setCollapsedRoundIds] = useState<Set<string>>(new Set());
   const [fileError, setFileError] = useState<string | null>(null);
 
-  const totalSessionTokens = countTotalSessionTokens(rounds);
+  useEffect(() => {
+    if (!fileError) return;
+    const t = window.setTimeout(() => setFileError(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [fileError]);
+
   const queryTokens = estimateTokens(query);
 
   const scrollToBottom = () => {
@@ -871,11 +944,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     };
   }, []);
 
-  const handleCopy = (id: string, text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
-  };
+  ;
 
   const handleStop = () => {
     if (abortControllerRef.current) {
@@ -1182,26 +1251,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     return { auditLogId: logId, proComparisonData };
   };
 
-  const regenerateSynthesis = async (roundId: string) => {
-    if (isDeliberating) return;
-
-    const round = rounds.find((r) => r.id === roundId);
-    if (!round) return;
-
-    setIsDeliberating(true);
-    const abortController = new AbortController();
-    abortControllerRef.current = abortController;
-
-    const stage1Map = (round.deliberation?.stage1 || (round as any).responses || {}) as Record<string, PersonaResponse>;
-    const stage2Map = (round.deliberation?.stage2 || {}) as Record<string, PersonaResponse>;
-
-    try {
-      await runSynthesisPhase(roundId, round.userQuery, round.attachedImages, stage1Map, stage2Map, abortController.signal);
-    } finally {
-      setIsDeliberating(false);
-      abortControllerRef.current = null;
-    }
-  };
+  ;
 
   const handleRegeneratePersona = async (roundId: string, personaId: string, stage: 1 | 2) => {
     if (isDeliberating) return;
@@ -1700,6 +1750,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
     const smartSelection = applySmartModelSelection(domainToApply, personas, synthesizer, {
       availableModels,
+      rawModelsCatalog,
       isFreeOnly,
       autoSelectModels,
     });
@@ -1777,6 +1828,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           signal: perCallSignal,
           activePersonas,
           synthesizer,
+          rawModels: rawModelsCatalog,
           isFreeOnlyPreset: activePersonas.every((p) => (p.model || '').includes(':free')),
           onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
           onGrounding: (gData) => { streamGroundingData = gData; },
@@ -1869,6 +1921,69 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       return;
     }
 
+    // Check if Stop After Stage 1 setting is enabled
+    if (settings.stopAfterStage1) {
+      showToast("Option 'Stop after Stage 1' active — proceeding directly to synthesis.", 3000);
+      try {
+        const fullSynthText = await runSynthesisPhase(roundId, queryText, attachedImages, stage1Outputs, {}, abortController.signal);
+        const roundWallClockMs = Date.now() - roundStartMs;
+        await buildAndSaveAuditLog(
+          roundId,
+          queryText,
+          activePresetId,
+          mode,
+          activePersonas,
+          synthesizer,
+          stage1Outputs,
+          {},
+          { content: fullSynthText || '', model: synthesizer.model || settings.defaultModels['synthesizer'] },
+          roundWallClockMs,
+          fallbackLogs,
+          isProCompareEnabled,
+          settings.apiKey,
+          abortController.signal
+        );
+      } finally {
+        setIsDeliberating(false);
+        abortControllerRef.current = null;
+      }
+      return;
+    }
+
+    // Check cost ceiling after Stage 1
+    if (settings.maxRoundCostCeiling && settings.maxRoundCostCeiling > 0) {
+      const currentRoundCost = countRoundCost(
+        { id: roundId, userQuery: queryText, timestamp: Date.now(), deliberation: { stage1: stage1Outputs } } as any
+      ).totalCost;
+      if (currentRoundCost >= settings.maxRoundCostCeiling) {
+        showToast(`Cost ceiling (${settings.maxRoundCostCeiling.toFixed(2)}) reached after Stage 1. Running synthesis...`, 4000);
+        try {
+          const fullSynthText = await runSynthesisPhase(roundId, queryText, attachedImages, stage1Outputs, {}, abortController.signal);
+          const roundWallClockMs = Date.now() - roundStartMs;
+          await buildAndSaveAuditLog(
+            roundId,
+            queryText,
+            activePresetId,
+            mode,
+            activePersonas,
+            synthesizer,
+            stage1Outputs,
+            {},
+            { content: fullSynthText || '', model: synthesizer.model || settings.defaultModels['synthesizer'] },
+            roundWallClockMs,
+            fallbackLogs,
+            isProCompareEnabled,
+            settings.apiKey,
+            abortController.signal
+          );
+        } finally {
+          setIsDeliberating(false);
+          abortControllerRef.current = null;
+        }
+        return;
+      }
+    }
+
     // Stage 2: Deep Council Peer Review with Anonymized Inputs
     const activeStage2: Record<string, PersonaResponse> = {};
     activePersonas.forEach((p) => {
@@ -1935,6 +2050,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           signal: abortController.signal,
           activePersonas,
           synthesizer,
+          rawModels: rawModelsCatalog,
           isFreeOnlyPreset: activePersonas.every((p) => (p.model || '').includes(':free')),
           onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
           onGrounding: (gData) => { streamGroundingData2 = gData; },
@@ -2125,13 +2241,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     }
   };
 
-  const handleDeepenAnswer = async (roundId: string) => {
-    if (isDeliberating) return;
-    const round = rounds.find((r) => r.id === roundId);
-    if (!round) return;
-
-    await runRoundExecution(round.id, round.userQuery, round.attachedImages, 'deep_council');
-  };
+  ;
 
   const reRunRoundDeliberation = async (roundId: string) => {
     if (isDeliberating) return;
@@ -2183,9 +2293,15 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     const mode = resolveExecutionMode(settings.executionMode || 'auto', currentQuery, textFiles);
     const roundId = `round-${Date.now()}`;
 
+    let targetPersonas = activePersonas;
+    if (settings.useSingleModelForSimple && mode === 'quick_panel' && activePersonas.length > 1) {
+      targetPersonas = [activePersonas[0]];
+      showToast(`'Use single model for simple questions' active — routing query to ${targetPersonas[0].name} (${targetPersonas[0].model})`, 3000);
+    }
+
     const initialStage1: Record<string, PersonaResponse> = {};
     const initialStage2: Record<string, PersonaResponse> = {};
-    activePersonas.forEach((p) => {
+    targetPersonas.forEach((p) => {
       initialStage1[p.id] = { personaId: p.id, content: '', status: 'streaming' };
       initialStage2[p.id] = { personaId: p.id, content: '', status: 'idle' };
     });
@@ -2368,18 +2484,21 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               </h1>
               <p className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 hidden md:flex items-center gap-2">
                 <span>Multi-Model Deliberation Engine</span>
-                {!basicMode && (
-                  <span
-                    className="inline-flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded-md border border-emerald-800/60 shadow-sm"
-                    title={`Total Tokens: ${sessionCostMetrics.totalTokens.toLocaleString()}
+                <span
+                  className="inline-flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded-md border border-emerald-800/60 shadow-sm"
+                  title={`Total Tokens: ${sessionCostMetrics.totalTokens.toLocaleString()}
 • Prompt Tokens: ${sessionCostMetrics.promptTokens.toLocaleString()} (${formatCost(sessionCostMetrics.promptCost)})
 • Completion Tokens: ${sessionCostMetrics.completionTokens.toLocaleString()} (${formatCost(sessionCostMetrics.completionCost)})`}
-                  >
-                    <DollarSign size={11} className="text-emerald-400" />
-                    <span className="font-bold">{formatCost(sessionCostMetrics.totalCost)}</span>
-                    <span className="text-slate-500 dark:text-slate-400 text-[9px] border-l border-emerald-800/80 pl-1.5">
-                      {sessionCostMetrics.promptTokens > 1000 ? `${(sessionCostMetrics.promptTokens / 1000).toFixed(1)}k in` : `${sessionCostMetrics.promptTokens} in`} / {sessionCostMetrics.completionTokens > 1000 ? `${(sessionCostMetrics.completionTokens / 1000).toFixed(1)}k out` : `${sessionCostMetrics.completionTokens} out`}
-                    </span>
+                >
+                  <DollarSign size={11} className="text-emerald-400" />
+                  <span className="font-bold">{formatCost(sessionCostMetrics.totalCost)}</span>
+                  <span className="text-slate-500 dark:text-slate-400 text-[9px] border-l border-emerald-800/80 pl-1.5">
+                    {sessionCostMetrics.promptTokens > 1000 ? `${(sessionCostMetrics.promptTokens / 1000).toFixed(1)}k in` : `${sessionCostMetrics.promptTokens} in`} / {sessionCostMetrics.completionTokens > 1000 ? `${(sessionCostMetrics.completionTokens / 1000).toFixed(1)}k out` : `${sessionCostMetrics.completionTokens} out`}
+                  </span>
+                </span>
+                {basicMode && (
+                  <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/80 px-2 py-0.5 rounded-md border border-cyan-800/60">
+                    Consensus View: Showing consensus only — full debate runs in background
                   </span>
                 )}
               </p>
@@ -2423,7 +2542,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               </span>
             </button>
 
-            {/* Basic Mode / Detailed Mode Toggle */}
+            {/* Consensus View / Full Debate Toggle */}
             <button
               type="button"
               onClick={toggleBasicMode}
@@ -2432,31 +2551,41 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                   ? 'bg-cyan-500/10 dark:bg-cyan-950/60 border-cyan-500/50 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-500/30'
                   : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
               }`}
-              title={basicMode ? "Basic Mode active (showing Consensus only). Click to switch to Detailed Mode." : "Detailed Mode active (showing full debate & peer review). Click to switch to Basic Mode."}
+              title={
+                basicMode
+                  ? "Consensus View active: Showing consensus only — full debate runs in background"
+                  : "Full Debate active: Showing all persona stage outputs and peer reviews"
+              }
             >
               {basicMode ? (
                 <>
                   <Eye size={14} className="text-cyan-500 shrink-0" />
-                  <span className="hidden sm:inline">Basic</span>
+                  <span className="hidden sm:inline">Consensus View</span>
                 </>
               ) : (
                 <>
                   <EyeOff size={14} className="text-slate-400 shrink-0" />
-                  <span className="hidden sm:inline">Detailed</span>
+                  <span className="hidden sm:inline">Full Debate</span>
                 </>
               )}
             </button>
 
-            {/* Settings Button */}
-            <button
-              type="button"
-              onClick={() => setIsSettingsOpen(true)}
-              className="p-1.5 sm:px-3 sm:py-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm shrink-0"
-              title="Open Settings"
-            >
-              <SettingsIcon size={14} className="text-slate-500 dark:text-slate-400" />
-              <span className="hidden sm:inline">Settings</span>
-            </button>
+            {/* Header Actions Component */}
+            <HeaderActions
+              executionMode={settings.executionMode || 'auto'}
+              onUpdateExecutionMode={updateExecutionMode}
+              isProCompareEnabled={isProCompareEnabled}
+              onToggleProCompare={handleToggleProCompare}
+              theme={theme}
+              onSetTheme={setTheme}
+              onOpenAuditModal={() => setIsAuditModalOpen(true)}
+              onExportSessions={exportSessionsJSON}
+              onImportSessions={handleImportSessionsFile}
+              onOpenSettings={() => setIsSettingsOpen(true)}
+              maxRoundCostCeiling={settings.maxRoundCostCeiling}
+              stopAfterStage1={settings.stopAfterStage1}
+              useSingleModelForSimple={settings.useSingleModelForSimple}
+            />
 
             {/* New Thread Button */}
             <button
@@ -2481,7 +2610,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
             personas={personas}
             synthesizer={synthesizer}
             rawModels={rawModelsCatalog}
-            updatedAt={recommendationMetadata?.fetchedAt}
+            updatedAt={recommendationMetadata?.updatedAt}
           />
         )}
         {(() => {
@@ -2546,604 +2675,39 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                 </button>
               </div>
             )}
-            {rounds.map((round, idx) => {
-            const isCollapsed = collapsedRoundIds.has(round.id);
-            const displayQuery = round.userQuery.includes('\n\nUser Question:\n') 
-              ? round.userQuery.split('\n\nUser Question:\n')[1] 
-              : round.userQuery.startsWith('--- Attached File:') 
-                ? '[Attached Files Only]' 
-                : round.userQuery;
-
-            return (
-            <div key={round.id} className="space-y-6 border-b border-slate-200 dark:border-slate-700/80 pb-8 last:border-0">
-              {/* User Query Banner */}
-              <div 
-                className="p-4 rounded-xl bg-white dark:bg-slate-900/90 dark:bg-slate-800/90 hover:bg-slate-100/90 border border-slate-200 dark:border-slate-700 flex items-start justify-between space-x-4 shadow-md transition-colors cursor-pointer"
-                onClick={() => toggleRoundCollapse(round.id)}
-              >
-                <div className="space-y-1 flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[11px] font-mono text-cyan-400 uppercase tracking-wider">
-                      User Decision / Query (Round {idx + 1})
-                    </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigator.clipboard.writeText(round.userQuery);
-                        setCopiedId(`prompt-${round.id}`);
-                        setTimeout(() => setCopiedId(null), 2000);
-                      }}
-                      className="text-slate-500 dark:text-slate-400 hover:text-slate-600 transition-colors flex items-center justify-center"
-                      title="Copy prompt"
-                    >
-                      {copiedId === `prompt-${round.id}` ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
-                    </button>
-                    {idx > 1 && (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-mono text-indigo-400 bg-indigo-950/60 px-1.5 py-0.5 rounded border border-indigo-800/50">
-                        <Brain size={10} /> Archivist Memory Active
-                      </span>
-                    )}
-                    {!isCollapsed && (() => {
-                      const activePersonas = personas.filter((p) => p.enabled !== false);
-                      const statusInfo = getRoundIncompleteStage(round, activePersonas);
-
-                      if (statusInfo.isIncomplete) {
-                        return (
-                          <div className="flex items-center gap-1.5 flex-wrap" onClick={(e) => e.stopPropagation()}>
-                            <button
-                              onClick={() => resumeIncompleteRound(round.id)}
-                              disabled={isDeliberating}
-                              className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-200 bg-amber-950/90 hover:bg-amber-900/90 px-2 py-0.5 rounded border border-amber-600/80 transition-colors shadow-sm disabled:opacity-50"
-                              title={`Resume deliberation at ${statusInfo.description}`}
-                            >
-                              <Play size={10} className={isDeliberating ? 'animate-spin text-amber-300' : 'fill-current text-amber-300'} />
-                              <span>Resume {statusInfo.description}</span>
-                            </button>
-                            <button
-                              onClick={() => reRunRoundDeliberation(round.id)}
-                              disabled={isDeliberating}
-                              className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700/60 transition-colors disabled:opacity-50"
-                              title="Re-run all stages from scratch"
-                            >
-                              <RefreshCw size={10} />
-                              <span>Re-run All</span>
-                            </button>
-                            <button
-                              onClick={() => handleEditPrompt(round.id)}
-                              disabled={isDeliberating}
-                              className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700/60 transition-colors disabled:opacity-50"
-                              title="Edit this prompt"
-                            >
-                              <Edit3 size={10} />
-                              <span>Edit Prompt</span>
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (confirm('Delete this prompt attempt?')) {
-                                  handleDeleteRound(round.id);
-                                }
-                              }}
-                              disabled={isDeliberating}
-                              className="inline-flex items-center gap-1 text-[10px] font-mono text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-900/60 px-2 py-0.5 rounded border border-red-800/50 transition-colors disabled:opacity-50"
-                              title="Delete this prompt attempt"
-                            >
-                              <Trash2 size={10} />
-                              <span>Delete Prompt</span>
-                            </button>
-                          </div>
-                        );
-                      }
-                      return (
-                        <div className="flex items-center gap-1.5 flex-wrap" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            onClick={() => reRunRoundDeliberation(round.id)}
-                            disabled={isDeliberating}
-                            className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 dark:text-slate-400 hover:text-cyan-300 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700/60 transition-colors disabled:opacity-50"
-                            title="Re-run deliberation for this query"
-                          >
-                            <RefreshCw size={10} />
-                            <span>Re-run Deliberation</span>
-                          </button>
-                          <button
-                            onClick={() => handleEditPrompt(round.id)}
-                            disabled={isDeliberating}
-                            className="inline-flex items-center gap-1 text-[10px] font-mono text-slate-500 dark:text-slate-400 hover:text-cyan-300 bg-slate-100/80 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700/60 transition-colors disabled:opacity-50"
-                            title="Edit this prompt"
-                          >
-                            <Edit3 size={10} />
-                            <span>Edit Prompt</span>
-                          </button>
-                          <button
-                            onClick={() => {
-                              if (confirm('Delete this prompt attempt?')) {
-                                handleDeleteRound(round.id);
-                              }
-                            }}
-                            disabled={isDeliberating}
-                            className="inline-flex items-center gap-1 text-[10px] font-mono text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-900/60 px-2 py-0.5 rounded border border-red-800/50 transition-colors disabled:opacity-50"
-                            title="Delete this prompt attempt"
-                          >
-                            <Trash2 size={10} />
-                            <span>Delete Prompt</span>
-                          </button>
-                        </div>
-                      );
-                    })()}
-                  </div>
-                  <p className={`text-sm font-semibold text-slate-800 dark:text-slate-100 ${isCollapsed ? 'truncate' : 'line-clamp-3'}`}>
-                    {isCollapsed ? (displayQuery.length > 80 ? displayQuery.substring(0, 80) + '...' : displayQuery) : displayQuery}
-                  </p>
-                  {!isCollapsed && round.attachedImages && round.attachedImages.length > 0 && (
-                    <div className="flex flex-wrap gap-2 mt-2">
-                      {round.attachedImages.map((img, i) => (
-                        <div key={i} className="relative group rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 overflow-hidden">
-                          <img src={img.url} alt={img.name} className="w-12 h-12 object-cover" />
-                          <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-50">
-                            <img src={img.url} alt={img.name} className="max-w-[300px] max-h-[300px] object-contain rounded border border-slate-200 dark:border-slate-700 shadow-2xl bg-slate-50 dark:bg-slate-900" />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <div className="flex flex-col items-end gap-2 shrink-0">
-                  <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono whitespace-nowrap">
-                    {new Date(round.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                  {isCollapsed ? <ChevronDown size={14} className="text-slate-500 dark:text-slate-400" /> : <ChevronUp size={14} className="text-slate-500 dark:text-slate-400" />}
-                </div>
-              </div>
-
-              {!isCollapsed && (
-                <>
-              {/* Stage 1: Initial Proposals / Quick Panel Answers */}
-              {!basicMode && (
-              <div className="space-y-3 min-w-0">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-                    {round.resolvedMode === 'quick_panel' ? (
-                      <span className="text-amber-300 flex items-center gap-1.5">
-                        <Zap size={13} className="text-amber-400" />
-                        Stage 1: Quick Panel Responses
-                      </span>
-                    ) : Object.keys(round.deliberation?.stage1 || {}).length <= 1 ? (
-                      'Stage 1: Single Council Member Evaluation'
-                    ) : (
-                      'Stage 1: Initial Proposals'
-                    )}
-                    {basicMode && (
-                      <span className="text-[10px] lowercase font-normal px-2 py-0.5 rounded bg-cyan-950/40 text-cyan-400 border border-cyan-800/50 ml-1">
-                        ✓ {Object.keys(round.deliberation?.stage1 || {}).length} responses logged
-                      </span>
-                    )}
-                  </h3>
-                </div>
-                <div className={`flex flex-col gap-3 md:gap-4 min-w-0 w-full transition-all duration-300 ease-in-out ${basicMode ? "hidden" : ""}`}>
-                  {personas
-                    .filter((persona) => round.deliberation?.stage1?.[persona.id] || persona.enabled !== false)
-                    .map((persona) => {
-                      const resp = round.deliberation?.stage1?.[persona.id] || (round as any).responses?.[persona.id];
-                      const copyKey = `${round.id}-stage1-${persona.id}`;
-                      return (
-                        <div
-                          key={persona.id}
-                          className={`p-4 sm:p-5 rounded-xl bg-white dark:bg-slate-900/90 dark:bg-slate-800/90 dark:bg-white dark:bg-slate-900/80 border ${persona.color} flex flex-col justify-between space-y-4 shadow-sm hover:shadow-md transition-all duration-200 min-w-0 max-w-full overflow-hidden break-words h-full`}
-                        >
-                          <div className="space-y-3 min-w-0">
-                            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-700/60 pb-2.5 min-w-0 gap-2">
-                              <div className="flex items-center space-x-2.5 min-w-0 truncate">
-                                <span className="text-xl shrink-0">{persona.avatar}</span>
-                                <div className="min-w-0 truncate">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100 leading-tight truncate">{persona.name}</h3>
-                                    {(resp?.model || persona.model) && (
-                                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border inline-flex items-center gap-1 shrink-0 ${
-                                        resp?.grounding || (settings?.enableSearchGrounding && !(resp?.model || persona.model || '').toLowerCase().includes('gemini'))
-                                          ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/70'
-                                          : resp?.model && persona.model && resp.model !== persona.model
-                                          ? 'bg-amber-950/70 text-amber-300 border-amber-700/70'
-                                          : 'bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                                      }`} title={
-                                        resp?.grounding
-                                          ? `Grounded search completed via ${resp.model || 'Gemini'}`
-                                          : resp?.model && persona.model && resp.model !== persona.model
-                                          ? `Assigned: ${persona.model} → Executed: ${resp.model}`
-                                          : `Model: ${resp?.model || persona.model}`
-                                      }>
-                                        {(resp?.grounding || (settings?.enableSearchGrounding && !(resp?.model || persona.model || '').toLowerCase().includes('gemini'))) && (
-                                          <Globe size={10} className="text-emerald-400 shrink-0" />
-                                        )}
-                                        <span>{resp?.model || persona.model}</span>
-                                      </span>
-                                    )}
-                                  </div>
-                                  <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">{persona.role}</p>
-                                </div>
-                              </div>
-                              <div className="flex items-center space-x-1 shrink-0">
-                                <button
-                                  type="button"
-                                  disabled={isDeliberating}
-                                  onClick={() => handleRegeneratePersona(round.id, persona.id, 1)}
-                                  className="text-slate-500 dark:text-slate-400 hover:text-cyan-300 disabled:opacity-30 transition-colors p-1.5 rounded hover:bg-slate-100/80"
-                                  title="Regenerate persona proposal"
-                                >
-                                  <RefreshCw size={13} className={resp?.status === 'streaming' ? 'animate-spin text-cyan-400' : ''} />
-                                </button>
-                                {resp?.content && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => speak(resp.content, copyKey)}
-                                      className={`transition-colors p-1.5 rounded hover:bg-slate-100/80 ${
-                                        speakingId === copyKey ? 'text-cyan-400 bg-cyan-950/60 animate-pulse' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
-                                      } flex items-center gap-1 font-medium text-[10px]`}
-                                      title={speakingId === copyKey ? 'Stop reading' : 'Read response aloud'}
-                                    >
-                                      {speakingId === copyKey ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                                      <span>{speakingId === copyKey ? 'Stop' : 'Listen'}</span>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleCopy(copyKey, resp.content)}
-                                      className="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 transition-colors p-1.5 rounded hover:bg-slate-100/80"
-                                      title="Copy response"
-                                    >
-                                      {copiedId === copyKey ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-
-                            {resp?.status === 'error' ? (
-                              <div className="text-xs text-red-400 bg-red-950/50 p-3 rounded-lg border border-red-800/50 min-w-0 break-words">
-                                Error: {resp.error}
-                              </div>
-                            ) : resp?.content ? (
-                              <div className="min-w-0 max-w-full overflow-x-auto break-words">
-                                {settings?.enableSearchGrounding && !(persona.model || '').toLowerCase().includes('gemini') && (
-                                  <div className="text-[11px] bg-emerald-950/40 border border-emerald-800/50 text-emerald-300 px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 font-mono mb-2">
-                                    <Globe size={13} className="text-emerald-400 shrink-0" />
-                                    <span>Search Grounding enabled: Call executed on <strong>{resp?.model || 'Gemini'}</strong> (assigned model <em>{persona.model}</em> does not support grounding).</span>
-                                  </div>
-                                )}
-                                <MessageMarkdown content={resp.content} />
-                                <GroundingSourcesCard grounding={resp.grounding} />
-                              </div>
-                            ) : (
-                              <ThinkingIndicator
-                                stageLabel={round.resolvedMode === 'quick_panel' ? 'Quick Answer' : 'Stage 1 Proposal'}
-                                personaName={persona.name}
-                                role={persona.role}
-                                model={settings?.enableSearchGrounding && !(persona.model || '').toLowerCase().includes('gemini') ? `${persona.model} → Gemini (Grounded)` : persona.model || settings.defaultModels[persona.id]}
-                                accentColor="cyan"
-                              />
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                </div>
-
-                {/* Missing Panelist Indicator */}
-                {(() => {
-                  const missing = personas.filter(
-                    (p) => p.enabled !== false && round.deliberation?.stage1?.[p.id]?.status === 'error'
-                  );
-                  if (missing.length === 0) return null;
-                  return (
-                    <div className="text-xs text-amber-300 bg-amber-950/40 border border-amber-800/50 p-2.5 rounded-xl flex items-center gap-2">
-                      <AlertTriangle size={14} className="text-amber-400 shrink-0" />
-                      <span>Missing panelist responses: <strong>{missing.map((p) => p.name).join(', ')}</strong> (timed out or error)</span>
-                    </div>
-                  );
+            {rounds.map((round, idx) => (
+              <CouncilRoundView
+                key={round.id}
+                round={round}
+                index={idx}
+                personas={personas}
+                synthesizer={synthesizer}
+                isDeliberating={isDeliberating}
+                basicMode={basicMode}
+                speakingId={speakingId}
+                copiedId={copiedId}
+                settings={settings}
+                onDeleteRound={handleDeleteRound}
+                onRegeneratePersona={handleRegeneratePersona}
+                onResynthesize={runQuickPanelSynthesis}
+                onSpeak={speak}
+                onCopy={(id, text) => {
+                  navigator.clipboard.writeText(text);
+                  setCopiedId(id);
+                  setTimeout(() => setCopiedId(null), 2000);
+                }}
+                isCollapsed={collapsedRoundIds.has(round.id)}
+                onToggleCollapse={toggleRoundCollapse}
+                onReRunRound={reRunRoundDeliberation}
+                onEditPrompt={handleEditPrompt}
+                onResumeRound={resumeIncompleteRound}
+                incompleteStage={(() => {
+                  const activePersonas = personas.filter((p) => p.enabled !== false);
+                  return getRoundIncompleteStage(round, activePersonas);
                 })()}
-
-                {/* Quick Panel Actions Bar */}
-                {round.resolvedMode === 'quick_panel' && (
-                  <div className="flex flex-wrap items-center justify-between gap-3 pt-2 p-3 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 rounded-xl">
-                    <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                      <Zap size={14} className="text-amber-400" />
-                      <span>Quick Panel Execution Complete</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {(!round.synthesis?.content && round.synthesis?.status !== 'streaming') && (
-                        <button
-                          type="button"
-                          disabled={
-                            isDeliberating ||
-                            Object.values(round.deliberation?.stage1 || {}).filter((r: PersonaResponse | any) => r.status === 'completed').length < 2
-                          }
-                          onClick={() => runQuickPanelSynthesis(round.id)}
-                          className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-colors shadow-sm"
-                          title="Synthesize panelist answers into a single consolidated view"
-                        >
-                          <Sparkles size={13} />
-                          <span>Synthesize Answers</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        disabled={isDeliberating}
-                        onClick={() => handleDeepenAnswer(round.id)}
-                        className="px-3 py-1.5 rounded-lg bg-purple-950 hover:bg-purple-900 text-purple-200 border border-purple-700/60 font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-sm disabled:opacity-40"
-                        title="Run full 3-stage Deep Council peer review on this query"
-                      >
-                        <Layers size={13} className="text-purple-400" />
-                        <span>Deepen this answer 🏛️</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-              )}
-
-              {/* Stage 2: Peer Review & Cross-Examination (Deep Council mode only) */}
-              {!basicMode &&
-                round.resolvedMode === 'deep_council' &&
-                Object.keys(round.deliberation?.stage1 || {}).length > 1 &&
-                round.deliberation?.stage2 &&
-                Object.values(round.deliberation.stage2).some(
-                  (resp: PersonaResponse | any) => resp?.content || resp?.status === 'streaming'
-                ) && (
-                  <div className="space-y-3 pt-2 min-w-0">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-xs font-mono uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
-                        Stage 2: Peer Review & Cross-Examination
-                        {basicMode && (
-                          <span className="text-[10px] lowercase font-normal px-2 py-0.5 rounded bg-purple-950/40 text-purple-300 border border-purple-800/50 ml-1">
-                            ✓ Peer review completed
-                          </span>
-                        )}
-                      </h3>
-                    </div>
-                    <div className={`flex flex-col gap-3 md:gap-4 min-w-0 w-full transition-all duration-300 ease-in-out ${basicMode ? "hidden" : ""}`}>
-                      {personas
-                        .filter((persona) => round.deliberation?.stage2?.[persona.id])
-                        .map((persona) => {
-                          const resp = round.deliberation?.stage2?.[persona.id];
-                          const copyKey = `${round.id}-stage2-${persona.id}`;
-                          if (!resp) return null;
-                          return (
-                            <div
-                              key={`s2-${persona.id}`}
-                              className={`p-4 sm:p-5 rounded-xl bg-white dark:bg-slate-900/90 dark:bg-slate-800/90 dark:bg-white dark:bg-slate-900/80 border ${persona.color} flex flex-col justify-between space-y-4 shadow-sm hover:shadow-md transition-all duration-200 min-w-0 max-w-full overflow-hidden break-words h-full`}
-                            >
-                              <div className="space-y-3 min-w-0">
-                                <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-700/60 pb-2.5 min-w-0 gap-2">
-                                  <div className="flex items-center space-x-2.5 min-w-0 truncate">
-                                    <span className="text-xl shrink-0">{persona.avatar}</span>
-                                    <div className="min-w-0 truncate">
-                                      <div className="flex items-center gap-1.5 flex-wrap">
-                                        <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100 leading-tight truncate">{persona.name}</h3>
-                                        {(resp?.model || persona.model) && (
-                                          <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border inline-flex items-center gap-1 shrink-0 ${
-                                            resp?.grounding || (settings?.enableSearchGrounding && !(resp?.model || persona.model || '').toLowerCase().includes('gemini'))
-                                              ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/70'
-                                              : resp?.model && persona.model && resp.model !== persona.model
-                                              ? 'bg-amber-950/70 text-amber-300 border-amber-700/70'
-                                              : 'bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                                          }`} title={
-                                            resp?.grounding
-                                              ? `Grounded search completed via ${resp.model || 'Gemini'}`
-                                              : resp?.model && persona.model && resp.model !== persona.model
-                                              ? `Assigned: ${persona.model} → Executed: ${resp.model}`
-                                              : `Model: ${resp?.model || persona.model}`
-                                          }>
-                                            {(resp?.grounding || (settings?.enableSearchGrounding && !(resp?.model || persona.model || '').toLowerCase().includes('gemini'))) && (
-                                              <Globe size={10} className="text-emerald-400 shrink-0" />
-                                            )}
-                                            <span>{resp?.model || persona.model}</span>
-                                          </span>
-                                        )}
-                                      </div>
-                                      <p className="text-[11px] text-purple-300/80 truncate">Peer Review</p>
-                                    </div>
-                                  </div>
-                                  <div className="flex items-center space-x-1 shrink-0">
-                                    <button
-                                      type="button"
-                                      disabled={isDeliberating}
-                                      onClick={() => handleRegeneratePersona(round.id, persona.id, 2)}
-                                      className="text-slate-500 dark:text-slate-400 hover:text-purple-300 disabled:opacity-30 transition-colors p-1.5 rounded hover:bg-slate-100/80"
-                                      title="Regenerate peer review"
-                                    >
-                                      <RefreshCw size={13} className={resp?.status === 'streaming' ? 'animate-spin text-purple-400' : ''} />
-                                    </button>
-                                    {resp?.content && (
-                                      <>
-                                        <button
-                                          type="button"
-                                          onClick={() => speak(resp.content, copyKey)}
-                                          className={`transition-colors p-1.5 rounded hover:bg-slate-100/80 ${
-                                        speakingId === copyKey ? 'text-purple-400 bg-purple-950/60 animate-pulse' : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
-                                      } flex items-center gap-1 font-medium text-[10px]`}
-                                          title={speakingId === copyKey ? 'Stop reading' : 'Read response aloud'}
-                                        >
-                                      {speakingId === copyKey ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                                      <span>{speakingId === copyKey ? 'Stop' : 'Listen'}</span>
-                                    </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => handleCopy(copyKey, resp.content)}
-                                          className="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 transition-colors p-1.5 rounded hover:bg-slate-100/80"
-                                          title="Copy response"
-                                        >
-                                          {copiedId === copyKey ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
-                                        </button>
-                                      </>
-                                    )}
-                                  </div>
-                                </div>
-
-                                {resp?.status === 'error' ? (
-                                  <div className="text-xs text-red-400 bg-red-950/50 p-3 rounded-lg border border-red-800/50 min-w-0 break-words">
-                                    Error: {resp.error}
-                                  </div>
-                                ) : resp?.content ? (
-                                  <div className="min-w-0 max-w-full overflow-x-auto break-words">
-                                    {settings?.enableSearchGrounding && !(persona.model || '').toLowerCase().includes('gemini') && (
-                                      <div className="text-[11px] bg-emerald-950/40 border border-emerald-800/50 text-emerald-300 px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 font-mono mb-2">
-                                        <Globe size={13} className="text-emerald-400 shrink-0" />
-                                        <span>Search Grounding enabled: Call executed on <strong>{resp?.model || 'Gemini'}</strong> (assigned model <em>{persona.model}</em> does not support grounding).</span>
-                                      </div>
-                                    )}
-                                    <MessageMarkdown content={resp.content} />
-                                    <GroundingSourcesCard grounding={resp.grounding} />
-                                  </div>
-                                ) : (
-                                  <ThinkingIndicator
-                                    stageLabel="Stage 2 Peer Review"
-                                    personaName={persona.name}
-                                    role="Peer Reviewer"
-                                    model={settings?.enableSearchGrounding && !(persona.model || '').toLowerCase().includes('gemini') ? `${persona.model} → Gemini (Grounded)` : persona.model || settings.defaultModels[persona.id]}
-                                    accentColor="purple"
-                                  />
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                    </div>
-                  </div>
-                )}
-
-              {/* Stage 3: Chairman Synthesis Section */}
-              {(round.synthesis?.content || round.synthesis?.status === 'streaming') && (
-                  <div className="p-6 rounded-2xl bg-gradient-to-b from-amber-950/30 to-slate-900 border border-amber-500/30 shadow-lg space-y-4">
-                    <div className="flex items-center justify-between border-b border-amber-500/20 pb-3">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <h3 className="text-base font-bold text-amber-300 flex items-center gap-2">
-                          <span className="text-lg">⚖️</span> {round.resolvedMode === 'quick_panel' ? 'Quick Panel Synthesis' : Object.keys(round.deliberation?.stage1 || {}).length === 1 ? 'Council Member Response' : 'Stage 3: Council Verdict & Synthesis'}
-                        </h3>
-                        {(round.synthesis?.model || synthesizer.model) && (
-                          <span className={`text-[10px] font-mono px-2 py-0.5 rounded border inline-flex items-center gap-1 ${
-                            round.synthesis?.grounding
-                              ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/70'
-                              : round.synthesis?.model && synthesizer.model && round.synthesis.model !== synthesizer.model
-                              ? 'bg-amber-950/70 text-amber-300 border-amber-700/70'
-                              : 'bg-amber-950/60 text-amber-300 border-amber-700/60'
-                          }`} title={`Synthesis Model: ${round.synthesis?.model || synthesizer.model}`}>
-                            {round.synthesis?.grounding && <Globe size={10} className="text-emerald-400 shrink-0" />}
-                            <span>{round.synthesis?.model || synthesizer.model}</span>
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center space-x-3">
-                        {!isDeliberating && (
-                          <button
-                            onClick={() => round.resolvedMode === 'quick_panel' ? runQuickPanelSynthesis(round.id) : regenerateSynthesis(round.id)}
-                            className="text-amber-400/70 hover:text-amber-200 text-xs font-medium flex items-center gap-1 transition-colors"
-                            title="Re-run synthesis using current stage outputs"
-                          >
-                            <RefreshCw size={13} />
-                            <span>Re-synthesize</span>
-                          </button>
-                        )}
-                        {round.synthesis.content && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => speak(round.synthesis.content, `${round.id}-synthesis`)}
-                              className={`transition-colors p-1.5 rounded hover:bg-amber-900/40 text-xs font-medium flex items-center gap-1 ${
-                                speakingId === `${round.id}-synthesis` ? 'text-amber-300 bg-amber-950/80 animate-pulse' : 'text-amber-400/70 hover:text-amber-200'
-                              }`}
-                              title={speakingId === `${round.id}-synthesis` ? 'Stop reading' : 'Read synthesis aloud'}
-                            >
-                              {speakingId === `${round.id}-synthesis` ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                              <span>{speakingId === `${round.id}-synthesis` ? 'Stop' : 'Listen'}</span>
-                            </button>
-                            <button
-                              onClick={() => handleCopy(`${round.id}-synthesis`, round.synthesis.content)}
-                              className="text-amber-400/70 hover:text-amber-200 text-xs font-medium flex items-center gap-1 transition-colors"
-                            >
-                              {copiedId === `${round.id}-synthesis` ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
-                              {copiedId === `${round.id}-synthesis` ? 'Copied' : 'Copy Consensus'}
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    {round.synthesis.status === 'error' ? (
-                      <div className="mt-2 text-sm text-red-400 bg-red-950/50 p-4 rounded-lg border border-red-900/50 flex flex-col gap-3">
-                        <span className="font-bold">⚠️ Synthesis Phase Error</span>
-                        <span className="font-mono text-xs">{round.synthesis.error}</span>
-                        <button
-                          onClick={() => round.resolvedMode === 'quick_panel' ? runQuickPanelSynthesis(round.id) : regenerateSynthesis(round.id)}
-                          disabled={isDeliberating}
-                          className="self-start text-xs font-semibold px-4 py-2 bg-red-900 hover:bg-red-800 text-red-100 rounded-md transition-colors flex items-center gap-2 disabled:opacity-50"
-                        >
-                          <RefreshCw size={14} /> Retry Synthesis
-                        </button>
-                      </div>
-                    ) : round.synthesis.content ? (
-                      <div>
-                        <MessageMarkdown content={round.synthesis.content} />
-                        <GroundingSourcesCard grounding={round.synthesis.grounding} />
-                      </div>
-                    ) : (
-                      <ThinkingIndicator
-                        stageLabel="Synthesis Phase"
-                        personaName={synthesizer.name}
-                        role="Consensus Builder"
-                        model={synthesizer.model || settings.defaultModels['synthesizer']}
-                        accentColor="amber"
-                      />
-                    )}
-                  </div>
-                )}
-
-              {/* Basic Mode Active Deliberation / Consensus Loading State */}
-              {basicMode && (!round.synthesis?.content && round.synthesis?.status !== 'streaming') && (
-                <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-cyan-500/30 shadow-lg space-y-3">
-                  <div className="flex items-center gap-3 text-cyan-500 dark:text-cyan-400 font-semibold text-sm">
-                    <RefreshCw size={18} className="animate-spin text-cyan-500 shrink-0" />
-                    <span>
-                      {isDeliberating
-                        ? 'Council is deliberating on your question...'
-                        : 'Consensus response pending...'}
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Consulting council members in the background. Your final verdict will appear here shortly.
-                  </p>
-                  {!isDeliberating && Object.keys(round.deliberation?.stage1 || {}).length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => runQuickPanelSynthesis(round.id)}
-                      className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold text-xs flex items-center gap-2 transition-colors"
-                    >
-                      <Sparkles size={14} />
-                      <span>Synthesize Consensus Now</span>
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Phase 2: Blind Pro Side-by-Side Comparison Card */}
-              {!basicMode && round.proComparisonData && (
-                <CompareProCard
-                  auditLogId={round.proComparisonData.auditLogId}
-                  userQuery={round.userQuery}
-                  proModelId={round.proComparisonData.proModelId}
-                  councilContent={round.synthesis.content}
-                  proContent={round.proComparisonData.proContent}
-                  councilLatencyMs={round.proComparisonData.councilLatencyMs}
-                  proLatencyMs={round.proComparisonData.proLatencyMs}
-                  councilCost={round.proComparisonData.councilCost}
-                  proCost={round.proComparisonData.proCost}
-                  answerAIsCouncil={round.proComparisonData.answerAIsCouncil}
-                />
-              )}
-              </>
-            )}
-            </div>
-          );
-        })}
-        </div>
+              />
+            ))}
+          </div>
         )}
         <div ref={messagesEndRef} className="h-4" />
       </main>
@@ -3161,387 +2725,49 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         </button>
       )}
 
-      {/* Sticky Input Anchor */}
-      <div className="sticky bottom-0 z-20 bg-slate-50 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-700/80 p-3 sm:p-4">
-        <div className="max-w-4xl mx-auto space-y-2.5">
-          {fileError && (
-            <div className="text-xs text-red-400 bg-red-950/50 p-2 rounded-lg border border-red-800/50 flex items-center justify-between">
-              <span>⚠️ {fileError}</span>
-              <button type="button" onClick={() => setFileError(null)} className="text-red-400 hover:text-red-200">
-                <X size={12} />
-              </button>
-            </div>
-          )}
-
-          {/* Smart Task Domain Model Selector Bar */}
-          {!basicMode && (
-            <div className="flex flex-wrap items-center justify-between gap-2 py-1 text-xs border-b border-slate-200 dark:border-slate-800">
-              <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 custom-scrollbar">
-                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider shrink-0 flex items-center gap-1 font-mono">
-                  <Cpu size={12} className="text-indigo-400" />
-                  Domain Routing:
-                </span>
-
-                {[
-                  { id: 'auto', label: 'Auto Detect', icon: Sparkles },
-                  { id: 'code', label: 'Code', icon: Code },
-                  { id: 'math', label: 'Math', icon: Calculator },
-                  { id: 'finance', label: 'Finance', icon: DollarSign },
-                  { id: 'creative', label: 'Creative', icon: Palette },
-                  { id: 'general', label: 'General', icon: Compass },
-                ].map((item) => {
-                  const Icon = item.icon;
-                  const isSelected = selectedTaskDomain === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => handleApplySmartDomainModelSelection(item.id as any)}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1 shrink-0 ${
-                        isSelected
-                          ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-400'
-                          : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                      }`}
-                      title={`Apply smart LLM model selection optimized for ${item.label}`}
-                    >
-                      <Icon size={12} className={isSelected ? 'text-white' : 'text-indigo-400'} />
-                      <span>{item.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {activeAppliedDomain && (
-                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 flex items-center gap-1 shrink-0">
-                  <span>Active:</span>
-                  <strong className="uppercase text-indigo-300">{activeAppliedDomain}</strong>
-                </span>
-              )}
-            </div>
-          )}
-
-          {!basicMode && (
-            <div className="py-1">
-              <SmartSelectionAuditCard
-                selectionResult={selectionDebugResult}
-                activeDomain={activeAppliedDomain || 'general'}
-                autoSelectModels={autoSelectModels}
-                onToggleAutoSelect={handleToggleAutoSelectModels}
-                onApplyRecommendations={() => {
-                  if (selectionDebugResult) {
-                    setPersonas(selectionDebugResult.updatedPersonas);
-                    setSynthesizer(selectionDebugResult.updatedSynthesizer);
-                    const defaultModelsMap: Record<string, string> = {};
-                    selectionDebugResult.updatedPersonas.forEach((p) => {
-                      defaultModelsMap[p.id] = p.model;
-                    });
-                    defaultModelsMap['synthesizer'] = selectionDebugResult.updatedSynthesizer.model;
-                    localStorage.setItem('council_default_models', JSON.stringify(defaultModelsMap));
-                  }
-                }}
-              />
-            </div>
-          )}
-
-          {/* Mode Selector & Estimate Bar */}
-          {!basicMode && (
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 pb-1 text-xs">
-            <div className="flex items-center gap-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-1 rounded-xl">
-              <button
-                type="button"
-                onClick={() => updateExecutionMode('auto')}
-                className={`px-2.5 py-1 rounded-lg transition-all flex items-center gap-1 font-medium text-xs ${
-                  settings.executionMode === 'auto'
-                    ? 'bg-cyan-950 text-cyan-200 border border-cyan-700/60 shadow-sm'
-                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
-                }`}
-                title="Automatically choose Quick Panel or Deep Council based on query context"
-              >
-                <Sparkles size={12} className="text-cyan-400" />
-                <span>Auto Router</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => updateExecutionMode('quick_panel')}
-                className={`px-2.5 py-1 rounded-lg transition-all flex items-center gap-1 font-medium text-xs ${
-                  settings.executionMode === 'quick_panel'
-                    ? 'bg-amber-950 text-amber-200 border border-amber-700/60 shadow-sm'
-                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
-                }`}
-                title="Concurrent independent answers with low token limits and manual synthesis"
-              >
-                <Zap size={12} className="text-amber-400" />
-                <span>Quick Panel</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => updateExecutionMode('deep_council')}
-                className={`px-2.5 py-1 rounded-lg transition-all flex items-center gap-1 font-medium text-xs ${
-                  settings.executionMode === 'deep_council'
-                    ? 'bg-purple-950 text-purple-200 border border-purple-700/60 shadow-sm'
-                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
-                }`}
-                title="Full 3-stage deliberation with peer review and consensus synthesis"
-              >
-                <Layers size={12} className="text-purple-400" />
-                <span>Deep Council</span>
-              </button>
-            </div>
-
-            {(() => {
-              const textFiles = attachedFiles.filter(f => !f.type?.startsWith('image/'));
-              const predicted = resolveExecutionMode(settings.executionMode || 'auto', query, textFiles);
-              const activeCount = personas.filter((p) => p.enabled !== false).length;
-              const estCalls = predicted === 'quick_panel' ? activeCount : (activeCount * 2 + 1);
-
-              return (
-                <div className="flex items-center gap-2 font-mono">
-                  {settings.executionMode === 'auto' && (
-                    <span className="text-[11px] px-2.5 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 flex items-center gap-1.5">
-                      <span className="text-slate-500 dark:text-slate-400">Auto →</span>
-                      {predicted === 'quick_panel' ? (
-                        <span className="text-amber-300 font-semibold flex items-center gap-1">
-                          <Zap size={11} /> Quick Panel
-                        </span>
-                      ) : (
-                        <span className="text-purple-300 font-semibold flex items-center gap-1">
-                          <Layers size={11} /> Deep Council
-                        </span>
-                      )}
-                    </span>
-                  )}
-
-                  {predicted === 'deep_council' && (
-                    <span className="text-[10px] px-2.5 py-1 rounded-lg bg-purple-950/40 border border-purple-800/40 text-purple-300 flex items-center gap-2">
-                      <span>Calls: <strong>{estCalls}</strong></span>
-                      <span>Cost: <strong className="text-emerald-400">$0.00</strong></span>
-                      <span>Est. Time: <strong>~15-30s</strong></span>
-                    </span>
-                  )}
-                </div>
-              );
-            })()}
-          </div>
-          )}
-
-          {/* Quick Persona Toggle Bar */}
-          {!basicMode && (
-          <div className="flex items-center justify-between gap-2 overflow-x-auto pb-1 text-xs">
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="text-slate-500 dark:text-slate-400 font-mono text-[11px] uppercase tracking-wider">
-                Council ({personas.filter((p) => p.enabled !== false).length}/{personas.length}):
-              </span>
-              <button
-                type="button"
-                disabled={isDeliberating || personas.filter((p) => p.enabled !== false).length < 2}
-                onClick={rotateRoleAssignments}
-                className="px-2 py-0.5 rounded-md bg-white dark:bg-slate-900 hover:bg-slate-100 border border-slate-200 dark:border-slate-700/80 text-slate-600 hover:text-cyan-300 text-[11px] font-mono flex items-center gap-1 transition-colors disabled:opacity-40"
-                title="Rotate model assignments across active personas to ensure roles are independent from model capabilities"
-              >
-                <Shuffle size={11} className="text-cyan-400" />
-                <span>Rotate Roles</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsFallbackModalOpen(true)}
-                className={`px-2 py-0.5 rounded-md border text-[11px] font-mono flex items-center gap-1 transition-colors ${
-                  fallbackLogs.length > 0
-                    ? 'bg-amber-950/60 border-amber-700/80 text-amber-300 hover:bg-amber-900/80'
-                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
-                }`}
-                title="View automatic fallback events audit log"
-              >
-                <ShieldAlert size={11} className={fallbackLogs.length > 0 ? 'text-amber-400' : 'text-slate-500 dark:text-slate-400'} />
-                <span>Fallback Audit ({fallbackLogs.length})</span>
-              </button>
-            </div>
-            <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
-              {personas.map((p) => {
-                const isEnabled = p.enabled !== false;
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    disabled={isDeliberating}
-                    onClick={() => {
-                      setPersonas(
-                        personas.map((item) =>
-                          item.id === p.id ? { ...item, enabled: !isEnabled } : item
-                        )
-                      );
-                    }}
-                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-all shrink-0 ${
-                      isEnabled
-                        ? 'bg-white dark:bg-slate-900 border-cyan-500/50 text-cyan-200 shadow-sm shadow-cyan-950/40'
-                        : 'bg-white dark:bg-slate-900/60 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 line-through opacity-50 hover:opacity-80'
-                    }`}
-                    title={isEnabled ? `Disable ${p.name}` : `Enable ${p.name}`}
-                  >
-                    <span>{p.avatar}</span>
-                    <span>{p.name}</span>
-                    <span className={`w-1.5 h-1.5 rounded-full ${isEnabled ? 'bg-cyan-400' : 'bg-slate-600'}`} />
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          )}
-
-          {personas.filter((p) => p.enabled !== false).length === 0 && (
-            <div className="text-xs text-amber-300 bg-amber-950/50 border border-amber-800/60 px-3 py-1.5 rounded-lg flex items-center justify-between">
-              <span>⚠️ All council personas are disabled. Enable at least one perspective to deliberate.</span>
-              <button
-                type="button"
-                onClick={() => setPersonas(personas.map((p) => ({ ...p, enabled: true })))}
-                className="underline font-semibold hover:text-amber-200 ml-2 shrink-0"
-              >
-                Enable All
-              </button>
-            </div>
-          )}
-
-          {/* File Attachment List */}
-          {attachedFiles.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 pt-1">
-              {attachedFiles.map((file, fIdx) => (
-                <div key={fIdx} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs shadow-sm relative group ${
-                  file.unzippedResult
-                    ? 'bg-purple-950/40 border-purple-500/40 text-purple-200'
-                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200'
-                }`}>
-                  {file.type?.startsWith('image/') ? (
-                    <img src={file.content} alt={file.name} className="w-4 h-4 object-cover rounded shrink-0" />
-                  ) : file.unzippedResult ? (
-                    <Archive size={13} className="text-purple-400 shrink-0" />
-                  ) : (
-                    <Paperclip size={12} className="text-cyan-400 shrink-0" />
-                  )}
-                  <span className="font-mono text-[11px] max-w-[150px] truncate">{file.name}</span>
-                  {file.unzippedResult ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveZipResult(file.unzippedResult || null);
-                        setIsZipModalOpen(true);
-                      }}
-                      className="text-[10px] bg-purple-500/20 hover:bg-purple-500/40 text-purple-300 font-mono px-1.5 py-0.5 rounded transition-colors underline cursor-pointer"
-                      title="Inspect extracted code files from zip archive"
-                    >
-                      {file.unzippedResult.extractedCodeFilesCount} code files
-                    </button>
-                  ) : (
-                    <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">({(file.size / 1024).toFixed(1)} KB)</span>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => removeAttachedFile(fIdx)}
-                    className="text-slate-500 dark:text-slate-400 hover:text-red-400 transition-colors p-0.5 ml-1 cursor-pointer"
-                    title="Remove file"
-                  >
-                    <X size={12} />
-                  </button>
-                  {file.type?.startsWith('image/') && (
-                    <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block z-50">
-                      <img src={file.content} alt={file.name} className="max-w-[200px] max-h-[200px] object-contain rounded border border-slate-200 dark:border-slate-700 shadow-xl bg-slate-50 dark:bg-slate-900" />
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {!basicMode && (query.length > 0 || attachedFiles.length > 0) && (
-            <div className="flex items-center justify-between px-1 text-[11px] font-mono text-emerald-400/90">
-              <span>Prompt Input ({queryTokens.toLocaleString()} tokens): {formatCost(calculateCallCost(queryTokens, 0, 'google/gemini-2.5-flash'))}</span>
-              <span>Accumulated Session Cost: {formatCost(sessionCostMetrics.totalCost)}</span>
-            </div>
-          )}
-
-          <form 
-            onSubmit={handleDeliberate} 
-            className="flex items-end gap-2.5"
-            onDrop={handleDrop}
-            onDragOver={handleDragOver}
-          >
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileUpload}
-              multiple
-              accept=".txt,.md,.csv,.json,.js,.ts,.jsx,.tsx,.html,.css,.pdf,.zip,text/*,application/json,application/pdf,application/zip,application/x-zip-compressed,image/*,.png,.jpg,.jpeg,.webp,.gif,.heic,.svg"
-              className="hidden"
-            />
-            <button
-              type="button"
-              onClick={() => setIsSettingsOpen(true)}
-              className="p-3 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-cyan-400 transition-colors shrink-0"
-              title="Open Settings"
-            >
-              <SettingsIcon size={18} />
-            </button>
-            <button
-              type="button"
-              disabled={isDeliberating}
-              onClick={() => fileInputRef.current?.click()}
-              className="p-3 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-cyan-400 transition-colors shrink-0 disabled:opacity-40"
-              title="Upload context document or code file"
-            >
-              <Paperclip size={18} />
-            </button>
-            <textarea
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onPaste={handlePaste}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  if (query.trim() || attachedFiles.length > 0) {
-                    handleDeliberate(e as any);
-                  }
-                }
-                if (e.key === 'Tab') {
-                  e.preventDefault();
-                  const target = e.currentTarget;
-                  const start = target.selectionStart;
-                  const end = target.selectionEnd;
-                  const val = target.value;
-                  setQuery(val.substring(0, start) + '  ' + val.substring(end));
-                  setTimeout(() => {
-                    target.selectionStart = target.selectionEnd = start + 2;
-                  }, 0);
-                }
-              }}
-              placeholder={
-                rounds.length > 0
-                  ? "Ask a follow-up question to the council..."
-                  : "Submit a question or decision for council deliberation..."
-              }
-              rows={2}
-              disabled={isDeliberating}
-              className="flex-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-800 dark:text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500/80 transition-colors disabled:opacity-50 resize-y min-h-[48px] max-h-[160px]"
-            />
-            {isDeliberating ? (
-              <button
-                type="button"
-                onClick={handleStop}
-                className="h-[48px] w-[48px] rounded-xl bg-red-600 hover:bg-red-500 text-white flex items-center justify-center transition-colors shadow-md shrink-0"
-                title="Stop Deliberation"
-              >
-                <Square size={18} />
-              </button>
-            ) : (
-              <button
-                type="submit"
-                disabled={!query.trim() && attachedFiles.length === 0}
-                className="h-[48px] w-[48px] rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white flex items-center justify-center transition-all shadow-md shadow-cyan-950/30 disabled:opacity-40 disabled:cursor-not-allowed shrink-0 active:scale-95"
-                title="Send Question"
-              >
-                <Send size={18} className="ml-0.5" />
-              </button>
-            )}
-          </form>
-        </div>
-      </div>
+      {/* Composer Component */}
+      <Composer
+        query={query}
+        setQuery={setQuery}
+        attachedFiles={attachedFiles}
+        fileError={fileError}
+        setFileError={setFileError}
+        isDeliberating={isDeliberating}
+        handleDeliberate={handleDeliberate}
+        handleStop={handleStop}
+        removeAttachedFile={removeAttachedFile}
+        fileInputRef={fileInputRef}
+        handleFileUpload={handleFileUpload}
+        handleDrop={handleDrop}
+        handleDragOver={handleDragOver}
+        handlePaste={handlePaste}
+        queryTokens={queryTokens}
+        sessionCostMetrics={sessionCostMetrics}
+        basicMode={basicMode}
+        selectedTaskDomain={selectedTaskDomain}
+        handleApplySmartDomainModelSelection={handleApplySmartDomainModelSelection}
+        activeAppliedDomain={activeAppliedDomain}
+        selectionDebugResult={selectionDebugResult}
+        autoSelectModels={autoSelectModels}
+        handleToggleAutoSelectModels={handleToggleAutoSelectModels}
+        personas={personas}
+        setPersonas={setPersonas}
+        setSynthesizer={setSynthesizer}
+        executionMode={settings.executionMode || 'auto'}
+        updateExecutionMode={updateExecutionMode}
+        rotateRoleAssignments={rotateRoleAssignments}
+        fallbackLogs={fallbackLogs}
+        setIsFallbackModalOpen={setIsFallbackModalOpen}
+        setIsSettingsOpen={setIsSettingsOpen}
+        setActiveZipResult={setActiveZipResult}
+        setIsZipModalOpen={setIsZipModalOpen}
+        hasPreviousRounds={rounds.length > 0}
+        stopAfterStage1={settings.stopAfterStage1}
+        setStopAfterStage1={updateStopAfterStage1}
+        useSingleModelForSimple={settings.useSingleModelForSimple}
+        setUseSingleModelForSimple={updateUseSingleModelForSimple}
+        maxRoundCostCeiling={settings.maxRoundCostCeiling}
+      />
 
       {/* Settings Modal */}
       <SettingsPanel
@@ -3583,6 +2809,12 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         selectedTaskDomain={selectedTaskDomain}
         autoSelectModels={autoSelectModels}
         setAutoSelectModels={handleToggleAutoSelectModels}
+        maxRoundCostCeiling={settings.maxRoundCostCeiling}
+        setMaxRoundCostCeiling={updateMaxRoundCostCeiling}
+        stopAfterStage1={settings.stopAfterStage1}
+        setStopAfterStage1={updateStopAfterStage1}
+        useSingleModelForSimple={settings.useSingleModelForSimple}
+        setUseSingleModelForSimple={updateUseSingleModelForSimple}
       />
 
       {/* Fallback Audit Modal */}
@@ -3608,8 +2840,21 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
 
       {/* Toast Notification Banner */}
       {toastMessage && (
-        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-white dark:bg-slate-900 border border-cyan-500/60 text-cyan-200 px-4 py-2.5 rounded-xl shadow-2xl text-xs font-mono flex items-center gap-2 animate-bounce">
+        <div
+          className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-white dark:bg-slate-900 border border-cyan-500/60 text-cyan-200 px-4 py-2.5 rounded-xl shadow-2xl text-xs font-mono flex items-center gap-2 animate-bounce cursor-pointer"
+          onClick={() => setToastMessage(null)}
+        >
           <span>{toastMessage}</span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setToastMessage(null);
+            }}
+            className="text-cyan-400 hover:text-cyan-100 ml-1 cursor-pointer"
+          >
+            <X size={12} />
+          </button>
         </div>
       )}
     </div>

@@ -32,8 +32,9 @@ export function useModelRecommendations() {
     }
     // Fallback default models if no cache exists
     return [
-      { id: 'google/gemini-2.5-flash', name: 'Gemini 2.0 Flash' },
-      { id: 'google/gemini-2.0-pro-exp-02-05', name: 'Gemini 2.0 Pro' },
+      { id: 'google/gemini-3.5-flash', name: 'Gemini 3.5 Flash' },
+      { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+      { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
       { id: 'anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet' },
       { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku' },
       { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet' },
@@ -53,7 +54,7 @@ export function useModelRecommendations() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [debounceUntil, setDebounceUntil] = useState<number>(0);
 
-  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+
 
   const handleRefresh = useCallback(async (options: { force: boolean }): Promise<RefreshRecommendationsResult | null> => {
     const { force } = options;

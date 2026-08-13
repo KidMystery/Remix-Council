@@ -172,7 +172,11 @@ export function buildRankMap<T>(
   validItems.sort((a, b) => {
     const valA = getValue(a)!;
     const valB = getValue(b)!;
-    return higherIsBetter ? valB - valA : valA - valB;
+    const d = higherIsBetter ? valB - valA : valA - valB;
+    if (Math.abs(d) > 1e-6) return d;
+    const idA = (a as any).id || '';
+    const idB = (b as any).id || '';
+    return idA.localeCompare(idB);
   });
 
   const rankMap = new Map<T, number>();
@@ -333,7 +337,10 @@ export function mapOpenRouterModels(rawModels: RawOpenRouterModel[]): MappedMode
     const scores = new Map<RawOpenRouterModel, number>();
     freeCandidates.forEach(m => scores.set(m, computeModelScore(m, dims)));
 
-    const pool = [...freeCandidates].sort((a, b) => (scores.get(b) || 0) - (scores.get(a) || 0));
+    const pool = [...freeCandidates].sort((a, b) => {
+      const d = (scores.get(b) || 0) - (scores.get(a) || 0);
+      return Math.abs(d) > 1e-6 ? d : a.id.localeCompare(b.id);
+    });
     return { pool, scores };
   };
 
@@ -377,7 +384,10 @@ export function mapOpenRouterModels(rawModels: RawOpenRouterModel[]): MappedMode
     const scores = new Map<RawOpenRouterModel, number>();
     pool.forEach(m => scores.set(m, computeModelScore(m, dims)));
 
-    const sortedPool = [...pool].sort((a, b) => (scores.get(b) || 0) - (scores.get(a) || 0));
+    const sortedPool = [...pool].sort((a, b) => {
+      const d = (scores.get(b) || 0) - (scores.get(a) || 0);
+      return Math.abs(d) > 1e-6 ? d : a.id.localeCompare(b.id);
+    });
     return { pool: sortedPool, scores };
   };
 
@@ -418,7 +428,10 @@ export function mapOpenRouterModels(rawModels: RawOpenRouterModel[]): MappedMode
     const scores = new Map<RawOpenRouterModel, number>();
     paidEligible.forEach(m => scores.set(m, computeModelScore(m, dims)));
 
-    const sortedPool = [...paidEligible].sort((a, b) => (scores.get(b) || 0) - (scores.get(a) || 0));
+    const sortedPool = [...paidEligible].sort((a, b) => {
+      const d = (scores.get(b) || 0) - (scores.get(a) || 0);
+      return Math.abs(d) > 1e-6 ? d : a.id.localeCompare(b.id);
+    });
     return { pool: sortedPool, scores };
   };
 
@@ -447,7 +460,10 @@ export function mapOpenRouterModels(rawModels: RawOpenRouterModel[]): MappedMode
     const scores = new Map<RawOpenRouterModel, number>();
     models.forEach(m => scores.set(m, computeModelScore(m, dims)));
 
-    const sortedPool = [...models].sort((a, b) => (scores.get(b) || 0) - (scores.get(a) || 0));
+    const sortedPool = [...models].sort((a, b) => {
+      const d = (scores.get(b) || 0) - (scores.get(a) || 0);
+      return Math.abs(d) > 1e-6 ? d : a.id.localeCompare(b.id);
+    });
     return { pool: sortedPool, scores };
   };
 
