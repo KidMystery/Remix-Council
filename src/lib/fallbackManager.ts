@@ -317,7 +317,7 @@ export async function streamPersonaWithFallback(
     attempts++;
     attemptedModels.add(currentModel);
 
-    let streamResult: { content: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }; grounding?: GroundingData } = { content: '' };
+    let streamResult: { content: string; actualModel?: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }; grounding?: GroundingData } = { content: '' };
     let hasTokenStreamed = false;
 
     try {
@@ -343,10 +343,12 @@ export async function streamPersonaWithFallback(
         throw new Error('Invalid Response: Server returned empty output string.');
       }
 
+      const actualExecutedModel = streamResult.actualModel || currentModel;
+
       // Successful completion!
       return {
         content: streamContent,
-        finalModel: currentModel,
+        finalModel: actualExecutedModel,
         fallbackOccurred: attempts > 1,
         usage: streamResult.usage,
         grounding: streamResult.grounding,

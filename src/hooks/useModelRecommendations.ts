@@ -55,7 +55,7 @@ export function useModelRecommendations() {
 
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const handleRefresh = useCallback(async (options: { force: boolean }) => {
+  const handleRefresh = useCallback(async (options: { force: boolean }): Promise<RefreshRecommendationsResult | null> => {
     const { force } = options;
 
     // Enforce 5 second click debounce lock for manual forced refreshes
@@ -63,7 +63,7 @@ export function useModelRecommendations() {
       const now = Date.now();
       if (now < debounceUntil) {
         console.log('Refresh debounced — please wait 5s between manual refreshes');
-        return;
+        return null;
       }
       setDebounceUntil(now + 5000); // 5s debounce window
     }
@@ -90,6 +90,7 @@ export function useModelRecommendations() {
       setRawModelsCatalog(result.models);
       setAvailableModels(newAvailable);
       setMetadata(result.metadata);
+      return result;
     } catch (e: any) {
       console.error('Failed to refresh model recommendations:', e);
       setMetadata((prev) => ({
@@ -97,6 +98,7 @@ export function useModelRecommendations() {
         sourceStatus: 'error',
         errorMessage: e.message || 'Refresh failed',
       }));
+      return null;
     } finally {
       setIsRefreshing(false);
     }

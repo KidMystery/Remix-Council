@@ -8,6 +8,7 @@ import { formatUpdateTime } from '../lib/modelCache';
 interface CouncilSummaryBarProps {
   presetId?: string;
   answerMode?: string;
+  taskDomain?: string;
   personas: Persona[];
   synthesizer?: Persona;
   rawModels?: RawOpenRouterModel[] | null;
@@ -18,6 +19,7 @@ interface CouncilSummaryBarProps {
 export function CouncilSummaryBar({
   presetId = 'fast_and_free',
   answerMode = 'Standard Deliberation',
+  taskDomain,
   personas,
   synthesizer,
   rawModels,
@@ -124,6 +126,19 @@ export function CouncilSummaryBar({
             <div className="font-semibold text-slate-100">{formattedAnswerMode}</div>
           </div>
         </div>
+
+        {/* Metric 2.5: Smart Domain */}
+        {taskDomain && (
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="p-1.5 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
+              <Sparkles size={14} />
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-slate-400 font-medium">Domain Routing</div>
+              <div className="font-semibold text-indigo-300 uppercase">{taskDomain}</div>
+            </div>
+          </div>
+        )}
 
         {/* Metric 3: Organizations Represented */}
         <div className="flex items-center gap-2 shrink-0">

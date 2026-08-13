@@ -6,15 +6,15 @@ export type CouncilAction =
   | { type: 'ADD_ROUND'; payload: CouncilRound }
   | { type: 'DELETE_ROUND'; payload: { roundId: string } }
   | { type: 'UPDATE_STAGE1_TOKEN'; payload: { roundId: string; personaId: PersonaId; chunk: string } }
-  | { type: 'FINISH_STAGE1_PERSONA'; payload: { roundId: string; personaId: PersonaId; content: string } }
+  | { type: 'FINISH_STAGE1_PERSONA'; payload: { roundId: string; personaId: PersonaId; content: string; grounding?: any; model?: string } }
   | { type: 'ERROR_STAGE1_PERSONA'; payload: { roundId: string; personaId: PersonaId; error: string } }
   | { type: 'START_STAGE2'; payload: { roundId: string; initialStage2: Record<PersonaId, PersonaResponse> } }
   | { type: 'UPDATE_STAGE2_TOKEN'; payload: { roundId: string; personaId: PersonaId; chunk: string } }
-  | { type: 'FINISH_STAGE2_PERSONA'; payload: { roundId: string; personaId: PersonaId; content: string } }
+  | { type: 'FINISH_STAGE2_PERSONA'; payload: { roundId: string; personaId: PersonaId; content: string; grounding?: any; model?: string } }
   | { type: 'ERROR_STAGE2_PERSONA'; payload: { roundId: string; personaId: PersonaId; error: string } }
   | { type: 'START_SYNTHESIS'; payload: { roundId: string } }
   | { type: 'UPDATE_SYNTHESIS_TOKEN'; payload: { roundId: string; chunk: string } }
-  | { type: 'FINISH_SYNTHESIS'; payload: { roundId: string } }
+  | { type: 'FINISH_SYNTHESIS'; payload: { roundId: string; grounding?: any; model?: string } }
   | { type: 'ERROR_SYNTHESIS'; payload: { roundId: string; error: string } };
 
 function councilReducer(state: CouncilRound[], action: CouncilAction): CouncilRound[] {
@@ -53,7 +53,7 @@ function councilReducer(state: CouncilRound[], action: CouncilAction): CouncilRo
     }
 
     case 'FINISH_STAGE1_PERSONA': {
-      const { roundId, personaId, content } = action.payload;
+      const { roundId, personaId, content, grounding, model } = action.payload;
       return state.map((r) => {
         if (r.id !== roundId) return r;
         const existing = r.deliberation?.stage1?.[personaId];
@@ -63,7 +63,14 @@ function councilReducer(state: CouncilRound[], action: CouncilAction): CouncilRo
             ...r.deliberation,
             stage1: {
               ...r.deliberation?.stage1,
-              [personaId]: { ...existing, personaId, content, status: 'completed' },
+              [personaId]: {
+                ...existing,
+                personaId,
+                content,
+                status: 'completed',
+                ...(grounding ? { grounding } : {}),
+                ...(model ? { model } : (existing?.model ? { model: existing.model } : {})),
+              },
             },
           },
         };
@@ -131,7 +138,7 @@ function councilReducer(state: CouncilRound[], action: CouncilAction): CouncilRo
     }
 
     case 'FINISH_STAGE2_PERSONA': {
-      const { roundId, personaId, content } = action.payload;
+      const { roundId, personaId, content, grounding, model } = action.payload;
       return state.map((r) => {
         if (r.id !== roundId) return r;
         const existing = r.deliberation?.stage2?.[personaId];
@@ -141,7 +148,14 @@ function councilReducer(state: CouncilRound[], action: CouncilAction): CouncilRo
             ...r.deliberation,
             stage2: {
               ...r.deliberation?.stage2,
-              [personaId]: { ...existing, personaId, content, status: 'completed' },
+              [personaId]: {
+                ...existing,
+                personaId,
+                content,
+                status: 'completed',
+                ...(grounding ? { grounding } : {}),
+                ...(model ? { model } : (existing?.model ? { model: existing.model } : {})),
+              },
             },
           },
         };
@@ -197,12 +211,17 @@ function councilReducer(state: CouncilRound[], action: CouncilAction): CouncilRo
     }
 
     case 'FINISH_SYNTHESIS': {
-      const { roundId } = action.payload;
+      const { roundId, grounding, model } = action.payload;
       return state.map((r) => {
         if (r.id !== roundId) return r;
         return {
           ...r,
-          synthesis: { ...r.synthesis, status: 'completed' },
+          synthesis: {
+            ...r.synthesis,
+            status: 'completed',
+            ...(grounding ? { grounding } : {}),
+            ...(model ? { model } : (r.synthesis?.model ? { model: r.synthesis.model } : {})),
+          },
         };
       });
     }

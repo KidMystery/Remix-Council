@@ -118,6 +118,7 @@ import { GroundingData } from '../types';
 
 export interface OpenRouterCompletionResult {
   content: string;
+  actualModel: string;
   usage?: {
     promptTokens?: number;
     completionTokens?: number;
@@ -143,6 +144,12 @@ export async function streamOpenRouterCompletion(options: {
   // Sanitize non-existent or legacy model strings
   if (!targetModel || targetModel.includes('gemini-2.0') || targetModel.includes('gemini-1.5')) {
     targetModel = 'google/gemini-2.5-flash';
+  }
+
+  let actualModel = targetModel;
+  // If Search Grounding is requested on a non-Gemini model, the backend routes to Gemini
+  if (enableSearchGrounding && !targetModel.toLowerCase().includes('gemini')) {
+    actualModel = 'google/gemini-2.5-flash';
   }
 
   const makeRequest = async (modelToUse: string) => {
@@ -197,6 +204,7 @@ export async function streamOpenRouterCompletion(options: {
     const parsed = parseOpenRouterError(firstStatus, firstErrorText);
     if (!parsed.toLowerCase().includes('context length') && !parsed.toLowerCase().includes('tokens')) {
       console.warn(`Model "${targetModel}" failed (${response.status}). Retrying with google/gemini-2.5-flash...`);
+      actualModel = 'google/gemini-2.5-flash';
       response = await makeRequest('google/gemini-2.5-flash');
     }
   }
@@ -207,6 +215,7 @@ export async function streamOpenRouterCompletion(options: {
     const parsed = parseOpenRouterError(response.status, errText);
     if (!parsed.toLowerCase().includes('context length') && !parsed.toLowerCase().includes('tokens')) {
       console.warn(`Fallback model failed (${response.status}). Retrying with openai/gpt-4o-mini...`);
+      actualModel = 'openai/gpt-4o-mini';
       response = await makeRequest('openai/gpt-4o-mini');
     }
   }
@@ -250,6 +259,12 @@ export async function streamOpenRouterCompletion(options: {
             if (data.error) {
               throw new Error(data.error.message || JSON.stringify(data.error));
             }
+            if (data.model) {
+              const returnedModel = data.model;
+              actualModel = returnedModel.includes('/') || !returnedModel.includes('gemini')
+                ? returnedModel
+                : `google/${returnedModel}`;
+            }
             if (data.usage) {
               usage = {
                 promptTokens: data.usage.prompt_tokens,
@@ -282,5 +297,5 @@ export async function streamOpenRouterCompletion(options: {
     reader.releaseLock();
   }
 
-  return { content: fullText, usage, grounding: groundingData };
+  return { content: fullText, actualModel, usage, grounding: groundingData };
 }

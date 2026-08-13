@@ -17,7 +17,9 @@ import {
   calculateCallCost,
   buildArchivistContext,
 } from '../lib/archivist';
-import { applyPreset, checkDuplicateModels, PresetId } from '../lib/presets';
+import { applyPreset, checkDuplicateModels, PresetId, cleanModelName } from '../lib/presets';
+import { detectTaskDomain, applySmartModelSelection, TaskDomain, DOMAIN_MODEL_MAPPINGS, SmartSelectionResult } from '../lib/smartModelSelector';
+import { SmartSelectionAuditCard } from './SmartSelectionAuditCard';
 import { useSpeech } from '../hooks/useSpeech';
 import { extractTextFromPDF } from '../lib/pdfUtils';
 import { extractCodeFromZip, ZipArchiveResult } from '../lib/zipReader';
@@ -87,6 +89,10 @@ import {
   Eye,
   EyeOff,
   Sliders,
+  Code,
+  Calculator,
+  Palette,
+  Compass,
 } from 'lucide-react';
 
 interface ThinkingIndicatorProps {
@@ -212,6 +218,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     createNewSession,
     selectSession,
     deleteSession,
+    clearSessionHistory,
     clearAllSessions,
     addRoundToActiveSession,
     updateRoundInActiveSession,
@@ -221,7 +228,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   // Council Reducer for decoupled state updates
   const { rounds, dispatch, setRounds } = useCouncilReducer(activeSession?.rounds || []);
 
-  // Sync reducer rounds when active session changes
+  // Sync reducer rounds when active session changes or when rounds in active session are modified
   useEffect(() => {
     const newRounds = activeSession?.rounds || [];
     setRounds(newRounds);
@@ -232,22 +239,46 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     } else {
       setCollapsedRoundIds(new Set());
     }
-  }, [activeSessionId, setRounds]);
+  }, [activeSessionId, activeSession?.rounds?.length, setRounds]);
 
   // Persona Stream Custom Hook
   const { streamPersona } = usePersonaStream();
   const { speak, stop: stopSpeech, speakingId } = useSpeech();
   
   // Model Recommendations App-Load & 15-min background check hook
-  const { metadata: recommendationMetadata, rawModelsCatalog } = useModelRecommendations();
+  const { 
+    metadata: recommendationMetadata, 
+    rawModelsCatalog, 
+    availableModels,
+    isRefreshing,
+    isDebounced,
+    refreshModelRecommendations,
+    presetWarnings
+  } = useModelRecommendations();
   const [activePresetId, setActivePresetId] = useState<PresetId>('fast_and_free');
 
   const [query, setQuery] = useState('');
   const [isDeliberating, setIsDeliberating] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [basicMode, setBasicMode] = useState(() => {
-    return localStorage.getItem('council_basic_mode') === 'true';
+    const saved = localStorage.getItem('council_basic_mode');
+    if (saved !== null) {
+      return saved === 'true';
+    }
+    return typeof window !== 'undefined' && window.innerWidth < 768;
   });
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (typeof window !== 'undefined' && window.innerWidth < 768) {
+        if (localStorage.getItem('council_basic_mode') === null) {
+          setBasicMode(true);
+        }
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   const toggleBasicMode = () => {
     const next = !basicMode;
@@ -365,6 +396,13 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   const handleDeleteRound = (roundId: string) => {
     dispatch({ type: 'DELETE_ROUND', payload: { roundId } });
     deleteRoundFromActiveSession(roundId);
+  };
+
+  const handleClearActiveHistory = () => {
+    dispatch({ type: 'SET_ROUNDS', payload: [] });
+    clearSessionHistory(activeSessionId || undefined);
+    setToastMessage('🗑️ Chat history cleared for this thread');
+    setTimeout(() => setToastMessage(null), 3000);
   };
 
   const handleEditPrompt = (roundId: string) => {
@@ -571,19 +609,200 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     };
   });
 
+  const [selectedTaskDomain, setSelectedTaskDomain] = useState<'auto' | TaskDomain>('auto');
+  const [activeAppliedDomain, setActiveAppliedDomain] = useState<TaskDomain | null>(() => {
+    return (localStorage.getItem('council_last_domain') as TaskDomain) || null;
+  });
+
+  const [autoSelectModels, setAutoSelectModels] = useState<boolean>(() => {
+    const saved = localStorage.getItem('council_auto_select_models');
+    if (saved !== null) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return true;
+      }
+    }
+    return true;
+  });
+
+  const [selectionDebugResult, setSelectionDebugResult] = useState<SmartSelectionResult | null>(null);
+
+  const handleToggleAutoSelectModels = (enabled: boolean) => {
+    setAutoSelectModels(enabled);
+    localStorage.setItem('council_auto_select_models', JSON.stringify(enabled));
+    if (enabled) {
+      handleApplySmartDomainModelSelection(selectedTaskDomain);
+    }
+  };
+
+  const handleApplySmartDomainModelSelection = (domainChoice: 'auto' | TaskDomain, overrideQuery?: string) => {
+    setSelectedTaskDomain(domainChoice);
+    const textFiles = attachedFiles.filter(f => !f.type?.startsWith('image/'));
+    const effectiveQuery = overrideQuery !== undefined ? overrideQuery : query;
+    const lastDomain = (activeAppliedDomain || localStorage.getItem('council_last_domain')) as TaskDomain | null;
+
+    let domainToApply: TaskDomain;
+    if (domainChoice === 'auto') {
+      if (effectiveQuery.trim() || textFiles.length > 0) {
+        domainToApply = detectTaskDomain(effectiveQuery, textFiles);
+      } else if (lastDomain) {
+        domainToApply = lastDomain;
+      } else {
+        domainToApply = 'general';
+      }
+    } else {
+      domainToApply = domainChoice;
+    }
+
+    localStorage.setItem('council_last_domain', domainToApply);
+    setActiveAppliedDomain(domainToApply);
+
+    const isFreeOnly = activePresetId === 'fast_and_free' || activePresetId === 'fastest_cheapest';
+
+    const result = applySmartModelSelection(domainToApply, personas, synthesizer, {
+      availableModels,
+      isFreeOnly,
+      autoSelectModels,
+    });
+
+    if (result.autoSelectEnabled) {
+      setPersonas(result.updatedPersonas);
+      setSynthesizer(result.updatedSynthesizer);
+    }
+    setSelectionDebugResult(result);
+    return result;
+  };
+
+  const handleRefreshModels = React.useCallback(
+    async (options?: { force?: boolean; applyToPersonas?: boolean }) => {
+      const force = options?.force ?? true;
+      const applyToPersonas = options?.applyToPersonas ?? false;
+
+      // 1. Fetch catalog (use returned models directly, not stale state)
+      const result = await refreshModelRecommendations({ force });
+      const freshModels = result?.models || rawModelsCatalog;
+      const freshAvailableModels = freshModels.map((m) => ({
+        id: m.id,
+        name: cleanModelName(m.id, m.name),
+      }));
+
+      // 2. Resolve domain: last applied domain, or detectTaskDomain(query, textFiles) if Auto, else 'general'.
+      const textFiles = attachedFiles?.filter((f) => !f.type?.startsWith('image/')) || [];
+      const lastDomain = (activeAppliedDomain || localStorage.getItem('council_last_domain')) as TaskDomain | null;
+
+      let resolvedDomain: TaskDomain;
+      if (selectedTaskDomain === 'auto') {
+        if (query.trim() || textFiles.length > 0) {
+          resolvedDomain = detectTaskDomain(query, textFiles);
+        } else if (lastDomain) {
+          resolvedDomain = lastDomain;
+        } else {
+          resolvedDomain = 'general';
+        }
+      } else {
+        resolvedDomain = selectedTaskDomain;
+      }
+
+      // 3. Persist council_last_domain
+      localStorage.setItem('council_last_domain', resolvedDomain);
+      setActiveAppliedDomain(resolvedDomain);
+
+      // 4. Run ONE assigner (smart selector)
+      // 5. If active budget is Fast & Free, pass isFreeOnly and never promote paid models
+      const isFreeOnly = activePresetId === 'fast_and_free' || activePresetId === 'fastest_cheapest';
+
+      const smartSelection = applySmartModelSelection(
+        resolvedDomain,
+        personas,
+        synthesizer,
+        {
+          availableModels: freshAvailableModels,
+          isFreeOnly,
+          autoSelectModels,
+        }
+      );
+
+      setSelectionDebugResult(smartSelection);
+
+      // 6. Catalog refresh must not mutate personas unless Auto-Select is ON or the user clicks Apply recommendations
+      const shouldMutate = applyToPersonas || (selectedTaskDomain === 'auto' && autoSelectModels);
+
+      if (shouldMutate && smartSelection.autoSelectEnabled) {
+        setPersonas(smartSelection.updatedPersonas);
+        setSynthesizer(smartSelection.updatedSynthesizer);
+
+        // Persist model settings to localStorage
+        const defaultModelsMap: Record<string, string> = {};
+        smartSelection.updatedPersonas.forEach((p) => {
+          defaultModelsMap[p.id] = p.model;
+        });
+        defaultModelsMap['synthesizer'] = smartSelection.updatedSynthesizer.model;
+        localStorage.setItem('council_default_models', JSON.stringify(defaultModelsMap));
+      }
+
+      return result;
+    },
+    [
+      refreshModelRecommendations,
+      rawModelsCatalog,
+      attachedFiles,
+      activeAppliedDomain,
+      selectedTaskDomain,
+      query,
+      activePresetId,
+      personas,
+      synthesizer,
+      autoSelectModels,
+    ]
+  );
+
   const sessionCostMetrics = countTotalSessionCost(rounds);
   const dupInfo = checkDuplicateModels(personas, synthesizer);
 
   const handleApplyPreset = (presetId: PresetId) => {
     setActivePresetId(presetId);
-    const { updatedPersonas, updatedSynthesizer } = applyPreset(presetId, personas, synthesizer);
-    setPersonas(updatedPersonas);
-    setSynthesizer(updatedSynthesizer);
+
+    const textFiles = attachedFiles?.filter(f => !f.type?.startsWith('image/')) || [];
+    const lastDomain = (activeAppliedDomain || localStorage.getItem('council_last_domain')) as TaskDomain | null;
+
+    let domainToApply: TaskDomain;
+    if (selectedTaskDomain === 'auto') {
+      if (query.trim() || textFiles.length > 0) {
+        domainToApply = detectTaskDomain(query, textFiles);
+      } else if (lastDomain) {
+        domainToApply = lastDomain;
+      } else {
+        domainToApply = 'general';
+      }
+    } else {
+      domainToApply = selectedTaskDomain;
+    }
+
+    localStorage.setItem('council_last_domain', domainToApply);
+    setActiveAppliedDomain(domainToApply);
+
+    const isFreeOnly = presetId === 'fast_and_free' || presetId === 'fastest_cheapest';
+
+    const smartSelection = applySmartModelSelection(
+      domainToApply,
+      personas,
+      synthesizer,
+      {
+        availableModels,
+        isFreeOnly,
+        autoSelectModels: true,
+      }
+    );
+
+    setPersonas(smartSelection.updatedPersonas);
+    setSynthesizer(smartSelection.updatedSynthesizer);
+    setSelectionDebugResult(smartSelection);
 
     // Persist model settings to localStorage
     const defaultModelsMap: Record<string, string> = {};
-    updatedPersonas.forEach(p => { defaultModelsMap[p.id] = p.model; });
-    defaultModelsMap['synthesizer'] = updatedSynthesizer.model;
+    smartSelection.updatedPersonas.forEach(p => { defaultModelsMap[p.id] = p.model; });
+    defaultModelsMap['synthesizer'] = smartSelection.updatedSynthesizer.model;
     localStorage.setItem('council_default_models', JSON.stringify(defaultModelsMap));
   };
 
@@ -772,11 +991,12 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       console.log(`[Synthesis Phase] Stream completed successfully. Total length: ${fullSynthesis.length} characters.`);
 
       const finalSynthGrounding = synthRes?.grounding || streamGroundingData;
+      const executedSynthModel = synthRes?.finalModel || synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash';
 
-      dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId: targetRoundId, grounding: finalSynthGrounding } });
+      dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId: targetRoundId, grounding: finalSynthGrounding, model: executedSynthModel } });
       updateRoundInActiveSession(targetRoundId, (r) => ({
         ...r,
-        synthesis: { ...r.synthesis, content: fullSynthesis, status: 'completed', grounding: finalSynthGrounding },
+        synthesis: { ...r.synthesis, content: fullSynthesis, status: 'completed', grounding: finalSynthGrounding, model: executedSynthModel },
       }));
       console.log(`[Synthesis Phase] Finished successfully for round ${targetRoundId}`);
       return fullSynthesis;
@@ -1055,10 +1275,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         });
 
         const finalGrounding1 = res1?.grounding || streamGroundingData;
+        const executedModel1 = res1?.finalModel || persona.model || settings.defaultModels[personaId];
 
         dispatch({
           type: 'FINISH_STAGE1_PERSONA',
-          payload: { roundId, personaId, content: fullContent, grounding: finalGrounding1 },
+          payload: { roundId, personaId, content: fullContent, grounding: finalGrounding1, model: executedModel1 },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -1067,7 +1288,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage1: {
               ...r.deliberation?.stage1,
-              [personaId]: { personaId, content: fullContent, status: 'completed', grounding: finalGrounding1 },
+              [personaId]: { personaId, content: fullContent, status: 'completed', grounding: finalGrounding1, model: executedModel1 },
             },
           },
         }));
@@ -1151,10 +1372,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         });
 
         const finalGrounding2 = res2?.grounding || streamGroundingData2;
+        const executedModel2 = res2?.finalModel || persona.model || settings.defaultModels[personaId];
 
         dispatch({
           type: 'FINISH_STAGE2_PERSONA',
-          payload: { roundId, personaId, content: fullContent, grounding: finalGrounding2 },
+          payload: { roundId, personaId, content: fullContent, grounding: finalGrounding2, model: executedModel2 },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -1163,7 +1385,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage2: {
               ...r.deliberation?.stage2,
-              [personaId]: { personaId, content: fullContent, status: 'completed', grounding: finalGrounding2 },
+              [personaId]: { personaId, content: fullContent, status: 'completed', grounding: finalGrounding2, model: executedModel2 },
             },
           },
         }));
@@ -1280,7 +1502,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
           let content = '';
           try {
-            await streamPersona({
+            const res1 = await streamPersona({
               personaId: persona.id,
               apiKey: settings.apiKey,
               model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.5-flash',
@@ -1307,13 +1529,14 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
               },
             });
 
-            stage1Map[persona.id] = { personaId: persona.id, content, status: 'completed' };
-            dispatch({ type: 'FINISH_STAGE1_PERSONA', payload: { roundId, personaId: persona.id, content } });
+            const executedModel1 = res1?.finalModel || persona.model || settings.defaultModels[persona.id];
+            stage1Map[persona.id] = { personaId: persona.id, content, status: 'completed', model: executedModel1 };
+            dispatch({ type: 'FINISH_STAGE1_PERSONA', payload: { roundId, personaId: persona.id, content, model: executedModel1 } });
             updateRoundInActiveSession(roundId, (r) => ({
               ...r,
               deliberation: {
                 ...r.deliberation,
-                stage1: { ...r.deliberation?.stage1, [persona.id]: { personaId: persona.id, content, status: 'completed' } },
+                stage1: { ...r.deliberation?.stage1, [persona.id]: { personaId: persona.id, content, status: 'completed', model: executedModel1 } },
               },
             }));
           } catch (err: any) {
@@ -1384,7 +1607,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
             let content = '';
             try {
-              await streamPersona({
+              const res2 = await streamPersona({
                 personaId: persona.id,
                 apiKey: settings.apiKey,
                 model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.5-flash',
@@ -1411,13 +1634,14 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
                 },
               });
 
-              stage2Map[persona.id] = { personaId: persona.id, content, status: 'completed' };
-              dispatch({ type: 'FINISH_STAGE2_PERSONA', payload: { roundId, personaId: persona.id, content } });
+              const executedModel2 = res2?.finalModel || persona.model || settings.defaultModels[persona.id];
+              stage2Map[persona.id] = { personaId: persona.id, content, status: 'completed', model: executedModel2 };
+              dispatch({ type: 'FINISH_STAGE2_PERSONA', payload: { roundId, personaId: persona.id, content, model: executedModel2 } });
               updateRoundInActiveSession(roundId, (r) => ({
                 ...r,
                 deliberation: {
                   ...r.deliberation,
-                  stage2: { ...r.deliberation?.stage2, [persona.id]: { personaId: persona.id, content, status: 'completed' } },
+                  stage2: { ...r.deliberation?.stage2, [persona.id]: { personaId: persona.id, content, status: 'completed', model: executedModel2 } },
                 },
               }));
             } catch (err: any) {
@@ -1452,7 +1676,46 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
-    const activePersonas = personas.filter((p) => p.enabled !== false);
+    // Apply smart LLM model selection across all personalities based on domain type
+    const textFiles = attachedFiles?.filter(f => !f.type?.startsWith('image/')) || [];
+    const lastDomain = (activeAppliedDomain || localStorage.getItem('council_last_domain')) as TaskDomain | null;
+
+    let domainToApply: TaskDomain;
+    if (selectedTaskDomain === 'auto') {
+      if (queryText.trim() || textFiles.length > 0) {
+        domainToApply = detectTaskDomain(queryText, textFiles);
+      } else if (lastDomain) {
+        domainToApply = lastDomain;
+      } else {
+        domainToApply = 'general';
+      }
+    } else {
+      domainToApply = selectedTaskDomain;
+    }
+
+    localStorage.setItem('council_last_domain', domainToApply);
+    setActiveAppliedDomain(domainToApply);
+
+    const isFreeOnly = activePresetId === 'fast_and_free' || activePresetId === 'fastest_cheapest';
+
+    const smartSelection = applySmartModelSelection(domainToApply, personas, synthesizer, {
+      availableModels,
+      isFreeOnly,
+      autoSelectModels,
+    });
+    setActiveAppliedDomain(smartSelection.domain);
+    setSelectionDebugResult(smartSelection);
+
+    let activePersonas = personas.filter((p) => p.enabled !== false);
+    let currentSynthesizer = synthesizer;
+
+    if (smartSelection.autoSelectEnabled) {
+      activePersonas = smartSelection.updatedPersonas.filter((p) => p.enabled !== false);
+      currentSynthesizer = smartSelection.updatedSynthesizer;
+      setPersonas(smartSelection.updatedPersonas);
+      setSynthesizer(smartSelection.updatedSynthesizer);
+    }
+
     const letters = ['A', 'B', 'C', 'D'];
 
     const initialStage1: Record<string, PersonaResponse> = {};
@@ -1544,17 +1807,19 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         });
 
         const finalGrounding = res?.grounding || streamGroundingData;
+        const executedModel = res?.finalModel || persona.model || settings.defaultModels[persona.id];
 
         stage1Outputs[persona.id] = {
           personaId: persona.id,
           content: res.content || content,
           status: 'completed',
           grounding: finalGrounding,
+          model: executedModel,
         };
 
         dispatch({
           type: 'FINISH_STAGE1_PERSONA',
-          payload: { roundId, personaId: persona.id, content: res.content || content, grounding: finalGrounding },
+          payload: { roundId, personaId: persona.id, content: res.content || content, grounding: finalGrounding, model: executedModel },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -1563,7 +1828,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage1: {
               ...r.deliberation?.stage1,
-              [persona.id]: { personaId: persona.id, content: res.content || content, status: 'completed', grounding: finalGrounding },
+              [persona.id]: { personaId: persona.id, content: res.content || content, status: 'completed', grounding: finalGrounding, model: executedModel },
             },
           },
         }));
@@ -1697,17 +1962,19 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         });
 
         const finalGrounding2 = res?.grounding || streamGroundingData2;
+        const executedModel2 = res?.finalModel || persona.model || settings.defaultModels[persona.id];
 
         stage2Outputs[persona.id] = {
           personaId: persona.id,
           content: res.content || content,
           status: 'completed',
           grounding: finalGrounding2,
+          model: executedModel2,
         };
 
         dispatch({
           type: 'FINISH_STAGE2_PERSONA',
-          payload: { roundId, personaId: persona.id, content: res.content || content, grounding: finalGrounding2 },
+          payload: { roundId, personaId: persona.id, content: res.content || content, grounding: finalGrounding2, model: executedModel2 },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -1716,7 +1983,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage2: {
               ...r.deliberation?.stage2,
-              [persona.id]: { personaId: persona.id, content: res.content || content, status: 'completed', grounding: finalGrounding2 },
+              [persona.id]: { personaId: persona.id, content: res.content || content, status: 'completed', grounding: finalGrounding2, model: executedModel2 },
             },
           },
         }));
@@ -1815,7 +2082,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       let fullSynthesis = '';
       const synthModel = synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash';
 
-      await streamPersona({
+      const res = await streamPersona({
         personaId: 'synthesizer',
         apiKey: settings.apiKey,
         model: synthModel,
@@ -1837,10 +2104,12 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         },
       });
 
-      dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId } });
+      const executedSynthModel = res?.finalModel || synthModel;
+
+      dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId, model: executedSynthModel } });
       updateRoundInActiveSession(roundId, (r) => ({
         ...r,
-        synthesis: { content: fullSynthesis, status: 'completed', model: synthModel },
+        synthesis: { content: fullSynthesis, status: 'completed', model: executedSynthModel },
       }));
     } catch (err: any) {
       if (err.name === 'AbortError') return;
@@ -1941,12 +2210,20 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
   };
 
   return (
-    <div className="flex h-screen bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 dark:text-slate-200 font-sans antialiased overflow-hidden selection:bg-cyan-500/20 selection:text-cyan-200">
+    <div className="flex h-screen bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 dark:text-slate-200 font-sans antialiased overflow-hidden selection:bg-cyan-500/20 selection:text-cyan-200 relative">
+      {/* Mobile backdrop overlay for sidebar */}
+      {isSidebarOpen && (
+        <div
+          className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-30 sm:hidden"
+          onClick={() => setIsSidebarOpen(false)}
+        />
+      )}
+
       {/* Sidebar for Deliberation Threads */}
       <aside
         className={`${
           isSidebarOpen ? 'w-72 border-r' : 'w-0 border-r-0'
-        } shrink-0 bg-white dark:bg-slate-900/95 dark:bg-slate-900/95 backdrop-blur-md border-slate-200 dark:border-slate-700/80 dark:border-slate-800 transition-all duration-300 ease-in-out flex flex-col h-full z-40 overflow-hidden relative`}
+        } shrink-0 bg-white dark:bg-slate-900/95 backdrop-blur-md border-slate-200 dark:border-slate-700/80 transition-all duration-300 ease-in-out flex flex-col h-full z-40 overflow-hidden relative`}
       >
         {/* Sidebar Header */}
         <div className="p-3.5 border-b border-slate-200 dark:border-slate-700/80 flex items-center justify-between gap-2">
@@ -1959,7 +2236,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
           <button
             type="button"
             onClick={() => setIsSidebarOpen(false)}
-            className="p-1 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 hover:bg-slate-100 transition-colors shrink-0"
+            className="p-1 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0"
             title="Close sidebar"
           >
             <PanelLeftClose size={16} />
@@ -2012,7 +2289,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                   onClick={() => selectSession(s.id)}
                   className={`group relative p-2.5 rounded-lg text-xs cursor-pointer transition-all flex items-start justify-between gap-2 border ${
                     isActive
-                      ? 'bg-slate-100/90 border-cyan-500/50 text-slate-800 dark:text-slate-100 shadow-sm'
+                      ? 'bg-slate-100/90 dark:bg-slate-800/90 border-cyan-500/50 text-slate-800 dark:text-slate-100 shadow-sm'
                       : 'bg-slate-50 dark:bg-slate-900/40 hover:bg-slate-100/50 border-slate-200 dark:border-slate-700/40 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
                   }`}
                 >
@@ -2032,12 +2309,12 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (confirm('Delete this deliberation thread?')) {
+                      if (confirm(`Delete thread "${s.title || 'Untitled Session'}" and its entire chat history?`)) {
                         deleteSession(s.id);
                       }
                     }}
-                    className="opacity-0 group-hover:opacity-100 text-slate-500 dark:text-slate-400 hover:text-red-400 p-1 rounded hover:bg-red-950/40 transition-all shrink-0"
-                    title="Delete thread"
+                    className="text-slate-400 hover:text-red-500 hover:bg-red-500/10 dark:hover:bg-red-950/40 p-1.5 rounded transition-all shrink-0"
+                    title="Delete thread and history"
                   >
                     <Trash2 size={13} />
                   </button>
@@ -2068,27 +2345,28 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       {/* Main Workspace Area */}
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-y-auto relative" onScroll={handleMainScroll}>
         {/* Header */}
-        <header className="sticky top-0 z-30 bg-slate-50 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-700/80 px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
+        <header className="sticky top-0 z-30 bg-slate-50 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-700/80 px-2.5 sm:px-4 py-2.5 sm:py-3 flex items-center justify-between gap-2 min-w-0">
+          <div className="flex items-center space-x-2 sm:space-x-3 min-w-0 shrink">
             {!isSidebarOpen && (
               <button
                 type="button"
                 onClick={() => setIsSidebarOpen(true)}
-                className="p-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 border border-slate-200 dark:border-slate-700 text-slate-600 transition-colors flex items-center gap-1.5 text-xs font-mono"
+                className="p-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 border border-slate-200 dark:border-slate-700 text-slate-600 transition-colors flex items-center gap-1 text-xs font-mono shrink-0"
                 title="Open Deliberation Threads"
               >
                 <PanelLeft size={16} className="text-cyan-400" />
                 <span className="hidden sm:inline">Threads ({sessions.length})</span>
               </button>
             )}
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-600 to-indigo-600 flex items-center justify-center text-white shadow-md shadow-cyan-950/50">
-              <Sparkles size={18} />
+            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-gradient-to-tr from-cyan-600 to-indigo-600 flex items-center justify-center text-white shadow-md shadow-cyan-950/50 shrink-0">
+              <Sparkles size={16} className="sm:hidden" />
+              <Sparkles size={18} className="hidden sm:block" />
             </div>
-            <div>
-              <h1 className="font-bold text-base tracking-tight text-slate-800 dark:text-slate-100 flex items-center gap-2">
-                AI Council Chamber
+            <div className="min-w-0 truncate">
+              <h1 className="font-bold text-xs sm:text-base tracking-tight text-slate-800 dark:text-slate-100 truncate">
+                AI Council
               </h1>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+              <p className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 hidden md:flex items-center gap-2">
                 <span>Multi-Model Deliberation Engine</span>
                 {!basicMode && (
                   <span
@@ -2109,12 +2387,29 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
           </div>
 
           {/* Header Actions */}
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-1 sm:space-x-2 shrink-0">
+            {/* Clear Thread History Button */}
+            {activeSession && rounds.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (confirm('Clear chat history for this thread? All messages in this deliberation will be deleted.')) {
+                    handleClearActiveHistory();
+                  }
+                }}
+                className="p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 border border-red-500/30 transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm shrink-0"
+                title="Clear chat history for the current thread"
+              >
+                <Trash2 size={14} />
+                <span className="hidden sm:inline">Clear History</span>
+              </button>
+            )}
+
             {/* Google Search Grounding Quick Toggle */}
             <button
               type="button"
               onClick={() => updateEnableSearchGrounding(!settings.enableSearchGrounding)}
-              className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-sm ${
+              className={`p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-sm shrink-0 ${
                 settings.enableSearchGrounding
                   ? 'bg-emerald-500/10 dark:bg-emerald-950/60 border-emerald-500/50 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30'
                   : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
@@ -2123,7 +2418,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
             >
               <Globe size={14} className={settings.enableSearchGrounding ? 'text-emerald-500 shrink-0 animate-pulse' : 'text-slate-400 shrink-0'} />
               <span className="hidden md:inline">Google Search</span>
-              <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${settings.enableSearchGrounding ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 font-bold' : 'bg-slate-200 dark:bg-slate-800 text-slate-500'}`}>
+              <span className={`text-[10px] px-1 py-0.2 rounded font-mono ${settings.enableSearchGrounding ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 font-bold' : 'bg-slate-200 dark:bg-slate-800 text-slate-500'}`}>
                 {settings.enableSearchGrounding ? 'ON' : 'OFF'}
               </span>
             </button>
@@ -2132,7 +2427,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
             <button
               type="button"
               onClick={toggleBasicMode}
-              className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-sm ${
+              className={`p-1.5 sm:px-3 sm:py-1.5 rounded-lg border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-sm shrink-0 ${
                 basicMode
                   ? 'bg-cyan-500/10 dark:bg-cyan-950/60 border-cyan-500/50 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-500/30'
                   : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
@@ -2142,12 +2437,12 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               {basicMode ? (
                 <>
                   <Eye size={14} className="text-cyan-500 shrink-0" />
-                  <span>Basic Mode</span>
+                  <span className="hidden sm:inline">Basic</span>
                 </>
               ) : (
                 <>
                   <EyeOff size={14} className="text-slate-400 shrink-0" />
-                  <span>Detailed Mode</span>
+                  <span className="hidden sm:inline">Detailed</span>
                 </>
               )}
             </button>
@@ -2156,18 +2451,18 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
             <button
               type="button"
               onClick={() => setIsSettingsOpen(true)}
-              className="px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm"
+              className="p-1.5 sm:px-3 sm:py-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm shrink-0"
               title="Open Settings"
             >
               <SettingsIcon size={14} className="text-slate-500 dark:text-slate-400" />
-              <span>Settings</span>
+              <span className="hidden sm:inline">Settings</span>
             </button>
 
             {/* New Thread Button */}
             <button
               type="button"
               onClick={() => createNewSession()}
-              className="p-1.5 sm:px-3 sm:py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm"
+              className="p-1.5 sm:px-3 sm:py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm shrink-0"
               title="Start New Deliberation Thread"
             >
               <Plus size={15} />
@@ -2178,6 +2473,17 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
 
       {/* Main Content Feed */}
       <main className="flex-1 max-w-5xl w-full mx-auto p-4 md:p-6 space-y-6 pb-32">
+        {!basicMode && (
+          <CouncilSummaryBar
+            presetId={activePresetId}
+            answerMode={settings.executionMode || 'auto'}
+            taskDomain={activeAppliedDomain || undefined}
+            personas={personas}
+            synthesizer={synthesizer}
+            rawModels={rawModelsCatalog}
+            updatedAt={recommendationMetadata?.fetchedAt}
+          />
+        )}
         {(() => {
           if (basicMode) return null;
           const activePersonas = personas.filter((p) => p.enabled !== false);
@@ -2429,7 +2735,29 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                               <div className="flex items-center space-x-2.5 min-w-0 truncate">
                                 <span className="text-xl shrink-0">{persona.avatar}</span>
                                 <div className="min-w-0 truncate">
-                                  <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100 leading-tight truncate">{persona.name}</h3>
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100 leading-tight truncate">{persona.name}</h3>
+                                    {(resp?.model || persona.model) && (
+                                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border inline-flex items-center gap-1 shrink-0 ${
+                                        resp?.grounding || (settings?.enableSearchGrounding && !(resp?.model || persona.model || '').toLowerCase().includes('gemini'))
+                                          ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/70'
+                                          : resp?.model && persona.model && resp.model !== persona.model
+                                          ? 'bg-amber-950/70 text-amber-300 border-amber-700/70'
+                                          : 'bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                      }`} title={
+                                        resp?.grounding
+                                          ? `Grounded search completed via ${resp.model || 'Gemini'}`
+                                          : resp?.model && persona.model && resp.model !== persona.model
+                                          ? `Assigned: ${persona.model} → Executed: ${resp.model}`
+                                          : `Model: ${resp?.model || persona.model}`
+                                      }>
+                                        {(resp?.grounding || (settings?.enableSearchGrounding && !(resp?.model || persona.model || '').toLowerCase().includes('gemini'))) && (
+                                          <Globe size={10} className="text-emerald-400 shrink-0" />
+                                        )}
+                                        <span>{resp?.model || persona.model}</span>
+                                      </span>
+                                    )}
+                                  </div>
                                   <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">{persona.role}</p>
                                 </div>
                               </div>
@@ -2475,6 +2803,12 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                               </div>
                             ) : resp?.content ? (
                               <div className="min-w-0 max-w-full overflow-x-auto break-words">
+                                {settings?.enableSearchGrounding && !(persona.model || '').toLowerCase().includes('gemini') && (
+                                  <div className="text-[11px] bg-emerald-950/40 border border-emerald-800/50 text-emerald-300 px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 font-mono mb-2">
+                                    <Globe size={13} className="text-emerald-400 shrink-0" />
+                                    <span>Search Grounding enabled: Call executed on <strong>{resp?.model || 'Gemini'}</strong> (assigned model <em>{persona.model}</em> does not support grounding).</span>
+                                  </div>
+                                )}
                                 <MessageMarkdown content={resp.content} />
                                 <GroundingSourcesCard grounding={resp.grounding} />
                               </div>
@@ -2483,7 +2817,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                 stageLabel={round.resolvedMode === 'quick_panel' ? 'Quick Answer' : 'Stage 1 Proposal'}
                                 personaName={persona.name}
                                 role={persona.role}
-                                model={persona.model || settings.defaultModels[persona.id]}
+                                model={settings?.enableSearchGrounding && !(persona.model || '').toLowerCase().includes('gemini') ? `${persona.model} → Gemini (Grounded)` : persona.model || settings.defaultModels[persona.id]}
                                 accentColor="cyan"
                               />
                             )}
@@ -2583,7 +2917,29 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                   <div className="flex items-center space-x-2.5 min-w-0 truncate">
                                     <span className="text-xl shrink-0">{persona.avatar}</span>
                                     <div className="min-w-0 truncate">
-                                      <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100 leading-tight truncate">{persona.name}</h3>
+                                      <div className="flex items-center gap-1.5 flex-wrap">
+                                        <h3 className="font-bold text-sm text-slate-800 dark:text-slate-100 leading-tight truncate">{persona.name}</h3>
+                                        {(resp?.model || persona.model) && (
+                                          <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border inline-flex items-center gap-1 shrink-0 ${
+                                            resp?.grounding || (settings?.enableSearchGrounding && !(resp?.model || persona.model || '').toLowerCase().includes('gemini'))
+                                              ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/70'
+                                              : resp?.model && persona.model && resp.model !== persona.model
+                                              ? 'bg-amber-950/70 text-amber-300 border-amber-700/70'
+                                              : 'bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                          }`} title={
+                                            resp?.grounding
+                                              ? `Grounded search completed via ${resp.model || 'Gemini'}`
+                                              : resp?.model && persona.model && resp.model !== persona.model
+                                              ? `Assigned: ${persona.model} → Executed: ${resp.model}`
+                                              : `Model: ${resp?.model || persona.model}`
+                                          }>
+                                            {(resp?.grounding || (settings?.enableSearchGrounding && !(resp?.model || persona.model || '').toLowerCase().includes('gemini'))) && (
+                                              <Globe size={10} className="text-emerald-400 shrink-0" />
+                                            )}
+                                            <span>{resp?.model || persona.model}</span>
+                                          </span>
+                                        )}
+                                      </div>
                                       <p className="text-[11px] text-purple-300/80 truncate">Peer Review</p>
                                     </div>
                                   </div>
@@ -2629,6 +2985,12 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                   </div>
                                 ) : resp?.content ? (
                                   <div className="min-w-0 max-w-full overflow-x-auto break-words">
+                                    {settings?.enableSearchGrounding && !(persona.model || '').toLowerCase().includes('gemini') && (
+                                      <div className="text-[11px] bg-emerald-950/40 border border-emerald-800/50 text-emerald-300 px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 font-mono mb-2">
+                                        <Globe size={13} className="text-emerald-400 shrink-0" />
+                                        <span>Search Grounding enabled: Call executed on <strong>{resp?.model || 'Gemini'}</strong> (assigned model <em>{persona.model}</em> does not support grounding).</span>
+                                      </div>
+                                    )}
                                     <MessageMarkdown content={resp.content} />
                                     <GroundingSourcesCard grounding={resp.grounding} />
                                   </div>
@@ -2637,7 +2999,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                                     stageLabel="Stage 2 Peer Review"
                                     personaName={persona.name}
                                     role="Peer Reviewer"
-                                    model={persona.model || settings.defaultModels[persona.id]}
+                                    model={settings?.enableSearchGrounding && !(persona.model || '').toLowerCase().includes('gemini') ? `${persona.model} → Gemini (Grounded)` : persona.model || settings.defaultModels[persona.id]}
                                     accentColor="purple"
                                   />
                                 )}
@@ -2653,9 +3015,23 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               {(round.synthesis?.content || round.synthesis?.status === 'streaming') && (
                   <div className="p-6 rounded-2xl bg-gradient-to-b from-amber-950/30 to-slate-900 border border-amber-500/30 shadow-lg space-y-4">
                     <div className="flex items-center justify-between border-b border-amber-500/20 pb-3">
-                      <h3 className="text-base font-bold text-amber-300 flex items-center gap-2">
-                        <span className="text-lg">⚖️</span> {round.resolvedMode === 'quick_panel' ? 'Quick Panel Synthesis' : Object.keys(round.deliberation?.stage1 || {}).length === 1 ? 'Council Member Response' : 'Stage 3: Council Verdict & Synthesis'}
-                      </h3>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="text-base font-bold text-amber-300 flex items-center gap-2">
+                          <span className="text-lg">⚖️</span> {round.resolvedMode === 'quick_panel' ? 'Quick Panel Synthesis' : Object.keys(round.deliberation?.stage1 || {}).length === 1 ? 'Council Member Response' : 'Stage 3: Council Verdict & Synthesis'}
+                        </h3>
+                        {(round.synthesis?.model || synthesizer.model) && (
+                          <span className={`text-[10px] font-mono px-2 py-0.5 rounded border inline-flex items-center gap-1 ${
+                            round.synthesis?.grounding
+                              ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/70'
+                              : round.synthesis?.model && synthesizer.model && round.synthesis.model !== synthesizer.model
+                              ? 'bg-amber-950/70 text-amber-300 border-amber-700/70'
+                              : 'bg-amber-950/60 text-amber-300 border-amber-700/60'
+                          }`} title={`Synthesis Model: ${round.synthesis?.model || synthesizer.model}`}>
+                            {round.synthesis?.grounding && <Globe size={10} className="text-emerald-400 shrink-0" />}
+                            <span>{round.synthesis?.model || synthesizer.model}</span>
+                          </span>
+                        )}
+                      </div>
                       <div className="flex items-center space-x-3">
                         {!isDeliberating && (
                           <button
@@ -2794,6 +3170,76 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               <button type="button" onClick={() => setFileError(null)} className="text-red-400 hover:text-red-200">
                 <X size={12} />
               </button>
+            </div>
+          )}
+
+          {/* Smart Task Domain Model Selector Bar */}
+          {!basicMode && (
+            <div className="flex flex-wrap items-center justify-between gap-2 py-1 text-xs border-b border-slate-200 dark:border-slate-800">
+              <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 custom-scrollbar">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider shrink-0 flex items-center gap-1 font-mono">
+                  <Cpu size={12} className="text-indigo-400" />
+                  Domain Routing:
+                </span>
+
+                {[
+                  { id: 'auto', label: 'Auto Detect', icon: Sparkles },
+                  { id: 'code', label: 'Code', icon: Code },
+                  { id: 'math', label: 'Math', icon: Calculator },
+                  { id: 'finance', label: 'Finance', icon: DollarSign },
+                  { id: 'creative', label: 'Creative', icon: Palette },
+                  { id: 'general', label: 'General', icon: Compass },
+                ].map((item) => {
+                  const Icon = item.icon;
+                  const isSelected = selectedTaskDomain === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => handleApplySmartDomainModelSelection(item.id as any)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1 shrink-0 ${
+                        isSelected
+                          ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-400'
+                          : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      }`}
+                      title={`Apply smart LLM model selection optimized for ${item.label}`}
+                    >
+                      <Icon size={12} className={isSelected ? 'text-white' : 'text-indigo-400'} />
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {activeAppliedDomain && (
+                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 flex items-center gap-1 shrink-0">
+                  <span>Active:</span>
+                  <strong className="uppercase text-indigo-300">{activeAppliedDomain}</strong>
+                </span>
+              )}
+            </div>
+          )}
+
+          {!basicMode && (
+            <div className="py-1">
+              <SmartSelectionAuditCard
+                selectionResult={selectionDebugResult}
+                activeDomain={activeAppliedDomain || 'general'}
+                autoSelectModels={autoSelectModels}
+                onToggleAutoSelect={handleToggleAutoSelectModels}
+                onApplyRecommendations={() => {
+                  if (selectionDebugResult) {
+                    setPersonas(selectionDebugResult.updatedPersonas);
+                    setSynthesizer(selectionDebugResult.updatedSynthesizer);
+                    const defaultModelsMap: Record<string, string> = {};
+                    selectionDebugResult.updatedPersonas.forEach((p) => {
+                      defaultModelsMap[p.id] = p.model;
+                    });
+                    defaultModelsMap['synthesizer'] = selectionDebugResult.updatedSynthesizer.model;
+                    localStorage.setItem('council_default_models', JSON.stringify(defaultModelsMap));
+                  }
+                }}
+              />
             </div>
           )}
 
@@ -3124,6 +3570,19 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         setPanelTimeoutSeconds={updatePanelTimeoutSeconds}
         enableSearchGrounding={settings.enableSearchGrounding}
         setEnableSearchGrounding={updateEnableSearchGrounding}
+        onRefreshModels={handleRefreshModels}
+        activePresetId={activePresetId}
+        setActivePresetId={setActivePresetId}
+        onApplyPreset={handleApplyPreset}
+        rawModelsCatalog={rawModelsCatalog}
+        availableModels={availableModels}
+        recommendationMetadata={recommendationMetadata}
+        isRefreshing={isRefreshing}
+        isDebounced={isDebounced}
+        presetWarnings={presetWarnings}
+        selectedTaskDomain={selectedTaskDomain}
+        autoSelectModels={autoSelectModels}
+        setAutoSelectModels={handleToggleAutoSelectModels}
       />
 
       {/* Fallback Audit Modal */}

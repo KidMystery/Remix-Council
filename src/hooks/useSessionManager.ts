@@ -79,6 +79,29 @@ export function useSessionManager() {
     });
   }, []);
 
+  const clearSessionHistory = useCallback((sessionId?: string) => {
+    setData((prev) => {
+      const targetId = sessionId || prev.activeSessionId;
+      if (!targetId) return prev;
+
+      const sessions = prev.sessions.map((s) => {
+        if (s.id === targetId) {
+          return {
+            ...s,
+            rounds: [],
+            updatedAt: Date.now(),
+          };
+        }
+        return s;
+      });
+
+      return {
+        ...prev,
+        sessions,
+      };
+    });
+  }, []);
+
   const clearAllSessions = useCallback(() => {
     setData({
       sessions: [],
@@ -111,7 +134,7 @@ export function useSessionManager() {
         const isFirstRound = targetSession.rounds.length === 0;
         const updatedSession: Session = {
           ...targetSession,
-          title: isFirstRound && targetSession.title === 'New Deliberation'
+          title: isFirstRound && (targetSession.title === 'New Deliberation' || !targetSession.title)
             ? summarizeTitle(round.userQuery)
             : targetSession.title,
           rounds: [...targetSession.rounds, round],
@@ -159,18 +182,7 @@ export function useSessionManager() {
 
       const sessions = [...prev.sessions];
       const targetSession = sessions[activeIndex];
-      const roundIndex = targetSession.rounds.findIndex((r) => r.id === roundId);
-      if (roundIndex === -1) return prev;
       const updatedRounds = targetSession.rounds.filter((r) => r.id !== roundId);
-
-      if (updatedRounds.length === 0) {
-        sessions.splice(activeIndex, 1);
-        return {
-          ...prev,
-          sessions,
-          activeSessionId: sessions.length > 0 ? sessions[0].id : null,
-        };
-      }
 
       sessions[activeIndex] = {
         ...targetSession,
@@ -192,6 +204,7 @@ export function useSessionManager() {
     createNewSession,
     selectSession,
     deleteSession,
+    clearSessionHistory,
     clearAllSessions,
     addRoundToActiveSession,
     updateRoundInActiveSession,

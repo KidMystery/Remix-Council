@@ -607,33 +607,135 @@ export function mapOpenRouterModels(rawModels: RawOpenRouterModel[]): MappedMode
 
   const assignRoles = (council: RawOpenRouterModel[], currentPresetName: string): AssignedModel[] => {
     const roles: ('skeptic' | 'visionary' | 'pragmatist' | 'synthesizer')[] = ['skeptic', 'visionary', 'pragmatist', 'synthesizer'];
-    const result: AssignedModel[] = [];
-    const defaultModelId = council.length > 0 ? council[0].id : 'google/gemma-3n-e4b-it:free';
-    const defaultModelName = council.length > 0 ? cleanModelName(council[0].id, council[0].name) : cleanModelName(defaultModelId);
+    if (council.length === 0) {
+      return roles.map(r => ({ personaId: r, model: 'google/gemini-2.5-flash', name: 'Gemini 2.0 Flash' }));
+    }
 
-    for (let i = 0; i < 4; i++) {
-      const modelObj = i < council.length ? council[i] : null;
-      const modelId = modelObj ? modelObj.id : defaultModelId;
-      const modelName = modelObj ? cleanModelName(modelObj.id, modelObj.name) : defaultModelName;
+  // Role capability scoring functions based on personality traits
+  const getEstimatedCapabilities = (m: RawOpenRouterModel) => {
+    const id = m.id.toLowerCase();
+    
+    let coding = m.benchmarks?.coding;
+    let intel = m.benchmarks?.intelligence;
+    let agentic = m.benchmarks?.agentic;
+    let design = m.benchmarks?.design_arena_elo ?? m.benchmarks?.arena_elo;
 
-      let alsoInPresets: string[] | undefined = undefined;
-      if (modelObj) {
-        const target = getCanonicalTarget(modelObj);
-        const allPresetsWithModel = modelToPresetNames.get(target) || [];
-        const otherPresets = allPresetsWithModel.filter(p => p !== currentPresetName);
-        if (otherPresets.length > 0) {
-          alsoInPresets = otherPresets;
+    // Intelligent capability fallbacks based on model provider strengths
+    if (coding === undefined) {
+      if (id.includes('claude-3.7-sonnet') || id.includes('claude-3-7-sonnet')) coding = 0.99;
+      else if (id.includes('claude-3.5-sonnet') || id.includes('claude-3-5-sonnet')) coding = 0.98;
+      else if (id.includes('deepseek-r1') || id.includes('deepseek-coder')) coding = 0.96;
+      else if (id.includes('qwen-2.5-coder') || id.includes('qwen-2.5-72b')) coding = 0.94;
+      else if (id.includes('o3-mini') || id.includes('o1')) coding = 0.92;
+      else if (id.includes('claude-3.5-haiku') || id.includes('claude-3-5-haiku')) coding = 0.90;
+      else if (id.includes('gpt-4o')) coding = 0.88;
+      else if (id.includes('gemini-2.5-pro') || id.includes('gemini-2.0-pro')) coding = 0.90;
+      else if (id.includes('gemini-2.5-flash') || id.includes('gemini-2.0-flash')) coding = 0.85;
+      else if (id.includes('anthropic/')) coding = 0.92;
+      else if (id.includes('deepseek/')) coding = 0.90;
+      else coding = 0.50;
+    }
+
+    if (intel === undefined) {
+      if (id.includes('claude-3.7-sonnet') || id.includes('claude-3-7-sonnet')) intel = 0.99;
+      else if (id.includes('deepseek-r1')) intel = 0.98;
+      else if (id.includes('o3-mini') || id.includes('o1')) intel = 0.97;
+      else if (id.includes('claude-3.5-sonnet') || id.includes('claude-3-5-sonnet')) intel = 0.96;
+      else if (id.includes('gpt-4o')) intel = 0.95;
+      else if (id.includes('gemini-2.5-pro') || id.includes('gemini-2.0-pro')) intel = 0.95;
+      else if (id.includes('gemini-2.5-flash') || id.includes('gemini-2.0-flash')) intel = 0.90;
+      else if (id.includes('llama-3.3-70b')) intel = 0.89;
+      else intel = 0.60;
+    }
+
+    if (agentic === undefined) {
+      if (id.includes('claude-3.7-sonnet') || id.includes('claude-3.5-sonnet')) agentic = 0.98;
+      else if (id.includes('gpt-4o') || id.includes('o3-mini')) agentic = 0.94;
+      else if (id.includes('deepseek-r1')) agentic = 0.93;
+      else if (id.includes('gemini-2.5') || id.includes('gemini-2.0')) agentic = 0.90;
+      else agentic = 0.60;
+    }
+
+    if (design === undefined) {
+      if (id.includes('gemini-2.5-flash') || id.includes('gemini-2.0-pro') || id.includes('gemini-2.5-pro')) design = 0.98;
+      else if (id.includes('claude-3.7-sonnet') || id.includes('claude-3.5-sonnet')) design = 0.96;
+      else if (id.includes('gpt-4o')) design = 0.95;
+      else design = 0.60;
+    }
+
+    return { coding, intel, agentic, design };
+  };
+
+  const getSkepticScore = (m: RawOpenRouterModel) => {
+    const caps = getEstimatedCapabilities(m);
+    return caps.coding * 0.50 + caps.intel * 0.30 + caps.agentic * 0.20;
+  };
+
+  const getVisionaryScore = (m: RawOpenRouterModel) => {
+    const caps = getEstimatedCapabilities(m);
+    const ctx = m.context_length ? Math.min(m.context_length / 200000, 1) : 0.5;
+    return caps.design * 0.50 + ctx * 0.30 + caps.intel * 0.20;
+  };
+
+  const getPragmatistScore = (m: RawOpenRouterModel) => {
+    const tp = getThroughput(m) ?? 0.5;
+    const lat = getLatency(m) !== undefined ? (1 - Math.min(getLatency(m)! / 5000, 1)) : 0.5;
+    const price = 1 - Math.min(estimatedCost(m) / 0.01, 1);
+    const caps = getEstimatedCapabilities(m);
+    return tp * 0.35 + lat * 0.25 + price * 0.20 + caps.coding * 0.20;
+  };
+
+  const getSynthesizerScore = (m: RawOpenRouterModel) => {
+    const caps = getEstimatedCapabilities(m);
+    return caps.intel * 0.50 + caps.agentic * 0.30 + caps.design * 0.20;
+  };
+
+    // Permutation optimizer to assign 4 council models to the 4 personality roles
+    const permute = (arr: RawOpenRouterModel[]): RawOpenRouterModel[][] => {
+      if (arr.length <= 1) return [arr];
+      const res: RawOpenRouterModel[][] = [];
+      for (let i = 0; i < arr.length; i++) {
+        const rest = [...arr.slice(0, i), ...arr.slice(i + 1)];
+        for (const p of permute(rest)) {
+          res.push([arr[i], ...p]);
         }
       }
+      return res;
+    };
 
-      result.push({
-        personaId: roles[i],
-        model: modelId,
-        name: modelName,
-        alsoInPresets,
+    const permutations = permute(council);
+    let bestPerm = council;
+    let bestScore = -Infinity;
+
+    for (const perm of permutations) {
+      const s0 = getSkepticScore(perm[0] || council[0]);
+      const s1 = getVisionaryScore(perm[1] || council[0]);
+      const s2 = getPragmatistScore(perm[2] || council[0]);
+      const s3 = getSynthesizerScore(perm[3] || council[0]);
+      const total = s0 + s1 + s2 + s3;
+      if (total > bestScore) {
+        bestScore = total;
+        bestPerm = perm;
+      }
+    }
+
+    const assigned: AssignedModel[] = [];
+    for (let i = 0; i < 4; i++) {
+      const role = roles[i];
+      const modelObj = bestPerm[i] || council[0];
+      const target = getCanonicalTarget(modelObj);
+      const allPresetsWithModel = modelToPresetNames.get(target) || [];
+      const otherPresets = allPresetsWithModel.filter(p => p !== currentPresetName);
+
+      assigned.push({
+        personaId: role,
+        model: modelObj.id,
+        name: cleanModelName(modelObj.id, modelObj.name),
+        alsoInPresets: otherPresets.length > 0 ? otherPresets : undefined,
       });
     }
-    return result;
+
+    return assigned;
   };
 
   const mappedFastAndFree = assignRoles(presetsData[0].council, presetsData[0].presetName);

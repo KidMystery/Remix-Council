@@ -1,10 +1,13 @@
-import { X, Cpu, Palette, Bell, User, RefreshCw, Zap, Award, AlertTriangle, CheckCircle2, Coins, Scale, Globe } from 'lucide-react';
+import { X, Cpu, Palette, Bell, User, RefreshCw, Zap, Award, AlertTriangle, CheckCircle2, Coins, Scale, Globe, UserPlus, Edit3, Trash2, Compass, BookmarkPlus } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { Persona } from '../types';
-import { MODEL_PRESETS, applyPreset, checkDuplicateModels, checkDuplicateOrganizations, PresetId } from '../lib/presets';
+import { MODEL_PRESETS, applyPreset, getDynamicPresetSummary, checkDuplicateModels, checkDuplicateOrganizations, PresetId } from '../lib/presets';
+import { CouncilPreset } from '../lib/councilPresets';
 import { useModelRecommendations } from '../hooks/useModelRecommendations';
 import { CouncilSummaryBar } from './CouncilSummaryBar';
 import { ModelDetailsCard } from './ModelDetailsCard';
+import { CreatePersonalityModal } from './CreatePersonalityModal';
+import { CouncilPreloadSelector } from './CouncilPreloadSelector';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -32,37 +35,85 @@ interface SettingsPanelProps {
   setIsAuditModalOpen?: (val: boolean) => void;
   enableSearchGrounding?: boolean;
   setEnableSearchGrounding?: (enabled: boolean) => void;
+  onRefreshModels?: (options?: { force?: boolean; applyToPersonas?: boolean }) => Promise<any>;
+  activePresetId?: PresetId;
+  setActivePresetId?: (id: PresetId) => void;
+  onApplyPreset?: (presetId: PresetId) => void;
+  rawModelsCatalog?: any[];
+  availableModels?: { id: string; name: string }[];
+  recommendationMetadata?: any;
+  isRefreshing?: boolean;
+  isDebounced?: boolean;
+  presetWarnings?: string[];
+  selectedTaskDomain?: 'auto' | string;
+  autoSelectModels?: boolean;
+  setAutoSelectModels?: (val: boolean) => void;
 }
 
 export function SettingsPanel({ 
   isOpen, onClose, apiKey, setApiKey, personas, setPersonas, synthesizer, setSynthesizer, theme, setTheme, maxTokens = 4000, setMaxTokens,
   executionMode = 'auto', setExecutionMode, quickPanelMaxTokens = 350, setQuickPanelMaxTokens, synthesisMaxTokens = 500, setSynthesisMaxTokens, panelTimeoutSeconds = 30, setPanelTimeoutSeconds,
   isProCompareEnabled, handleToggleProCompare, setIsAuditModalOpen,
-  enableSearchGrounding = true, setEnableSearchGrounding
+  enableSearchGrounding = true, setEnableSearchGrounding,
+  onRefreshModels, activePresetId: propActivePresetId, setActivePresetId: propSetActivePresetId, onApplyPreset,
+  rawModelsCatalog: propRawModelsCatalog, availableModels: propAvailableModels, recommendationMetadata: propRecommendationMetadata,
+  isRefreshing: propIsRefreshing, isDebounced: propIsDebounced, presetWarnings: propPresetWarnings,
+  autoSelectModels = true, setAutoSelectModels
 }: SettingsPanelProps) {
   
-  const [activeTab, setActiveTab] = useState<'personas' | 'advanced' | 'theme' | 'notifications' | 'account'>('personas');
-  const [usageData, setUsageData] = useState<{usage: number, limit: number | null} | null>(null);
+  const [activeTab, setActiveTab] = useState<'personas' | 'presets' | 'advanced' | 'theme' | 'notifications' | 'account'>('personas');
 
-  const {
-    metadata,
-    availableModels,
-    rawModelsCatalog,
-    presetWarnings,
-    isRefreshing,
-    isDebounced,
-    refreshModelRecommendations,
-    formatUpdateTime,
-    formatErrorTime,
-  } = useModelRecommendations();
+  const [usageData, setUsageData] = useState<{usage: number, limit: number | null} | null>(null);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [editingPersona, setEditingPersona] = useState<Persona | null>(null);
+
+  const handleSavePersona = (savedPersona: Persona) => {
+    const exists = personas.some(p => p.id === savedPersona.id);
+    if (exists) {
+      setPersonas(personas.map(p => p.id === savedPersona.id ? savedPersona : p));
+    } else {
+      setPersonas([...personas, savedPersona]);
+    }
+  };
+
+  const handleDeletePersona = (id: string) => {
+    if (personas.length <= 1) return;
+    setPersonas(personas.filter(p => p.id !== id));
+  };
+
+  const handleApplyCouncilPreset = (preset: CouncilPreset) => {
+    setPersonas(preset.personas);
+    setSynthesizer(preset.synthesizer);
+  };
+
+  const hookRecs = useModelRecommendations();
+
+  const metadata = propRecommendationMetadata || hookRecs.metadata;
+  const availableModels = propAvailableModels || hookRecs.availableModels;
+  const rawModelsCatalog = propRawModelsCatalog || hookRecs.rawModelsCatalog;
+  const presetWarnings = propPresetWarnings || hookRecs.presetWarnings;
+  const isRefreshing = propIsRefreshing ?? hookRecs.isRefreshing;
+  const isDebounced = propIsDebounced ?? hookRecs.isDebounced;
+  const refreshModelRecommendations = hookRecs.refreshModelRecommendations;
+  const formatUpdateTime = hookRecs.formatUpdateTime;
+  const formatErrorTime = hookRecs.formatErrorTime;
+
+  const [localActivePresetId, setLocalActivePresetId] = useState<PresetId>('fast_and_free');
+  const activePresetId = propActivePresetId || localActivePresetId;
+  const setActivePresetId = propSetActivePresetId || setLocalActivePresetId;
 
   const dupInfo = checkDuplicateModels(personas, synthesizer);
   const dupOrgInfo = checkDuplicateOrganizations(personas, synthesizer);
 
   const handleApplyPreset = (presetId: PresetId) => {
-    const { updatedPersonas, updatedSynthesizer } = applyPreset(presetId, personas, synthesizer);
-    setPersonas(updatedPersonas);
-    setSynthesizer(updatedSynthesizer);
+    setActivePresetId(presetId);
+    if (onApplyPreset) {
+      onApplyPreset(presetId);
+    } else {
+      const { updatedPersonas, updatedSynthesizer } = applyPreset(presetId, personas, synthesizer, rawModelsCatalog);
+      setPersonas(updatedPersonas);
+      setSynthesizer(updatedSynthesizer);
+    }
   };
 
   useEffect(() => {
@@ -88,6 +139,7 @@ export function SettingsPanel({
 
   const tabs = [
     { id: 'personas', label: 'Basic Details', icon: Cpu },
+    { id: 'presets', label: 'Presets', icon: BookmarkPlus },
     { id: 'advanced', label: 'Advanced', icon: Zap },
     { id: 'theme', label: 'Theme', icon: Palette },
     { id: 'notifications', label: 'Alerts', icon: Bell },
@@ -421,11 +473,7 @@ export function SettingsPanel({
                       </span>
                     </div>
                     <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1.5 leading-snug">
-                      {(() => {
-                        const p = MODEL_PRESETS.find(x => x.id === 'fast_and_free');
-                        if (!p) return '$0 speed-optimized models';
-                        return `${p.assignments.skeptic.name} • ${p.assignments.visionary.name} • ${p.assignments.pragmatist.name} • ${p.assignments.synthesizer.name}`;
-                      })()}
+                      {getDynamicPresetSummary('fast_and_free', personas, synthesizer, rawModelsCatalog)}
                     </p>
                     {(() => {
                       const p = MODEL_PRESETS.find(x => x.id === 'fast_and_free');
@@ -462,11 +510,7 @@ export function SettingsPanel({
                       </span>
                     </div>
                     <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1.5 leading-snug">
-                      {(() => {
-                        const p = MODEL_PRESETS.find(x => x.id === 'fast_and_cheap');
-                        if (!p) return 'Fast paid models at low cost';
-                        return `${p.assignments.skeptic.name} • ${p.assignments.visionary.name} • ${p.assignments.pragmatist.name} • ${p.assignments.synthesizer.name}`;
-                      })()}
+                      {getDynamicPresetSummary('fast_and_cheap', personas, synthesizer, rawModelsCatalog)}
                     </p>
                     {(() => {
                       const p = MODEL_PRESETS.find(x => x.id === 'fast_and_cheap');
@@ -503,11 +547,7 @@ export function SettingsPanel({
                       </span>
                     </div>
                     <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1.5 leading-snug">
-                      {(() => {
-                        const p = MODEL_PRESETS.find(x => x.id === 'best_value');
-                        if (!p) return 'Quality-to-cost balance';
-                        return `${p.assignments.skeptic.name} • ${p.assignments.visionary.name} • ${p.assignments.pragmatist.name} • ${p.assignments.synthesizer.name}`;
-                      })()}
+                      {getDynamicPresetSummary('best_value', personas, synthesizer, rawModelsCatalog)}
                     </p>
                     {(() => {
                       const p = MODEL_PRESETS.find(x => x.id === 'best_value');
@@ -544,11 +584,7 @@ export function SettingsPanel({
                       </span>
                     </div>
                     <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1.5 leading-snug">
-                      {(() => {
-                        const p = MODEL_PRESETS.find(x => x.id === 'highest_quality');
-                        if (!p) return 'Top overall capability';
-                        return `${p.assignments.skeptic.name} • ${p.assignments.visionary.name} • ${p.assignments.pragmatist.name} • ${p.assignments.synthesizer.name}`;
-                      })()}
+                      {getDynamicPresetSummary('highest_quality', personas, synthesizer, rawModelsCatalog)}
                     </p>
                     {(() => {
                       const p = MODEL_PRESETS.find(x => x.id === 'highest_quality');
@@ -572,6 +608,26 @@ export function SettingsPanel({
                 </div>
               </section>)}
 
+              {/* Domain Council Preloads */}
+              {activeTab === "personas" && (
+                <section className="space-y-3 bg-slate-50/70 dark:bg-slate-800/30 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <Compass size={14} className="text-indigo-500" />
+                      Domain Councils & Preloaded Advisory Boards
+                    </h3>
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Preselect specialized councils (Finance, Life, Tech, Product) with curated names, directives, and models.
+                  </p>
+                  <CouncilPreloadSelector
+                    onApplyCouncil={handleApplyCouncilPreset}
+                    currentPersonas={personas}
+                    currentSynthesizer={synthesizer}
+                  />
+                </section>
+              )}
+
               {/* Council Summary Bar */}
               {activeTab === "personas" && <CouncilSummaryBar
                 personas={personas}
@@ -586,38 +642,56 @@ export function SettingsPanel({
                     <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                       Council Members ({personas.filter(p => p.enabled !== false).length}/{personas.length} Active)
                     </h3>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Toggle specific perspectives on or off for deliberation.</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Toggle or edit perspectives for deliberation.</p>
                   </div>
                   
-                  <div className="flex flex-col items-end gap-1 shrink-0">
-                    <button 
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
                       type="button"
-                      onClick={() => refreshModelRecommendations({ force: true })} 
-                      disabled={isRefreshing || isDebounced} 
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 dark:disabled:bg-slate-800 disabled:text-slate-400 text-white rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer disabled:cursor-not-allowed"
-                      title="Force refresh model recommendations and recalculate presets"
+                      onClick={() => {
+                        setEditingPersona(null);
+                        setIsCreateModalOpen(true);
+                      }}
+                      className="flex items-center gap-1 px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer"
+                      title="Add a custom persona to the council"
                     >
-                      <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
-                      <span>{isRefreshing ? 'Refreshing…' : 'Refresh recommendations'}</span>
+                      <UserPlus size={13} />
+                      <span>Add Personality</span>
                     </button>
 
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400 font-mono text-right">
-                      {metadata.sourceStatus === 'error' ? (
-                        <span className="text-amber-600 dark:text-amber-400 font-sans font-medium">
-                          Refresh failed — {formatErrorTime(metadata.lastSuccessfulRefresh || metadata.updatedAt)}
-                        </span>
-                      ) : isRefreshing ? (
-                        <span className="text-indigo-600 dark:text-indigo-400 font-sans animate-pulse font-medium">
-                          Updating recommendations…
-                        </span>
-                      ) : (
-                        <span>
-                          {formatUpdateTime(metadata.updatedAt)}
-                        </span>
-                      )}
-                    </div>
+                    {setAutoSelectModels && (
+                      <button
+                        type="button"
+                        onClick={() => setAutoSelectModels(!autoSelectModels)}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all border flex items-center gap-1 cursor-pointer ${
+                          autoSelectModels
+                            ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20'
+                            : 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20'
+                        }`}
+                        title={autoSelectModels ? 'Auto-Select Models is ON (domain smart assignment enabled)' : 'Auto-Select Models is OFF (manual model choices preserved)'}
+                      >
+                        <span>Auto-Select: {autoSelectModels ? 'ON' : 'OFF'}</span>
+                      </button>
+                    )}
+
+                    <button 
+                      type="button"
+                      onClick={async () => {
+                        if (onRefreshModels) {
+                          await onRefreshModels({ force: true, applyToPersonas: true });
+                        } else {
+                          await refreshModelRecommendations({ force: true });
+                        }
+                      }} 
+                      disabled={isRefreshing || isDebounced} 
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-50 text-slate-700 dark:text-slate-300 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer border border-slate-200 dark:border-slate-700"
+                      title="Force refresh model recommendations and update all council personality model selections"
+                    >
+                      <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
+                    </button>
                   </div>
                 </div>
+
                 {personas.map(persona => {
                   const isEnabled = persona.enabled !== false;
                   return (
@@ -630,14 +704,35 @@ export function SettingsPanel({
                       }`}
                     >
                       <div className="flex items-center justify-between">
-                        <div className="flex items-center space-x-2">
-                          <span className="text-base">{persona.avatar}</span>
-                          <span className="text-sm font-bold text-slate-800 dark:text-white">{persona.name}</span>
-                          <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider border ${persona.color}`}>
+                        <div className="flex items-center space-x-2 truncate pr-2">
+                          <span className="text-base shrink-0">{persona.avatar}</span>
+                          <span className="text-sm font-bold text-slate-800 dark:text-white truncate">{persona.name}</span>
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider border shrink-0 ${persona.color}`}>
                             {persona.role}
                           </span>
                         </div>
-                        <div className="flex items-center space-x-2">
+                        <div className="flex items-center space-x-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingPersona(persona);
+                              setIsCreateModalOpen(true);
+                            }}
+                            className="p-1 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 rounded transition-colors"
+                            title="Edit personality details"
+                          >
+                            <Edit3 size={14} />
+                          </button>
+                          {personas.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeletePersona(persona.id)}
+                              className="p-1 text-slate-400 hover:text-rose-500 rounded transition-colors"
+                              title="Delete persona from council"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => updatePersona(persona.id, { enabled: !isEnabled })}
@@ -652,9 +747,6 @@ export function SettingsPanel({
                               }`}
                             />
                           </button>
-                          <span className={`text-[11px] font-medium ${isEnabled ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`}>
-                            {isEnabled ? 'Active' : 'Disabled'}
-                          </span>
                         </div>
                       </div>
                       
@@ -746,6 +838,27 @@ export function SettingsPanel({
                       />
                     </div>}
                   </div>
+              </section>
+            </div>
+          )}
+
+          {activeTab === 'presets' && (
+            <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <BookmarkPlus size={14} className="text-indigo-500" />
+                    Saved Council Presets (Local Storage)
+                  </h3>
+                </div>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Save your preferred persona setups, model selections, and roles into local storage as named presets for instant 1-click access. You can also export or import your preset collections as JSON files.
+                </p>
+                <CouncilPreloadSelector
+                  onApplyCouncil={handleApplyCouncilPreset}
+                  currentPersonas={personas}
+                  currentSynthesizer={synthesizer}
+                />
               </section>
             </div>
           )}
@@ -855,6 +968,18 @@ export function SettingsPanel({
           </button>
         </div>
       </div>
+
+      {/* Custom Personality Creator/Editor Modal */}
+      <CreatePersonalityModal
+        isOpen={isCreateModalOpen}
+        onClose={() => {
+          setIsCreateModalOpen(false);
+          setEditingPersona(null);
+        }}
+        onSave={handleSavePersona}
+        availableModels={availableModels}
+        editingPersona={editingPersona}
+      />
     </div>
   );
 }

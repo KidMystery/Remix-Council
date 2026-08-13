@@ -1,4 +1,4 @@
-export type PersonaId = 'skeptic' | 'visionary' | 'pragmatist' | 'synthesizer';
+export type PersonaId = string;
 
 export interface GroundingSource {
   title?: string;
