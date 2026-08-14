@@ -45,12 +45,37 @@ export type ExecutionMode = 'auto' | 'quick_panel' | 'deep_council';
 export type ResolvedExecutionMode = 'quick_panel' | 'deep_council';
 export type { TaskDomain } from './lib/smartModelSelector';
 
+export interface AttachedTextFile {
+  name: string;
+  type: string;
+  size: number;
+  content: string;
+  summary?: string;
+}
+
+export interface RoundRating {
+  score: number; // 1 to 5
+  feedback?: string;
+  tags?: string[];
+  timestamp: number;
+}
+
+export interface NotificationPreferences {
+  enableSoundAlerts?: boolean;
+  soundVolume?: number;
+  enableBrowserNotifications?: boolean;
+  notifyOnDeliberationComplete?: boolean;
+  notifyOnError?: boolean;
+  notifyOnCostThreshold?: boolean;
+}
+
 export interface CouncilRound {
   id: string;
   userQuery: string;
   timestamp: number;
   executionMode?: ExecutionMode;
   resolvedMode?: ResolvedExecutionMode;
+  isIsolatedRound?: boolean;
   deliberation: DeliberationStage;
   synthesis: {
     content: string;
@@ -63,7 +88,10 @@ export interface CouncilRound {
     grounding?: GroundingData;
   };
   attachedImages?: { name: string; url: string; type: string }[];
+  attachedTextFiles?: AttachedTextFile[];
   auditLogId?: string;
+  archivistSummary?: string;
+  rating?: RoundRating;
   proComparisonData?: {
     auditLogId: string;
     proModelId: string;
@@ -82,6 +110,7 @@ export interface Session {
   rounds: CouncilRound[];
   createdAt: number;
   updatedAt: number;
+  userId?: string;
 }
 
 export interface Settings {
@@ -97,4 +126,25 @@ export interface Settings {
   maxRoundCostCeiling?: number;
   stopAfterStage1?: boolean;
   useSingleModelForSimple?: boolean;
+  archivistRecentRounds?: number;
+  proCompareModelId?: string;
+  notificationPreferences?: NotificationPreferences;
+}
+
+export type ToastType = 'info' | 'success' | 'warning' | 'error';
+
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+  variant?: 'primary' | 'secondary' | 'danger';
+}
+
+export interface ToastMessage {
+  id: string;
+  type: ToastType;
+  title?: string;
+  message: string;
+  action?: ToastAction;
+  duration?: number;
+  details?: string;
 }

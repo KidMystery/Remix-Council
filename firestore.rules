@@ -1,0 +1,25 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Allow logged in user to read, write, and delete their own sessions and settings
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      match /sessions/{sessionId} {
+        allow read, write, delete: if request.auth != null && request.auth.uid == userId;
+      }
+      
+      match /settings/{docId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
+    // Public or legacy council_sessions
+    match /council_sessions/{sessionId} {
+      allow read: if true;
+      allow write: if request.auth != null || resource == null;
+    }
+  }
+}

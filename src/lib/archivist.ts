@@ -1,5 +1,6 @@
 import { CouncilRound, PersonaResponse } from '../types';
 import { streamOpenRouterCompletion } from './openrouter';
+import type { RawOpenRouterModel } from './presets';
 
 export function estimateTokens(text: string): number {
   if (!text) return 0;
@@ -12,38 +13,8 @@ export interface ModelRates {
   completion: number; // USD per 1M completion/output tokens
 }
 
-export const MODEL_PRICING: Record<string, ModelRates> = {
-  // Google
-  'google/gemini-3.6-flash': { prompt: 0.15, completion: 0.60 },
-  'google/gemini-3.5-flash': { prompt: 0.15, completion: 0.60 },
-  'google/gemini-2.5-pro': { prompt: 1.25, completion: 5.00 },
-  'google/gemini-2.5-flash': { prompt: 0.10, completion: 0.40 },
-  'google/gemini-2.0-flash': { prompt: 0.10, completion: 0.40 },
-  'google/gemini-1.5-flash': { prompt: 0.075, completion: 0.30 },
-  'google/gemini-pro-1.5': { prompt: 1.25, completion: 5.00 },
-  'google/gemini-1.5-pro': { prompt: 1.25, completion: 5.00 },
-  'google/gemini-2.0-pro-exp-02-05': { prompt: 1.25, completion: 5.00 },
-
-  // Anthropic
-  'anthropic/claude-3.5-haiku': { prompt: 0.80, completion: 4.00 },
-  'anthropic/claude-3-5-haiku': { prompt: 0.80, completion: 4.00 },
-  'anthropic/claude-3.5-sonnet': { prompt: 3.00, completion: 15.00 },
-  'anthropic/claude-3-5-sonnet': { prompt: 3.00, completion: 15.00 },
-  'anthropic/claude-3.7-sonnet': { prompt: 3.00, completion: 15.00 },
-
-  // OpenAI
-  'openai/gpt-4o-mini': { prompt: 0.15, completion: 0.60 },
-  'openai/gpt-4o': { prompt: 2.50, completion: 10.00 },
-  'openai/o3-mini': { prompt: 1.10, completion: 4.40 },
-
-  // DeepSeek
-  'deepseek/deepseek-r1:free': { prompt: 0.00, completion: 0.00 },
-  'deepseek/deepseek-r1': { prompt: 0.55, completion: 2.19 },
-  'deepseek/deepseek-chat': { prompt: 0.14, completion: 0.28 },
-
-  // Meta
-  'meta-llama/llama-3.3-70b-instruct': { prompt: 0.12, completion: 0.30 },
-};
+// Initialize as an empty dynamic dictionary. This is populated dynamically from OpenRouter's catalog.
+export const MODEL_PRICING: Record<string, ModelRates> = {};
 
 export const DEFAULT_MODEL_RATES: ModelRates = { prompt: 0.30, completion: 1.20 };
 
@@ -56,19 +27,36 @@ export function registerModelPricing(modelId: string, promptRatePer1M: number, c
   };
 }
 
+export function updateModelPricingFromOpenRouter(rawModels: RawOpenRouterModel[]): void {
+  if (!rawModels || !Array.isArray(rawModels)) return;
+  rawModels.forEach((m) => {
+    if (m.id && m.pricing) {
+      const promptVal = parseFloat(String(m.pricing.prompt || 0));
+      const completionVal = parseFloat(String(m.pricing.completion || 0));
+      registerModelPricing(m.id, promptVal * 1_000_000, completionVal * 1_000_000);
+    }
+  });
+}
+
 export function getModelRates(modelId?: string): ModelRates {
   if (!modelId) return DEFAULT_MODEL_RATES;
   const normalized = modelId.toLowerCase().trim();
+
+  // 1. Prefer dynamically loaded pricing
   if (MODEL_PRICING[normalized]) return MODEL_PRICING[normalized];
 
-  if (normalized.includes('gemini') && normalized.includes('flash')) return MODEL_PRICING['google/gemini-2.5-flash'];
-  if (normalized.includes('gemini') && normalized.includes('pro')) return MODEL_PRICING['google/gemini-pro-1.5'];
-  if (normalized.includes('haiku')) return MODEL_PRICING['anthropic/claude-3.5-haiku'];
-  if (normalized.includes('sonnet')) return MODEL_PRICING['anthropic/claude-3.5-sonnet'];
-  if (normalized.includes('gpt-4o-mini')) return MODEL_PRICING['openai/gpt-4o-mini'];
-  if (normalized.includes('gpt-4o')) return MODEL_PRICING['openai/gpt-4o'];
+  // 2. Specific overrides for free models
   if (normalized.includes(':free')) return { prompt: 0, completion: 0 };
-  if (normalized.includes('deepseek')) return MODEL_PRICING['deepseek/deepseek-r1'];
+
+  // 3. Fallback to suitable heuristics if not yet fetched
+  if (normalized.includes('gemini') && normalized.includes('flash')) return { prompt: 0.10, completion: 0.40 };
+  if (normalized.includes('gemini') && normalized.includes('pro')) return { prompt: 1.25, completion: 5.00 };
+  if (normalized.includes('haiku')) return { prompt: 0.80, completion: 4.00 };
+  if (normalized.includes('sonnet')) return { prompt: 3.00, completion: 15.00 };
+  if (normalized.includes('gpt-4o-mini')) return { prompt: 0.15, completion: 0.60 };
+  if (normalized.includes('gpt-4o')) return { prompt: 2.50, completion: 10.00 };
+  if (normalized.includes('deepseek')) return { prompt: 0.14, completion: 0.28 };
+  if (normalized.includes('llama')) return { prompt: 0.12, completion: 0.30 };
 
   return DEFAULT_MODEL_RATES;
 }
@@ -172,21 +160,43 @@ export function countTotalSessionTokens(rounds: CouncilRound[]): number {
   return countTotalSessionCost(rounds).totalTokens;
 }
 
-/**
- * Archivist Summarizer: Hierarchical Memory Upgrade
- * Instead of discarding older rounds when token limit is approached,
- * the Archivist creates or builds a compressed Executive Summary of older rounds.
- */
-export async function buildArchivistContext(options: {
+export interface BuildArchivistContextOptions {
   systemPrompt: string;
   userQuery: string;
   attachedImages?: { name: string; url: string; type: string }[];
   rounds: CouncilRound[];
   apiKey: string;
   maxTokensWindow?: number; // e.g. 3000 tokens
+  recentRoundsWindow?: number; // Configurable number of recent rounds in full detail (default: 2)
   signal?: AbortSignal;
-}): Promise<{ role: 'system' | 'user' | 'assistant'; content: any }[]> {
-  const { systemPrompt, userQuery, attachedImages, rounds, apiKey, maxTokensWindow = 3000, signal } = options;
+  onSummaryGenerated?: (summary: string) => void;
+}
+
+export type ArchivistContextMessages = { role: 'system' | 'user' | 'assistant'; content: any }[] & {
+  archivistSummary?: string;
+};
+
+/**
+ * Archivist Summarizer: Hierarchical Memory Upgrade
+ * Instead of discarding older rounds when token limit is approached,
+ * the Archivist creates or builds a compressed Executive Summary of older rounds.
+ */
+export async function buildArchivistContext(
+  options: BuildArchivistContextOptions
+): Promise<ArchivistContextMessages> {
+  const {
+    systemPrompt,
+    userQuery,
+    attachedImages,
+    rounds,
+    apiKey,
+    maxTokensWindow = 3000,
+    recentRoundsWindow: customRecentRounds = 2,
+    signal,
+    onSummaryGenerated,
+  } = options;
+
+  const recentRoundsWindow = Math.max(1, Math.min(10, customRecentRounds));
 
   const messages: { role: 'system' | 'user' | 'assistant'; content: any }[] = [
     { role: 'system', content: systemPrompt },
@@ -198,21 +208,22 @@ export async function buildArchivistContext(options: {
         role: 'user',
         content: [
           { type: 'text', text: userQuery },
-          ...attachedImages.map(img => ({ type: 'image_url', image_url: { url: img.url } }))
-        ]
+          ...attachedImages.map((img) => ({ type: 'image_url', image_url: { url: img.url } })),
+        ],
       });
     } else {
       messages.push({ role: 'user', content: userQuery });
     }
-    return messages;
+    const res: ArchivistContextMessages = messages as any;
+    return res;
   }
 
-  // Calculate tokens for previous rounds
-  const recentRoundsWindow = 2; // Keep most recent 2 rounds in full detail
+  // Calculate tokens for previous rounds using configurable window
   const recentRounds = rounds.slice(-recentRoundsWindow);
   const olderRounds = rounds.slice(0, Math.max(0, rounds.length - recentRoundsWindow));
 
   let contextBlocks: string[] = [];
+  let archivistSummary: string | undefined = undefined;
 
   // If there are older rounds, run Archivist compression on them
   if (olderRounds.length > 0) {
@@ -247,22 +258,25 @@ export async function buildArchivistContext(options: {
           signal,
         });
 
-        const summary = summaryRes.content;
-
-        contextBlocks.push(`[Archivist Hierarchical Memory Summary (Rounds 1-${olderRounds.length})]:\n${summary}`);
+        archivistSummary = summaryRes.content?.trim();
+        contextBlocks.push(`[Archivist Hierarchical Memory Summary (Rounds 1-${olderRounds.length})]:\n${archivistSummary}`);
       } catch (e) {
         // Fallback sync extraction if API call fails/aborts
-        const fallbackSummary = olderRounds
-          .map((r, i) => `R${i + 1} ("${r.userQuery.slice(0, 30)}..."): ${r.synthesis?.content?.slice(0, 100) || 'N/A'}`)
+        archivistSummary = olderRounds
+          .map((r, i) => `Round ${i + 1} ("${r.userQuery.slice(0, 50)}"): ${r.synthesis?.content?.slice(0, 150) || 'N/A'}`)
           .join('\n');
-        contextBlocks.push(`[Archivist Compressed Memory (Rounds 1-${olderRounds.length})]:\n${fallbackSummary}`);
+        contextBlocks.push(`[Archivist Compressed Memory (Rounds 1-${olderRounds.length})]:\n${archivistSummary}`);
       }
     } else {
       // Render compressed round briefs
-      const briefs = olderRounds
-        .map((r, i) => `Round ${i + 1} Query: "${r.userQuery}" -> Consensus: ${r.synthesis?.content || 'Pending'}`)
-        .join('\n');
-      contextBlocks.push(`[Archivist Memory Archive (Rounds 1-${olderRounds.length})]:\n${briefs}`);
+      archivistSummary = olderRounds
+        .map((r, i) => `Round ${i + 1} ("${r.userQuery}"): ${r.synthesis?.content || 'Pending'}`)
+        .join('\n\n');
+      contextBlocks.push(`[Archivist Memory Archive (Rounds 1-${olderRounds.length})]:\n${archivistSummary}`);
+    }
+
+    if (onSummaryGenerated && archivistSummary) {
+      onSummaryGenerated(archivistSummary);
     }
   }
 
@@ -281,8 +295,8 @@ export async function buildArchivistContext(options: {
       role: 'user',
       content: [
         { type: 'text', text: contextBlocks.join('\n\n') },
-        ...attachedImages.map(img => ({ type: 'image_url', image_url: { url: img.url } }))
-      ]
+        ...attachedImages.map((img) => ({ type: 'image_url', image_url: { url: img.url } })),
+      ],
     });
   } else {
     messages.push({
@@ -291,5 +305,7 @@ export async function buildArchivistContext(options: {
     });
   }
 
-  return messages;
+  const result: ArchivistContextMessages = messages as any;
+  result.archivistSummary = archivistSummary;
+  return result;
 }

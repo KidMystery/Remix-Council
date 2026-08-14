@@ -135,13 +135,12 @@ const DEFAULT_FREE_BACKUPS: BackupCandidate[] = [
 ];
 
 const DEFAULT_PAID_BACKUPS: BackupCandidate[] = [
-  { model: 'google/gemini-3.5-flash', name: 'Gemini 3.5 Flash', org: 'google', family: 'gemini-3.5-flash', isFree: false },
-  { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', org: 'google', family: 'gemini-2.5-flash', isFree: false },
   { model: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', org: 'openai', family: 'gpt-4o-mini', isFree: false },
   { model: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', org: 'anthropic', family: 'claude-3.5-haiku', isFree: false },
   { model: 'deepseek/deepseek-chat', name: 'DeepSeek V3', org: 'deepseek', family: 'deepseek-v3', isFree: false },
   { model: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B', org: 'qwen', family: 'qwen-2.5', isFree: false },
   { model: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', org: 'meta-llama', family: 'llama-3.3', isFree: false },
+  { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', org: 'google', family: 'gemini-2.5-flash', isFree: false },
   { model: 'mistralai/mistral-large-2411', name: 'Mistral Large', org: 'mistralai', family: 'mistral-large', isFree: false },
 ];
 
@@ -196,32 +195,40 @@ export function computeOrderedBackupList(options: {
     attemptedModels.add(failingPersona.model.trim());
   }
 
-  // Build pool from rawModels if available, else from defaults
+  // 1. Build candidates dynamically from rawModels (rawModelsCatalog) if valid and non-empty.
+  // Hardcoded backup lists are strictly used as a last resort.
   let candidates: BackupCandidate[] = [];
 
-  if (rawModels && Array.isArray(rawModels) && rawModels.length > 0) {
+  const isValidRawModels = Array.isArray(rawModels) && rawModels.length > 0;
+
+  if (isValidRawModels) {
     candidates = rawModels
       .filter((m) => {
-        if (!m.id) return false;
+        if (!m || typeof m.id !== 'string' || !m.id.trim()) return false;
 
-        // Skip router aliases
-        if (m.id === 'openrouter/auto' || m.id === 'openrouter/free') return false;
+        const id = m.id.trim();
+        // Skip meta / router aliases
+        if (id === 'openrouter/auto' || id === 'openrouter/free' || id.includes('openrouter/auto') || id.includes('openrouter/free')) {
+          return false;
+        }
 
-        // Check Fast & Free preset requirement -> free models only
+        // Fast & Free requirement: must be a verified free model
         const free = isFreeModel(m);
         if (isFreeOnlyPreset && !free) return false;
 
         return true;
       })
       .map((m) => ({
-        model: m.id,
-        name: cleanModelName(m.id, m.name),
-        org: getAuthorOrganization(m.id),
+        model: m.id.trim(),
+        name: cleanModelName(m.id.trim(), m.name),
+        org: getAuthorOrganization(m.id.trim()),
         family: getFamily(m),
         isFree: isFreeModel(m),
       }));
-  } else {
-    // Default fallback pools
+  }
+
+  // 2. Fall back to hardcoded defaults only if rawModels is empty, invalid, or produced no candidates
+  if (candidates.length === 0) {
     const pool = isFreeOnlyPreset
       ? DEFAULT_FREE_BACKUPS
       : [...DEFAULT_FREE_BACKUPS, ...DEFAULT_PAID_BACKUPS];

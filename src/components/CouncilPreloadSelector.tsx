@@ -197,8 +197,8 @@ export function CouncilPreloadSelector({
               type="button"
               onClick={handleExportPresets}
               disabled={customPresets.length === 0}
-              className="flex items-center gap-1 px-2 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-300 rounded-lg text-[11px] font-semibold transition-colors border border-slate-200 dark:border-slate-700"
-              title="Export custom presets to JSON file"
+              className="flex items-center gap-1 px-2 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 dark:text-slate-300 rounded-lg text-[11px] font-semibold transition-colors border border-slate-200 dark:border-slate-700"
+              title={customPresets.length === 0 ? "No custom presets to export" : "Export custom presets to JSON file"}
             >
               <Download size={12} />
               <span className="hidden sm:inline">Export ({customPresets.length})</span>
@@ -285,7 +285,9 @@ export function CouncilPreloadSelector({
             </button>
             <button
               type="submit"
-              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1"
+              disabled={!newPresetName.trim()}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1 cursor-pointer"
+              title={!newPresetName.trim() ? "Enter a preset name to save" : "Save preset to local storage"}
             >
               <Save size={13} />
               <span>Save Preset</span>
@@ -387,11 +389,11 @@ export function CouncilPreloadSelector({
                       key={p.id}
                       className="p-1.5 bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 rounded-lg flex items-center justify-between text-[10px]"
                     >
-                      <div className="flex items-center gap-1.5 truncate pr-1">
+                      <div className="flex items-center gap-1.5 truncate pr-1" title={p.name}>
                         <span>{p.avatar}</span>
                         <span className="font-bold text-slate-800 dark:text-slate-200 truncate">{p.name}</span>
                       </div>
-                      <span className="font-mono text-[9px] text-slate-500 dark:text-slate-400 shrink-0 bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 max-w-[100px] truncate">
+                      <span className="font-mono text-[9px] text-slate-500 dark:text-slate-400 shrink-0 bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 max-w-[100px] truncate" title={p.model}>
                         {p.model?.split('/')[1] || p.model}
                       </span>
                     </div>
@@ -399,13 +401,13 @@ export function CouncilPreloadSelector({
 
                   {/* Chair */}
                   <div className="p-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg flex items-center justify-between text-[10px]">
-                    <div className="flex items-center gap-1.5 truncate pr-1">
+                    <div className="flex items-center gap-1.5 truncate pr-1" title={preset.synthesizer.name}>
                       <span>{preset.synthesizer.avatar}</span>
                       <span className="font-bold text-amber-900 dark:text-amber-200 truncate">
                         {preset.synthesizer.name}
                       </span>
                     </div>
-                    <span className="font-mono text-[9px] text-amber-700 dark:text-amber-400 shrink-0 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30 max-w-[100px] truncate">
+                    <span className="font-mono text-[9px] text-amber-700 dark:text-amber-400 shrink-0 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30 max-w-[100px] truncate" title={preset.synthesizer.model}>
                       {preset.synthesizer.model?.split('/')[1] || preset.synthesizer.model}
                     </span>
                   </div>

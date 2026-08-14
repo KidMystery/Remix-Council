@@ -1,5 +1,5 @@
 import { Persona, PersonaId } from '../types';
-import { registerModelPricing } from './archivist';
+import { registerModelPricing, updateModelPricingFromOpenRouter } from './archivist';
 import { mapOpenRouterModels, AssignedModel, getAuthorOrganization } from './modelMapper';
 import { routeCouncilModels, TaskDomain } from './smartModelSelector';
 
@@ -137,14 +137,8 @@ export function updatePresetsFromFetchedModels(rawModels: RawOpenRouterModel[]):
     return MODEL_PRESETS;
   }
 
-  // Register pricing info into archivist model rates table
-  rawModels.forEach((m) => {
-    if (m.id && m.pricing) {
-      const promptVal = typeof m.pricing.prompt === 'string' ? parseFloat(m.pricing.prompt) : (m.pricing.prompt || 0);
-      const completionVal = typeof m.pricing.completion === 'string' ? parseFloat(m.pricing.completion) : (m.pricing.completion || 0);
-      registerModelPricing(m.id, promptVal * 1_000_000, completionVal * 1_000_000);
-    }
-  });
+  // Dynamically register pricing info into archivist model rates table
+  updateModelPricingFromOpenRouter(rawModels);
 
   const { fastAndFree, fastAndCheap, bestValue, highestQuality } = mapOpenRouterModels(rawModels);
 

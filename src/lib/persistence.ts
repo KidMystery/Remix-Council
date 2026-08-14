@@ -1,0 +1,209 @@
+import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
+import { getFirestore, doc, setDoc, getDoc, collection, query, getDocs, deleteDoc, Firestore } from 'firebase/firestore';
+import { getAuth, signInWithPopup, GoogleAuthProvider, User, Auth, onAuthStateChanged, signOut } from 'firebase/auth';
+import config from '../../firebase-applet-config.json';
+import { Session, Settings, Persona } from '../types';
+
+export interface PersistedSession {
+  id: string;
+  userId: string;
+  title: string;
+  rounds: any[];
+  settings?: any;
+  createdAt: number;
+  updatedAt: number;
+  shareToken?: string;
+}
+
+export interface UserCloudData {
+  settings?: Settings;
+  personas?: Persona[];
+  synthesizer?: Persona;
+  updatedAt?: number;
+}
+
+const firebaseConfig = {
+  apiKey: config.apiKey || "AIzaSyDbNiNRUpnBFN7JStWKAxtqTTd4hE_A8dk",
+  authDomain: config.authDomain || "gen-lang-client-0644203869.firebaseapp.com",
+  projectId: config.projectId || "gen-lang-client-0644203869",
+  storageBucket: config.storageBucket || "gen-lang-client-0644203869.firebasestorage.app",
+  messagingSenderId: config.messagingSenderId || "326388929532",
+  appId: config.appId || "1:326388929532:web:ea8aba91f95988cd7c1879"
+};
+
+let app: FirebaseApp | null = null;
+let db: Firestore | null = null;
+let auth: Auth | null = null;
+let persistenceInitialized = false;
+
+export function initPersistence(): boolean {
+  if (getApps().length === 0) {
+    try {
+      if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
+        console.warn("Firebase configuration incomplete. Persistence will be localStorage-only.");
+        persistenceInitialized = false;
+        return false;
+      }
+      app = initializeApp(firebaseConfig);
+      db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
+      auth = getAuth(app);
+      persistenceInitialized = true;
+      console.log("Firebase persistence initialized successfully.");
+      return true;
+    } catch (e) {
+      console.error("Failed to initialize Firebase:", e);
+      persistenceInitialized = false;
+      return false;
+    }
+  }
+
+  try {
+    app = getApps()[0];
+    db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
+    auth = getAuth(app);
+    persistenceInitialized = true;
+    return true;
+  } catch (e) {
+    console.error("Failed to retrieve Firebase app references:", e);
+    persistenceInitialized = false;
+    return false;
+  }
+}
+
+export function isPersistenceEnabled(): boolean {
+  if (!persistenceInitialized) {
+    initPersistence();
+  }
+  return persistenceInitialized;
+}
+
+export function getFirebaseAuth(): Auth | null {
+  if (!auth) initPersistence();
+  return auth;
+}
+
+export function getFirebaseDb(): Firestore | null {
+  if (!db) initPersistence();
+  return db;
+}
+
+export async function syncCouncilSession(session: PersistedSession): Promise<string> {
+  if (!db) initPersistence();
+  if (!db || !session.userId) {
+    try {
+      localStorage.setItem('council_local_backup_' + session.id, JSON.stringify(session));
+    } catch (e) {
+      console.warn('Failed to store local backup session:', e);
+    }
+    return session.shareToken || session.id;
+  }
+
+  try {
+    await setDoc(doc(db, 'users', session.userId, 'sessions', session.id), session, { merge: true });
+    return session.shareToken || session.id;
+  } catch (e) {
+    console.warn('Firestore setDoc failed, attempting localStorage fallback:', e);
+    try {
+      localStorage.setItem('council_local_backup_' + session.id, JSON.stringify(session));
+    } catch {}
+    return session.shareToken || session.id;
+  }
+}
+
+export async function loadUserSessions(userId: string): Promise<PersistedSession[]> {
+  if (!db) initPersistence();
+  if (!db || !userId) return [];
+  try {
+    const sessionsRef = collection(db, 'users', userId, 'sessions');
+    const q = query(sessionsRef);
+    const querySnapshot = await getDocs(q);
+    const sessions: PersistedSession[] = [];
+    querySnapshot.forEach((doc) => {
+      sessions.push(doc.data() as PersistedSession);
+    });
+    return sessions;
+  } catch (e) {
+    console.error('Failed to load user sessions from Firestore:', e);
+    return [];
+  }
+}
+
+export async function deleteCloudSession(userId: string, sessionId: string): Promise<void> {
+  if (!db) initPersistence();
+  if (!db || !userId || !sessionId) return;
+  try {
+    await deleteDoc(doc(db, 'users', userId, 'sessions', sessionId));
+  } catch (e) {
+    console.error('Failed to delete cloud session:', e);
+  }
+}
+
+export async function syncUserSettings(
+  userId: string,
+  settings?: Settings,
+  personas?: Persona[],
+  synthesizer?: Persona
+): Promise<void> {
+  if (!db) initPersistence();
+  if (!db || !userId) return;
+
+  const payload: UserCloudData = {
+    updatedAt: Date.now(),
+  };
+  if (settings) payload.settings = settings;
+  if (personas) payload.personas = personas;
+  if (synthesizer) payload.synthesizer = synthesizer;
+
+  try {
+    await setDoc(doc(db, 'users', userId, 'settings', 'global_preferences'), payload, { merge: true });
+  } catch (e) {
+    console.error('Failed to sync user settings to Firestore:', e);
+  }
+}
+
+export async function loadUserSettings(userId: string): Promise<UserCloudData | null> {
+  if (!db) initPersistence();
+  if (!db || !userId) return null;
+  try {
+    const snap = await getDoc(doc(db, 'users', userId, 'settings', 'global_preferences'));
+    if (snap.exists()) {
+      return snap.data() as UserCloudData;
+    }
+    return null;
+  } catch (e) {
+    console.error('Failed to load user settings from Firestore:', e);
+    return null;
+  }
+}
+
+export async function loginWithGoogle(): Promise<User | null> {
+  if (!auth) initPersistence();
+  if (!auth) {
+    console.warn("Firebase Auth not initialized.");
+    return null;
+  }
+  try {
+    const provider = new GoogleAuthProvider();
+    const result = await signInWithPopup(auth, provider);
+    return result.user;
+  } catch (error: any) {
+    console.error("Google login failed:", error);
+    return null;
+  }
+}
+
+export async function logout(): Promise<void> {
+  if (!auth) initPersistence();
+  if (auth) {
+    await signOut(auth);
+  }
+}
+
+export function onAuthChange(callback: (user: User | null) => void): () => void {
+  if (!auth) initPersistence();
+  if (!auth) {
+    console.warn("Firebase Auth not initialized for auth change listener.");
+    return () => {};
+  }
+  return onAuthStateChanged(auth, callback);
+}

@@ -1,177 +1,166 @@
-import React, { useRef } from 'react';
-import { Settings as SettingsIcon, Sun, Moon, ShieldAlert, Sparkles, Download, Upload, Zap, Layers, Cpu } from 'lucide-react';
-import { ExecutionMode } from '../types';
-import { PresetId } from '../lib/presets';
+import React, { useState, useRef, useEffect } from 'react';
+import { Settings as SettingsIcon, Sun, Moon, ShieldAlert, LogIn, LogOut, User as UserIcon, MoreVertical } from 'lucide-react';
+import { User } from 'firebase/auth';
 
 interface HeaderActionsProps {
-  executionMode: ExecutionMode;
-  onUpdateExecutionMode: (mode: ExecutionMode) => void;
-  isProCompareEnabled?: boolean;
-  onToggleProCompare?: () => void;
-  activePresetId?: PresetId;
-  onApplyPreset?: (id: PresetId) => void;
   theme: 'dark' | 'light' | 'system';
   onSetTheme: (t: 'dark' | 'light' | 'system') => void;
   onOpenAuditModal?: () => void;
-  onExportSessions?: () => void;
-  onImportSessions?: (file: File) => void;
   onOpenSettings: () => void;
-  maxRoundCostCeiling?: number;
-  stopAfterStage1?: boolean;
-  useSingleModelForSimple?: boolean;
+  user?: User | null;
+  onLogin?: () => void;
+  onLogout?: () => void;
+  isDeliberating?: boolean;
 }
 
 export const HeaderActions: React.FC<HeaderActionsProps> = ({
-  executionMode,
-  onUpdateExecutionMode,
-  isProCompareEnabled,
-  onToggleProCompare,
-  activePresetId,
-  onApplyPreset,
   theme,
   onSetTheme,
   onOpenAuditModal,
-  onExportSessions,
-  onImportSessions,
   onOpenSettings,
-  maxRoundCostCeiling,
-  stopAfterStage1,
-  useSingleModelForSimple,
+  user,
+  onLogin,
+  onLogout,
+  isDeliberating,
 }) => {
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isOverflowOpen, setIsOverflowOpen] = useState(false);
+  const overflowRef = useRef<HTMLDivElement>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && onImportSessions) {
-      onImportSessions(file);
+  // Close overflow menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (overflowRef.current && !overflowRef.current.contains(event.target as Node)) {
+        setIsOverflowOpen(false);
+      }
+    };
+    if (isOverflowOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
     }
-    if (e.target) e.target.value = '';
-  };
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isOverflowOpen]);
 
   return (
-    <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-      {/* Execution Mode Selector */}
-      <div className="hidden md:flex items-center p-0.5 bg-slate-200/80 dark:bg-slate-800/80 rounded-lg border border-slate-300/60 dark:border-slate-700/60 text-[11px] font-mono">
-        <button
-          type="button"
-          onClick={() => onUpdateExecutionMode('auto')}
-          className={`px-2 py-1 rounded-md font-medium transition-all ${
-            executionMode === 'auto'
-              ? 'bg-white dark:bg-slate-900 text-cyan-600 dark:text-cyan-400 shadow-xs'
-              : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-          }`}
-          title="Auto: Intelligence router dynamically selects mode"
-        >
-          Auto
-        </button>
-        <button
-          type="button"
-          onClick={() => onUpdateExecutionMode('quick_panel')}
-          className={`px-2 py-1 rounded-md font-medium transition-all ${
-            executionMode === 'quick_panel'
-              ? 'bg-white dark:bg-slate-900 text-cyan-600 dark:text-cyan-400 shadow-xs'
-              : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-          }`}
-          title="Quick Panel: Fast single-stage evaluation"
-        >
-          Quick
-        </button>
-        <button
-          type="button"
-          onClick={() => onUpdateExecutionMode('deep_council')}
-          className={`px-2 py-1 rounded-md font-medium transition-all ${
-            executionMode === 'deep_council'
-              ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-xs'
-              : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-          }`}
-          title="Deep Council: Multi-stage peer review and synthesis"
-        >
-          Deep
-        </button>
-      </div>
-
-      {/* Pro Comparison Toggle */}
-      {onToggleProCompare && (
-        <button
-          type="button"
-          onClick={onToggleProCompare}
-          className={`p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg border text-xs font-mono flex items-center gap-1.5 transition-all ${
-            isProCompareEnabled
-              ? 'bg-amber-500/10 border-amber-500/40 text-amber-600 dark:text-amber-400'
-              : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
-          }`}
-          title="Toggle Gemini 2.5 Pro Comparison Benchmark"
-        >
-          <Sparkles size={14} className={isProCompareEnabled ? 'text-amber-500' : ''} />
-          <span className="hidden lg:inline">Pro Benchmark</span>
-        </button>
-      )}
-
-      {/* JSON Session Export / Import */}
-      {onExportSessions && (
-        <button
-          type="button"
-          onClick={onExportSessions}
-          className="p-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 transition-colors flex items-center gap-1 text-xs font-mono"
-          title="Export thread sessions as JSON"
-        >
-          <Download size={14} />
-          <span className="hidden xl:inline">Export JSON</span>
-        </button>
-      )}
-
-      {onImportSessions && (
-        <>
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileChange}
-            accept=".json,application/json"
-            className="hidden"
-          />
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="p-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 transition-colors flex items-center gap-1 text-xs font-mono"
-            title="Import thread sessions from JSON file"
-          >
-            <Upload size={14} />
-            <span className="hidden xl:inline">Import JSON</span>
-          </button>
-        </>
-      )}
-
-      {/* Theme Toggle */}
-      <button
-        type="button"
-        onClick={() => onSetTheme(theme === 'dark' ? 'light' : 'dark')}
-        className="p-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 transition-colors"
-        title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} mode`}
-      >
-        {theme === 'dark' ? <Sun size={15} className="text-amber-400" /> : <Moon size={15} className="text-slate-600" />}
-      </button>
-
-      {/* Audit Log Modal Trigger */}
-      {onOpenAuditModal && (
-        <button
-          type="button"
-          onClick={onOpenAuditModal}
-          className="p-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 transition-colors"
-          title="View Audit Log & Model Routing Trace"
-        >
-          <ShieldAlert size={15} className="text-indigo-500" />
-        </button>
-      )}
-
-      {/* Settings Panel Trigger */}
+    <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+      {/* Settings Modal Trigger */}
       <button
         type="button"
         onClick={onOpenSettings}
-        className="p-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 transition-colors"
-        title="Open Settings"
+        disabled={isDeliberating}
+        className="min-w-[36px] min-h-[36px] sm:min-w-[38px] sm:min-h-[38px] rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 transition-colors flex items-center justify-center cursor-pointer shadow-xs"
+        title={isDeliberating ? "Settings unavailable during active deliberation" : "Chamber Settings & Data Management"}
       >
-        <SettingsIcon size={15} />
+        <SettingsIcon size={16} />
       </button>
+
+      {/* Overflow Utilities Menu (Theme Switcher, Audit Log, User Profile / Auth) */}
+      <div className="relative" ref={overflowRef}>
+        <button
+          type="button"
+          onClick={() => setIsOverflowOpen(!isOverflowOpen)}
+          className={`min-w-[36px] min-h-[36px] sm:min-w-[38px] sm:min-h-[38px] rounded-xl border transition-all flex items-center justify-center cursor-pointer shadow-xs ${
+            isOverflowOpen
+              ? 'bg-slate-100 dark:bg-slate-800 border-cyan-500/50 text-cyan-600 dark:text-cyan-400'
+              : 'bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
+          }`}
+          title="More tools & options"
+        >
+          <MoreVertical size={16} />
+        </button>
+
+        {isOverflowOpen && (
+          <div className="absolute right-0 mt-1.5 w-56 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xl p-1.5 z-50 space-y-1 animate-in fade-in slide-in-from-top-1 duration-150">
+            {/* Theme Toggle in Overflow */}
+            <button
+              type="button"
+              onClick={() => {
+                onSetTheme(theme === 'dark' ? 'light' : 'dark');
+                setIsOverflowOpen(false);
+              }}
+              className="w-full px-3 py-2 rounded-xl text-left text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-between transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-2.5">
+                {theme === 'dark' ? <Sun size={15} className="text-amber-400" /> : <Moon size={15} className="text-indigo-400" />}
+                <span>Theme: {theme === 'dark' ? 'Dark Mode' : 'Light Mode'}</span>
+              </div>
+              <span className="text-[10px] font-mono text-slate-400 uppercase">Switch</span>
+            </button>
+
+            {/* Audit Log / Routing Trace in Overflow */}
+            {onOpenAuditModal && (
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenAuditModal();
+                  setIsOverflowOpen(false);
+                }}
+                className="w-full px-3 py-2 rounded-xl text-left text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors cursor-pointer"
+              >
+                <ShieldAlert size={15} className="text-indigo-500" />
+                <span>Audit & Routing Trace</span>
+              </button>
+            )}
+
+            <div className="border-t border-slate-100 dark:border-slate-800 my-1" />
+
+            {/* User Account / Sync in Overflow */}
+            {user ? (
+              <div className="p-2 bg-slate-50 dark:bg-slate-950/60 rounded-xl space-y-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  {user.photoURL ? (
+                    <img
+                      src={user.photoURL}
+                      alt={user.displayName || 'User'}
+                      className="w-6 h-6 rounded-full border border-cyan-500/50 shadow-xs object-cover shrink-0"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <div className="w-6 h-6 rounded-full bg-cyan-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+                      {user.displayName ? user.displayName.slice(0, 1).toUpperCase() : <UserIcon size={12} />}
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-semibold text-slate-800 dark:text-slate-200 truncate">
+                      {user.displayName || 'Signed In'}
+                    </p>
+                    <p className="text-[10px] text-slate-400 truncate">{user.email}</p>
+                  </div>
+                </div>
+                {onLogout && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onLogout();
+                      setIsOverflowOpen(false);
+                    }}
+                    className="w-full py-1.5 px-2 rounded-lg text-left text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <LogOut size={13} />
+                    <span>Log Out</span>
+                  </button>
+                )}
+              </div>
+            ) : (
+              onLogin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onLogin();
+                    setIsOverflowOpen(false);
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-left text-xs font-medium text-cyan-600 dark:text-cyan-400 hover:bg-cyan-50 dark:hover:bg-cyan-950/40 flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <LogIn size={15} />
+                  <span>Sign In with Google</span>
+                </button>
+              )
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
+
+

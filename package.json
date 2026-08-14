@@ -21,6 +21,7 @@
     "dompurify": "^3.4.13",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
+    "firebase": "^12.17.1",
     "jszip": "^3.10.1",
     "lucide-react": "^0.546.0",
     "marked": "^18.0.9",
@@ -28,7 +29,8 @@
     "pdfjs-dist": "^6.2.108",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
@@ -41,6 +43,7 @@
     "tailwindcss": "^4.1.14",
     "tsx": "^4.23.8",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "vitest": "^4.1.10"
   }
 }

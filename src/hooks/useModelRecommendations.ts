@@ -56,8 +56,8 @@ export function useModelRecommendations() {
 
 
 
-  const handleRefresh = useCallback(async (options: { force: boolean }): Promise<RefreshRecommendationsResult | null> => {
-    const { force } = options;
+  const handleRefresh = useCallback(async (options?: { force?: boolean }): Promise<RefreshRecommendationsResult | null> => {
+    const force = options?.force ?? false;
 
     // Enforce 5 second click debounce lock for manual forced refreshes
     if (force) {

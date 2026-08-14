@@ -1,6 +1,13 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Session, CouncilRound } from '../types';
 import { summarizeTitle } from '../lib/titleUtils';
+import {
+  isPersistenceEnabled,
+  syncCouncilSession,
+  loadUserSessions,
+  deleteCloudSession,
+} from '../lib/persistence';
+import { User } from 'firebase/auth';
 
 const STORAGE_KEY = 'council-sessions-v2';
 
@@ -9,7 +16,7 @@ interface StoredData {
   activeSessionId: string | null;
 }
 
-export function useSessionManager() {
+export function useSessionManager(user: User | null = null) {
   const [data, setData] = useState<StoredData>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -31,14 +38,107 @@ export function useSessionManager() {
     };
   });
 
-  // Save to localStorage whenever data changes
+  const isCloudSyncEnabled = isPersistenceEnabled() && user !== null && !!user.uid;
+  const userId = user?.uid || null;
+  const loadedUserRef = useRef<string | null>(null);
+
+  // Effect for cloud load and merging whenever user logs in
+  useEffect(() => {
+    const loadAndMergeSessions = async () => {
+      if (!userId || !isCloudSyncEnabled) {
+        return;
+      }
+
+      try {
+        const cloudSessions = await loadUserSessions(userId);
+        if (cloudSessions.length === 0) return;
+
+        setData((prev) => {
+          const cloudMap = new Map(cloudSessions.map((s) => [s.id, s]));
+          const localMap = new Map(prev.sessions.map((s) => [s.id, s]));
+
+          const mergedSessions: Session[] = [];
+          let newActiveSessionId = prev.activeSessionId;
+
+          // Add/update sessions from cloud
+          cloudSessions.forEach((cloudSess) => {
+            const localSess = localMap.get(cloudSess.id);
+            if (localSess) {
+              if (cloudSess.updatedAt > localSess.updatedAt) {
+                mergedSessions.push({
+                  id: cloudSess.id,
+                  title: cloudSess.title,
+                  rounds: cloudSess.rounds,
+                  createdAt: cloudSess.createdAt,
+                  updatedAt: cloudSess.updatedAt,
+                  userId: cloudSess.userId,
+                });
+              } else {
+                mergedSessions.push(localSess);
+              }
+            } else {
+              mergedSessions.push({
+                id: cloudSess.id,
+                title: cloudSess.title,
+                rounds: cloudSess.rounds,
+                createdAt: cloudSess.createdAt,
+                updatedAt: cloudSess.updatedAt,
+                userId: cloudSess.userId,
+              });
+            }
+          });
+
+          // Add local-only sessions
+          prev.sessions.forEach((localSess) => {
+            if (!cloudMap.has(localSess.id)) {
+              mergedSessions.push(localSess);
+            }
+          });
+
+          // Sort by updatedAt descending
+          mergedSessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+          if (!newActiveSessionId || !mergedSessions.some((s) => s.id === newActiveSessionId)) {
+            newActiveSessionId = mergedSessions[0]?.id || null;
+          }
+
+          return {
+            sessions: mergedSessions,
+            activeSessionId: newActiveSessionId,
+          };
+        });
+      } catch (e) {
+        console.error('Failed to load and merge cloud sessions:', e);
+      }
+    };
+
+    if (userId && loadedUserRef.current !== userId) {
+      loadedUserRef.current = userId;
+      loadAndMergeSessions();
+    }
+  }, [userId, isCloudSyncEnabled]);
+
+  // Save to localStorage and cloud whenever data changes
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch (e) {
       console.warn('Failed to save council sessions to localStorage', e);
     }
-  }, [data]);
+
+    if (isCloudSyncEnabled && userId) {
+      data.sessions.forEach(async (session) => {
+        await syncCouncilSession({
+          id: session.id,
+          userId: userId,
+          title: session.title,
+          rounds: session.rounds,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+        });
+      });
+    }
+  }, [data, isCloudSyncEnabled, userId]);
 
   const activeSession = data.sessions.find((s) => s.id === data.activeSessionId);
 
@@ -49,6 +149,7 @@ export function useSessionManager() {
       rounds: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      userId: userId || undefined,
     };
 
     setData((prev) => ({
@@ -57,7 +158,7 @@ export function useSessionManager() {
     }));
 
     return newSession;
-  }, []);
+  }, [userId]);
 
   const selectSession = useCallback((id: string) => {
     setData((prev) => ({
@@ -66,20 +167,25 @@ export function useSessionManager() {
     }));
   }, []);
 
-  const deleteSession = useCallback((id: string) => {
+  const deleteSession = useCallback(async (id: string) => {
     setData((prev) => {
       const nextSessions = prev.sessions.filter((s) => s.id !== id);
       const nextActiveId = prev.activeSessionId === id
         ? (nextSessions[0]?.id ?? null)
         : prev.activeSessionId;
+
+      if (isCloudSyncEnabled && userId) {
+        deleteCloudSession(userId, id);
+      }
+
       return {
         sessions: nextSessions,
         activeSessionId: nextActiveId,
       };
     });
-  }, []);
+  }, [isCloudSyncEnabled, userId]);
 
-  const clearSessionHistory = useCallback((sessionId?: string) => {
+  const clearSessionHistory = useCallback(async (sessionId?: string) => {
     setData((prev) => {
       const targetId = sessionId || prev.activeSessionId;
       if (!targetId) return prev;
@@ -95,20 +201,39 @@ export function useSessionManager() {
         return s;
       });
 
+      if (isCloudSyncEnabled && userId) {
+        const clearedSession = sessions.find((s) => s.id === targetId);
+        if (clearedSession) {
+          syncCouncilSession({
+            id: clearedSession.id,
+            userId: userId,
+            title: clearedSession.title,
+            rounds: [],
+            createdAt: clearedSession.createdAt,
+            updatedAt: clearedSession.updatedAt,
+          });
+        }
+      }
+
       return {
         ...prev,
         sessions,
       };
     });
-  }, []);
+  }, [isCloudSyncEnabled, userId]);
 
-  const clearAllSessions = useCallback(() => {
+  const clearAllSessions = useCallback(async () => {
+    if (isCloudSyncEnabled && userId) {
+      const allCloudSessions = await loadUserSessions(userId);
+      await Promise.all(allCloudSessions.map((s) => deleteCloudSession(userId, s.id)));
+    }
+
     setData({
       sessions: [],
       activeSessionId: null,
     });
     localStorage.removeItem(STORAGE_KEY);
-  }, []);
+  }, [isCloudSyncEnabled, userId]);
 
   const addRoundToActiveSession = useCallback((round: CouncilRound) => {
     setData((prev) => {
@@ -117,13 +242,13 @@ export function useSessionManager() {
       let activeIndex = sessions.findIndex((s) => s.id === activeId);
 
       if (activeIndex === -1) {
-        // Create a new session automatically if none is active
         const newSession: Session = {
           id: `session-${Date.now()}`,
           title: summarizeTitle(round.userQuery),
           rounds: [round],
           createdAt: Date.now(),
           updatedAt: Date.now(),
+          userId: userId || undefined,
         };
         return {
           sessions: [newSession, ...sessions],
@@ -147,7 +272,7 @@ export function useSessionManager() {
         };
       }
     });
-  }, []);
+  }, [userId]);
 
   const updateRoundInActiveSession = useCallback((roundId: string, updateFn: (round: CouncilRound) => CouncilRound) => {
     setData((prev) => {

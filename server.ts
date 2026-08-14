@@ -1,70 +1,199 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
+import dotenv from "dotenv";
+import { z } from "zod";
+
+dotenv.config();
+
+// --- SECURITY FIX: Input Validation Schemas ---
+const imagePartSchema = z.object({
+  type: z.literal("image_url"),
+  image_url: z.object({ url: z.string().url().max(2048, "Image URL too long") }),
+});
+
+const textPartSchema = z.object({
+  type: z.literal("text"),
+  text: z.string().min(1, "Text content cannot be empty").max(150000, "Text content too long"),
+});
+
+const contentPartSchema = z.discriminatedUnion("type", [textPartSchema, imagePartSchema]);
+
+const messageSchema = z.object({
+  role: z.enum(["system", "user", "assistant"]),
+  content: z.union([
+    z.string().min(1, "Message content cannot be empty").max(150000, "Message content too long"),
+    z.array(contentPartSchema).min(1, "Message content array cannot be empty").max(10, "Too many content parts"),
+  ]),
+});
+
+const llmRequestSchema = z.object({
+  model: z.string().min(3, "Model ID too short").max(100, "Model ID too long"),
+  messages: z.array(messageSchema).min(1, "Messages array cannot be empty").max(100, "Too many messages"),
+  temperature: z.number().min(0).max(2).optional(),
+  max_tokens: z.number().int().positive().min(1).max(16384).optional(),
+  stream: z.boolean().optional(),
+  enableSearchGrounding: z.boolean().optional(),
+});
+// --- END Input Validation Schemas ---
 
 async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-  // Middleware to parse JSON bodies
-  app.use(express.json({ limit: "75mb" }));
-  app.use(express.urlencoded({ limit: "75mb", extended: true }));
+  // 10MB limit as a pragmatic compromise for payload uploads
+  app.use(express.json({ limit: "10mb" }));
+  app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
-    app.get("/api/health", (req, res) => {
+  const requestWindow = new Map<string, { startedAt: number; count: number }>();
+
+  function isRateLimited(req: express.Request): boolean {
+    const key = req.ip || "unknown";
+    const now = Date.now();
+    const windowMs = 60_000;
+    const maxRequests = 30;
+
+    const current = requestWindow.get(key);
+    if (!current || now - current.startedAt > windowMs) {
+      requestWindow.set(key, { startedAt: now, count: 1 });
+      return false;
+    }
+    current.count += 1;
+    return current.count > maxRequests;
+  }
+
+  const KNOWN_MODEL_NAME_MAP: Record<string, string> = {
+    "gemini 2.5 flash": "google/gemini-2.5-flash",
+    "gemini 2.0 flash": "google/gemini-2.0-flash-001",
+    "gemini 2.5 pro": "google/gemini-2.5-pro",
+    "gemini 2.0 flash exp": "google/gemini-2.0-flash-exp:free",
+    "claude 3.7 sonnet": "anthropic/claude-3.7-sonnet",
+    "claude 3.5 sonnet": "anthropic/claude-3.5-sonnet",
+    "claude 3.5 haiku": "anthropic/claude-3.5-haiku",
+    "gpt-4o": "openai/gpt-4o",
+    "gpt-4o mini": "openai/gpt-4o-mini",
+    "o3-mini": "openai/o3-mini",
+    "deepseek r1": "deepseek/deepseek-r1",
+    "deepseek v3": "deepseek/deepseek-chat",
+    "qwen 2.5 72b instruct": "qwen/qwen-2.5-72b-instruct",
+    "llama 3.3 70b instruct": "meta-llama/llama-3.3-70b-instruct",
+    "gemma 4 31b": "google/gemma-4-31b-it:free",
+    "nemotron 3.5 content safety": "nvidia/nemotron-3.5-content-safety:free",
+    "laguna xs 2.1": "poolside/laguna-xs-2.1:free",
+    "ling 3.0 tiny": "inclusionai/ling-3.0-tiny:free",
+  };
+
+  function sanitizeAndResolveModel(value: unknown): string {
+    if (typeof value !== "string") return "google/gemini-2.5-flash";
+    let trimmed = value.trim();
+    if (!trimmed) return "google/gemini-2.5-flash";
+
+    const lower = trimmed.toLowerCase();
+    const withoutFree = lower.replace(/\s*\(free\)/g, "").replace(/\s*\(paid\)/g, "").trim();
+
+    if (KNOWN_MODEL_NAME_MAP[withoutFree]) {
+      return KNOWN_MODEL_NAME_MAP[withoutFree];
+    }
+
+    if (trimmed.includes("(free)") && !trimmed.endsWith(":free")) {
+      trimmed = trimmed.replace(/\s*\(free\)/i, ":free");
+    } else {
+      trimmed = trimmed.replace(/\s*\(paid\)/i, "");
+    }
+
+    trimmed = trimmed.replace(/^["']|["']$/g, "").trim();
+
+    if (/^[a-zA-Z0-9_.:/~@+-]+$/.test(trimmed)) {
+      return trimmed;
+    }
+
+    const match = trimmed.match(/[a-zA-Z0-9_.:/~@+-]+/);
+    if (match && match[0].length >= 3) {
+      return match[0];
+    }
+
+    return "google/gemini-2.5-flash";
+  }
+
+  app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
   });
 
   app.post("/api/council", async (req, res) => {
-    const { model, messages, temperature, max_tokens, stream, enableSearchGrounding } = req.body;
-    const reqApiKey = ((req.headers['x-api-key-override'] as string) || '').trim();
+    if (isRateLimited(req)) {
+      return res.status(429).json({ error: "Too many requests. Please slow down." });
+    }
 
-    // 1. If Google Search Grounding is requested OR model is Gemini with grounding enabled:
+    // --- SECURITY FIX: Server-side input validation ---
+    try {
+      llmRequestSchema.parse(req.body);
+    } catch (validationError: any) {
+      if (validationError instanceof z.ZodError) {
+        console.warn("Input validation failed:", validationError.issues);
+        return res.status(400).json({
+          error:
+            "Invalid request payload: " +
+            validationError.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join(", "),
+        });
+      }
+      return res.status(400).json({ error: "Invalid request payload." });
+    }
+    // --- END SECURITY FIX ---
+
+    const { model: rawModel, messages, temperature, max_tokens, stream, enableSearchGrounding } = req.body;
+
+    // --- SECURITY FIX: IGNORE CLIENT-SIDE API KEY OVERRIDE ---
+    // API keys are now strictly loaded from environment variables
+    const openrouterKey = process.env.OPENROUTER_API_KEY?.trim() || "";
+    const geminiKey = process.env.GEMINI_API_KEY?.trim() || "";
+    // --- END SECURITY FIX ---
+
+    const actualModelUsed = sanitizeAndResolveModel(rawModel);
+
+    // 1. Google Search Grounding flow using @google/genai with server-side GEMINI_API_KEY
     if (enableSearchGrounding) {
-      const geminiKey = reqApiKey.startsWith('AIza')
-        ? reqApiKey
-        : (process.env.GEMINI_API_KEY || '');
-
       if (!geminiKey) {
         return res.status(401).json({
-          error: "Missing Gemini API Key: Google Search Grounding requires a valid Gemini API key."
+          error: "Missing Gemini API Key: Google Search Grounding requires process.env.GEMINI_API_KEY to be configured.",
         });
       }
 
       try {
-        const { GoogleGenAI } = await import('@google/genai');
+        const { GoogleGenAI } = await import("@google/genai");
         const ai = new GoogleGenAI({
           apiKey: geminiKey,
-          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+          httpOptions: { headers: { "User-Agent": "aistudio-build" } },
         });
 
-        let targetModel = 'gemini-2.5-flash';
-        if (model && (model.includes('3.5-flash') || model.includes('3.5'))) {
-          targetModel = 'gemini-3.5-flash';
-        } else if (model && (model.includes('3.6-flash') || model.includes('3.6'))) {
-          targetModel = 'gemini-3.6-flash';
-        } else if (model && model.includes('2.5-flash')) {
-          targetModel = 'gemini-2.5-flash';
-        } else if (model && (model.startsWith('gemini-') || model.startsWith('google/gemini'))) {
-          targetModel = model.replace('google/', '');
+        let targetModel = "gemini-2.5-flash";
+        if (actualModelUsed && (actualModelUsed.includes("3.5-flash") || actualModelUsed.includes("3.5"))) {
+          targetModel = "gemini-3.5-flash";
+        } else if (actualModelUsed && (actualModelUsed.includes("3.6-flash") || actualModelUsed.includes("3.6"))) {
+          targetModel = "gemini-3.6-flash";
+        } else if (actualModelUsed && actualModelUsed.includes("2.5-flash")) {
+          targetModel = "gemini-2.5-flash";
+        } else if (actualModelUsed && (actualModelUsed.startsWith("gemini-") || actualModelUsed.startsWith("google/gemini"))) {
+          targetModel = actualModelUsed.replace("google/", "");
         }
 
-        // Parse system prompt and user contents
-        const systemMsg = messages?.find((m: any) => m.role === 'system')?.content || '';
-        const userMsgs = messages?.filter((m: any) => m.role !== 'system') || [];
-        const contentsStr = userMsgs.map((m: any) => {
-          if (typeof m.content === 'string') return m.content;
-          if (Array.isArray(m.content)) {
-            return m.content.map((part: any) => part.text || '').filter(Boolean).join('\n');
-          }
-          return JSON.stringify(m.content);
-        }).join('\n\n');
+        const systemMsg = messages?.find((m: any) => m.role === "system")?.content || "";
+        const userMsgs = messages?.filter((m: any) => m.role !== "system") || [];
+        const contentsStr = userMsgs
+          .map((m: any) => {
+            if (typeof m.content === "string") return m.content;
+            if (Array.isArray(m.content)) {
+              return m.content.map((part: any) => part.text || "").filter(Boolean).join("\n");
+            }
+            return JSON.stringify(m.content);
+          })
+          .join("\n\n");
 
         const config: any = {
           temperature: temperature !== undefined ? temperature : 0.7,
-          tools: [{ googleSearch: {} }]
+          tools: [{ googleSearch: {} }],
         };
         if (systemMsg) config.systemInstruction = systemMsg;
-        if (max_tokens) config.maxOutputTokens = max_tokens;
+        if (max_tokens) config.maxOutputTokens = Math.min(max_tokens, 8192);
 
         if (stream) {
           res.setHeader("Content-Type", "text/event-stream");
@@ -73,8 +202,8 @@ async function startServer() {
 
           const streamResult = await ai.models.generateContentStream({
             model: targetModel,
-            contents: contentsStr || 'Hello',
-            config
+            contents: contentsStr || "Hello",
+            config,
           });
 
           let collectedGrounding: any = null;
@@ -82,12 +211,14 @@ async function startServer() {
           for await (const chunk of streamResult) {
             if (chunk.text) {
               const sseData = JSON.stringify({
-                choices: [{
-                  delta: { content: chunk.text },
-                  finish_reason: null,
-                  index: 0
-                }],
-                model: targetModel
+                choices: [
+                  {
+                    delta: { content: chunk.text },
+                    finish_reason: null,
+                    index: 0,
+                  },
+                ],
+                model: targetModel,
               });
               res.write(`data: ${sseData}\n\n`);
             }
@@ -96,22 +227,26 @@ async function startServer() {
               const meta = chunk.candidates[0].groundingMetadata;
               collectedGrounding = {
                 queries: meta.webSearchQueries || [],
-                sources: (meta.groundingChunks || []).map((c: any) => ({
-                  title: c.web?.title || 'Web Source',
-                  url: c.web?.uri || ''
-                })).filter((s: any) => s.url)
+                sources: (meta.groundingChunks || [])
+                  .map((c: any) => ({
+                    title: c.web?.title || "Web Source",
+                    url: c.web?.uri || "",
+                  }))
+                  .filter((s: any) => s.url),
               };
             }
           }
 
           if (collectedGrounding) {
             const sseGrounding = JSON.stringify({
-              choices: [{
-                delta: { content: '', grounding: collectedGrounding },
-                finish_reason: null,
-                index: 0
-              }],
-              model: targetModel
+              choices: [
+                {
+                  delta: { content: "", grounding: collectedGrounding },
+                  finish_reason: null,
+                  index: 0,
+                },
+              ],
+              model: targetModel,
             });
             res.write(`data: ${sseGrounding}\n\n`);
           }
@@ -121,24 +256,31 @@ async function startServer() {
         } else {
           const result = await ai.models.generateContent({
             model: targetModel,
-            contents: contentsStr || 'Hello',
-            config
+            contents: contentsStr || "Hello",
+            config,
           });
-          const text = result.text || '';
+          const text = result.text || "";
           const meta = result.candidates?.[0]?.groundingMetadata;
-          const grounding = meta ? {
-            queries: meta.webSearchQueries || [],
-            sources: (meta.groundingChunks || []).map((c: any) => ({
-              title: c.web?.title || 'Web Source',
-              url: c.web?.uri || ''
-            })).filter((s: any) => s.url)
-          } : undefined;
+          const grounding = meta
+            ? {
+                queries: meta.webSearchQueries || [],
+                sources: (meta.groundingChunks || [])
+                  .map((c: any) => ({
+                    title: c.web?.title || "Web Source",
+                    url: c.web?.uri || "",
+                  }))
+                  .filter((s: any) => s.url),
+              }
+            : undefined;
 
           return res.json({
-            choices: [{
-              message: { role: 'assistant', content: text },
-              grounding
-            }]
+            choices: [
+              {
+                message: { role: "assistant", content: text },
+                grounding,
+              },
+            ],
+            model: targetModel,
           });
         }
       } catch (err: any) {
@@ -147,19 +289,12 @@ async function startServer() {
       }
     }
 
-    let openrouterKey = '';
-    if (reqApiKey.startsWith('sk-or-')) {
-      openrouterKey = reqApiKey;
-    } else if (process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim().startsWith('sk-or-')) {
-      openrouterKey = process.env.OPENROUTER_API_KEY.trim();
-    }
-
     let response: any = null;
 
-    // 1. Try OpenRouter if a valid OpenRouter API key exists
-    if (openrouterKey) {
+    // 2. OpenRouter request using server-side OPENROUTER_API_KEY
+    if (openrouterKey && openrouterKey.startsWith("sk-or-")) {
       try {
-        const body: any = { model, messages, stream };
+        const body: any = { model: actualModelUsed, messages, stream };
         if (temperature !== undefined) body.temperature = temperature;
         if (max_tokens !== undefined) body.max_tokens = max_tokens;
 
@@ -167,14 +302,13 @@ async function startServer() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${openrouterKey}`,
+            Authorization: `Bearer ${openrouterKey}`,
             "HTTP-Referer": "https://ai.studio/build",
-            "X-Title": "AI Council Chamber"
+            "X-Title": "AI Council Chamber",
           },
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
         });
 
-        // If OpenRouter responds with HTTP 401/403/402 (authentication/quota errors), log warning and fall back to Gemini
         if (!response.ok && (response.status === 401 || response.status === 403 || response.status === 402)) {
           console.warn(`[API Proxy] OpenRouter returned HTTP ${response.status}. Falling back to Gemini API...`);
           response = null;
@@ -185,34 +319,31 @@ async function startServer() {
       }
     }
 
-    // 2. Fallback to Google Gemini API
+    // 3. Fallback to Google Gemini API using server-side GEMINI_API_KEY
     if (!response) {
-      const geminiKey = reqApiKey.startsWith('AIza')
-        ? reqApiKey
-        : (process.env.GEMINI_API_KEY || '');
-
       if (!geminiKey) {
         return res.status(401).json({
-          error: "Missing API Key: Please configure a valid OpenRouter key (sk-or-...) or Gemini API key."
+          error: "Missing API Key: Server environment variables process.env.OPENROUTER_API_KEY or process.env.GEMINI_API_KEY must be configured.",
         });
       }
 
       try {
-        const targetModel = 'gemini-2.5-flash';
+        const geminiTargetModel = "gemini-2.5-flash";
         const body: any = {
-          model: targetModel,
+          model: geminiTargetModel,
           messages,
-          stream
+          stream,
         };
         if (temperature !== undefined) body.temperature = temperature;
+        if (max_tokens !== undefined) body.max_tokens = Math.min(max_tokens, 8192);
 
         response = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${geminiKey}`
+            Authorization: `Bearer ${geminiKey}`,
           },
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
         });
       } catch (err: any) {
         console.error("[API Proxy] Gemini API Error:", err);
@@ -242,16 +373,17 @@ async function startServer() {
           console.error("[API Proxy] Stream error:", err);
         }
       }
-      res.end();
+      res.write("data: [DONE]\n\n");
+      return res.end();
     } else {
       const data = await response.json();
-      res.json(data);
+      return res.json(data);
     }
   });
 
   app.get("/api/council/models", async (req, res) => {
     try {
-      const sort = req.query.sort || 'newest';
+      const sort = req.query.sort || "newest";
       const response = await fetch(`https://openrouter.ai/api/v1/models?sort=${sort}`);
       const data = await response.json();
       res.json(data);
@@ -261,39 +393,33 @@ async function startServer() {
   });
 
   app.get("/api/council/account", async (req, res) => {
-    const reqApiKey = ((req.headers['x-api-key-override'] as string) || '').trim();
-    let apiKey = '';
-    if (reqApiKey.startsWith('sk-or-')) {
-      apiKey = reqApiKey;
-    } else if (process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim().startsWith('sk-or-')) {
-      apiKey = process.env.OPENROUTER_API_KEY.trim();
-    }
+    const apiKey = process.env.OPENROUTER_API_KEY?.trim() || "";
 
-    if (!apiKey) {
+    if (!apiKey || !apiKey.startsWith("sk-or-")) {
       return res.json({
         data: {
-          label: "Google Gemini API (Active)",
+          label: "Google Gemini API (Server Active)",
           limit: null,
           usage: 0,
           is_free_tier: true,
-        }
+        },
       });
     }
 
     try {
       const response = await fetch("https://openrouter.ai/api/v1/auth/key", {
         headers: {
-          "Authorization": `Bearer ${apiKey}`
-        }
+          Authorization: `Bearer ${apiKey}`,
+        },
       });
       if (!response.ok) {
         return res.json({
           data: {
-            label: "Google Gemini API (Active)",
+            label: "Google Gemini API (Server Active)",
             limit: null,
             usage: 0,
             is_free_tier: true,
-          }
+          },
         });
       }
       const data = await response.json();
@@ -311,10 +437,10 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get('*all', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    app.get("*all", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
     });
   }
 

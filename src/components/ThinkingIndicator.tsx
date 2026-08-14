@@ -42,7 +42,7 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
           <span className={`font-semibold ${colorMap.text}`}>{stageLabel}</span>
         </div>
         {model && (
-          <span className="text-[10px] text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono truncate max-w-[140px]">
+          <span className="text-[10px] text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono truncate max-w-[140px]" title={model}>
             {model}
           </span>
         )}
@@ -53,7 +53,9 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
           <span className={`w-2 h-2 rounded-full ${colorMap.dot} animate-bounce`} style={{ animationDuration: '0.8s', animationDelay: '150ms' }} />
           <span className={`w-2 h-2 rounded-full ${colorMap.dot} animate-bounce`} style={{ animationDuration: '0.8s', animationDelay: '300ms' }} />
         </span>
-        <span className="truncate">{personaName} {role ? `(${role})` : ''} is formulating analysis...</span>
+        <span className="truncate" title={`${personaName} ${role ? `(${role})` : ''} is formulating analysis...`}>
+          {personaName} {role ? `(${role})` : ''} is formulating analysis...
+        </span>
       </div>
     </div>
   );

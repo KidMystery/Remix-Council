@@ -38,27 +38,25 @@ export function estimatedCost(model: RawOpenRouterModel): number {
 }
 
 export function isFreeModel(model: RawOpenRouterModel): boolean {
-  if (!model.pricing) return false;
-  if (estimatedCost(model) !== 0) return false;
-  if (safeParseFloat(model.pricing.request) !== 0) return false;
-  if (safeParseFloat(model.pricing.prompt) !== 0) return false;
-  if (safeParseFloat(model.pricing.completion) !== 0) return false;
+  if (!model?.id || !model.pricing) return false;
 
-  const idLower = model.id.toLowerCase();
-  if (idLower === 'openrouter/free' || idLower.includes('openrouter/free') || idLower.includes('openrouter/auto')) {
+  const id = model.id.toLowerCase();
+  if (id === 'openrouter/free' || id === 'openrouter/auto' || id.includes('openrouter/free')) {
     return false;
   }
 
-  if (model.context_length !== undefined && model.context_length < 2048) {
-    return false;
-  }
+  const request = safeParseFloat(model.pricing.request);
+  const prompt = safeParseFloat(model.pricing.prompt);
+  const completion = safeParseFloat(model.pricing.completion);
 
-  const desc = (model.description || '').toLowerCase();
-  if (desc.includes('deprecated') || desc.includes('broken')) {
-    return false;
-  }
+  const FREE_EPSILON = 0.000001; // OpenRouter sometimes returns 0.0000001
 
-  return true;
+  return (
+    request <= FREE_EPSILON &&
+    prompt <= FREE_EPSILON &&
+    completion <= FREE_EPSILON &&
+    (model.context_length ?? 4096) >= 2048
+  );
 }
 
 /**

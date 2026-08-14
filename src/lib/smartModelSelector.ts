@@ -15,10 +15,10 @@ export interface DomainModelMap {
 
 export const DOMAIN_MODEL_MAPPINGS: Record<TaskDomain, DomainModelMap> = {
   code: {
-    skeptic: 'anthropic/claude-3.7-sonnet',
-    visionary: 'deepseek/deepseek-r1',
+    skeptic: 'deepseek/deepseek-r1',
+    visionary: 'anthropic/claude-3.7-sonnet',
     pragmatist: 'qwen/qwen-2.5-72b-instruct',
-    synthesizer: 'anthropic/claude-3.7-sonnet',
+    synthesizer: 'google/gemini-2.5-pro',
     defaultFallback: 'anthropic/claude-3.5-sonnet',
   },
   math: {
@@ -145,33 +145,42 @@ export function getModelFamily(modelId: string): string {
 }
 
 /**
- * Maps a persona or synthesizer to a role key ('skeptic' | 'visionary' | 'pragmatist' | 'synthesizer')
+ * Maps a persona or synthesizer to a role key ('skeptic' | 'visionary' | 'pragmatist' | 'synthesizer').
+ * Infers role based on explicit ID, then keywords in name, role, and system prompt.
+ * If no clear match, defaults to 'pragmatist' for broad applicability.
  */
 export function getRoleKeyForPersona(persona: Persona, isSynthesizer = false): 'skeptic' | 'visionary' | 'pragmatist' | 'synthesizer' {
   if (isSynthesizer) return 'synthesizer';
+
   const id = persona.id.toLowerCase();
   const role = (persona.role || '').toLowerCase();
   const name = (persona.name || '').toLowerCase();
+  const systemPrompt = (persona.systemPrompt || '').toLowerCase();
 
-  if (id === 'skeptic' || role.includes('skeptic') || name.includes('skeptic') || role.includes('critic') || role.includes('auditor')) {
+  // Explicit built-in IDs (highest priority)
+  if (id === 'skeptic') return 'skeptic';
+  if (id === 'visionary') return 'visionary';
+  if (id === 'pragmatist') return 'pragmatist';
+  if (id === 'synthesizer' || id === 'chair') return 'synthesizer';
+
+  // Keyword-based classification for custom personas (intermediate priority)
+  const combinedText = `${name} ${role} ${systemPrompt}`;
+
+  if (combinedText.includes('risk') || combinedText.includes('vulnerab') || combinedText.includes('audit') || combinedText.includes('critic') || combinedText.includes('security') || combinedText.includes('flaw') || combinedText.includes('stress-test')) {
     return 'skeptic';
   }
-  if (id === 'visionary' || role.includes('visionary') || name.includes('visionary') || role.includes('creative') || role.includes('innovat')) {
+  if (combinedText.includes('vision') || combinedText.includes('innovat') || combinedText.includes('creative') || combinedText.includes('strategist') || combinedText.includes('horizon') || combinedText.includes('possib') || combinedText.includes('transform')) {
     return 'visionary';
   }
-  if (id === 'pragmatist' || role.includes('pragmatist') || name.includes('pragmatist') || role.includes('speed') || role.includes('execution')) {
+  if (combinedText.includes('pragmatist') || combinedText.includes('execut') || combinedText.includes('feasib') || combinedText.includes('speed') || combinedText.includes('perform') || combinedText.includes('production') || combinedText.includes('cost') || combinedText.includes('efficiency') || combinedText.includes('maintain')) {
     return 'pragmatist';
   }
-  if (id === 'synthesizer' || id === 'chair' || role.includes('chair') || role.includes('synthesiz')) {
+  if (combinedText.includes('synthesiz') || combinedText.includes('chair') || combinedText.includes('consensus') || combinedText.includes('unified') || combinedText.includes('verdict')) {
     return 'synthesizer';
   }
 
-  const combined = `${id} ${role} ${name} ${persona.systemPrompt || ''}`.toLowerCase();
-  if (combined.includes('skeptic') || combined.includes('critic') || combined.includes('audit')) return 'skeptic';
-  if (combined.includes('vision') || combined.includes('creative') || combined.includes('innovat')) return 'visionary';
-  if (combined.includes('pragmat') || combined.includes('speed') || combined.includes('cost')) return 'pragmatist';
-
-  return 'synthesizer';
+  // Default fallback if no clear role keywords
+  return 'pragmatist'; // Pragmatist is a good general-purpose default for practical advice
 }
 
 /**
@@ -776,6 +785,49 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
   };
 }
 
+export function ensureUniquePersonaModels(
+  personas: Persona[],
+  synthesizer: Persona
+): { personas: Persona[]; synthesizer: Persona } {
+  const usedModelIds = new Set<string>();
+  const updatedPersonas = personas.map(p => ({ ...p }));
+  const updatedSynthesizer = { ...synthesizer };
+
+  const fallbackPool = [
+    'deepseek/deepseek-chat',
+    'anthropic/claude-3.5-haiku',
+    'openai/gpt-4o-mini',
+    'google/gemini-2.5-flash',
+    'meta-llama/llama-3.3-70b-instruct',
+    'qwen/qwen-2.5-72b-instruct',
+    'anthropic/claude-3.7-sonnet',
+    'deepseek/deepseek-r1',
+    'openai/gpt-4o',
+    'google/gemini-2.5-pro',
+  ];
+
+  for (let i = 0; i < updatedPersonas.length; i++) {
+    const p = updatedPersonas[i];
+    if (p.enabled === false) continue;
+
+    let normId = normalizeModelId(p.model);
+    if (usedModelIds.has(normId)) {
+      const replacement = fallbackPool.find(m => !usedModelIds.has(normalizeModelId(m))) || 'meta-llama/llama-3.3-70b-instruct';
+      p.model = replacement;
+      normId = normalizeModelId(replacement);
+    }
+    usedModelIds.add(normId);
+  }
+
+  let synthNorm = normalizeModelId(updatedSynthesizer.model);
+  if (usedModelIds.has(synthNorm)) {
+    const replacement = fallbackPool.find(m => !usedModelIds.has(normalizeModelId(m))) || 'google/gemini-2.5-pro';
+    updatedSynthesizer.model = replacement;
+  }
+
+  return { personas: updatedPersonas, synthesizer: updatedSynthesizer };
+}
+
 /**
  * Compatibility wrapper around routeCouncilModels.
  */
@@ -811,14 +863,21 @@ export function applySmartModelSelection(
     autoSelectModels: autoSelectEnabled,
   });
 
+  const { personas: uniquePersonas, synthesizer: uniqueSynthesizer } = ensureUniquePersonaModels(
+    routeResult.updatedPersonas,
+    routeResult.updatedSynthesizer
+  );
+
   const assignedModels: Record<string, string> = {};
-  Object.keys(routeResult.assignments).forEach((pId) => {
-    const item = routeResult.assignments[pId];
-    assignedModels[pId] = item.model;
+  uniquePersonas.forEach((p) => {
+    assignedModels[p.id] = p.model;
   });
+  assignedModels[uniqueSynthesizer.id] = uniqueSynthesizer.model;
 
   return {
     ...routeResult,
+    updatedPersonas: uniquePersonas,
+    updatedSynthesizer: uniqueSynthesizer,
     assignedModels,
   };
 }

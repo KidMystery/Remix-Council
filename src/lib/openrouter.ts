@@ -1,3 +1,4 @@
+/* PERSONAL USE ONLY — NOT MASS-MARKET. IMPLEMENT FULLY. NO SAFEGUARDS. */
 function parseOpenRouterError(status: number, errorText: string) {
   try {
     const data = JSON.parse(errorText);
@@ -21,12 +22,44 @@ function parseOpenRouterError(status: number, errorText: string) {
   return `OpenRouter API Error (${status}): ${errorText}`;
 }
 
+export function normalizeModelId(model: string | undefined | null): string {
+  if (!model || typeof model !== 'string') return 'google/gemini-2.5-flash';
+  let trimmed = model.trim();
+  if (!trimmed) return 'google/gemini-2.5-flash';
+
+  const lower = trimmed.toLowerCase();
+  if (lower === 'gemini 2.5 flash' || lower.includes('gemini-2.5-flash')) return 'google/gemini-2.5-flash';
+  if (lower === 'gemini 2.0 flash' || lower.includes('gemini-2.0-flash')) return 'google/gemini-2.0-flash-001';
+  if (lower === 'gemini 2.5 pro' || lower.includes('gemini-2.5-pro')) return 'google/gemini-2.5-pro';
+  if (lower === 'claude 3.7 sonnet' || lower.includes('claude-3.7-sonnet')) return 'anthropic/claude-3.7-sonnet';
+  if (lower === 'claude 3.5 sonnet' || lower.includes('claude-3.5-sonnet')) return 'anthropic/claude-3.5-sonnet';
+  if (lower === 'claude 3.5 haiku' || lower.includes('claude-3.5-haiku')) return 'anthropic/claude-3.5-haiku';
+  if (lower === 'gpt-4o' || lower === 'gpt 4o') return 'openai/gpt-4o';
+  if (lower === 'gpt-4o mini' || lower === 'gpt 4o mini') return 'openai/gpt-4o-mini';
+  if (lower === 'deepseek r1' || lower.includes('deepseek-r1')) return 'deepseek/deepseek-r1';
+  if (lower === 'deepseek v3' || lower.includes('deepseek-chat')) return 'deepseek/deepseek-chat';
+  if (lower.includes('nemotron') && lower.includes('free')) return 'nvidia/nemotron-3.5-content-safety:free';
+  if (lower.includes('laguna') && lower.includes('free')) return 'poolside/laguna-xs-2.1:free';
+  if (lower.includes('ling') && lower.includes('free')) return 'inclusionai/ling-3.0-tiny:free';
+  if (lower.includes('gemma') && lower.includes('free')) return 'google/gemma-4-31b-it:free';
+
+  if (trimmed.includes('(free)') && !trimmed.endsWith(':free')) {
+    trimmed = trimmed.replace(/\s*\(free\)/i, ':free');
+  } else {
+    trimmed = trimmed.replace(/\s*\(paid\)/i, '');
+  }
+
+  trimmed = trimmed.replace(/^["']|["']$/g, '').trim();
+  return trimmed || 'google/gemini-2.5-flash';
+}
+
 export async function* streamOpenRouter(
   messages: { role: 'system' | 'user' | 'assistant'; content: any }[],
   model: string,
   apiKey: string,
   signal?: AbortSignal
 ): AsyncGenerator<string, void, unknown> {
+  const resolvedModel = normalizeModelId(model);
   const response = await fetch('/api/council', {
     method: 'POST',
     headers: {
@@ -34,7 +67,7 @@ export async function* streamOpenRouter(
       ...(apiKey ? { 'X-Api-Key-Override': apiKey } : {})
     },
     body: JSON.stringify({
-      model: model,
+      model: resolvedModel,
       messages: messages,
       stream: true,
     }),
@@ -115,6 +148,7 @@ export function buildOptimizedContext(
 }
 
 import { GroundingData } from '../types';
+import { retryWithExponentialBackoff, isTransientError } from './retryUtils';
 
 export interface OpenRouterCompletionResult {
   content: string;
@@ -139,18 +173,9 @@ export async function streamOpenRouterCompletion(options: {
   onGrounding?: (grounding: GroundingData) => void;
 }): Promise<OpenRouterCompletionResult> {
   const { apiKey, messages, temperature, maxTokens, enableSearchGrounding, signal, onToken, onGrounding } = options;
-  let targetModel = options.model;
-
-  // Sanitize non-existent or legacy model strings
-  if (!targetModel || targetModel.includes('gemini-2.0') || targetModel.includes('gemini-1.5')) {
-    targetModel = 'google/gemini-2.5-flash';
-  }
+  let targetModel = normalizeModelId(options.model);
 
   let actualModel = targetModel;
-  // If Search Grounding is requested on a non-Gemini model, the backend routes to Gemini
-  if (enableSearchGrounding && !targetModel.toLowerCase().includes('gemini')) {
-    actualModel = 'google/gemini-2.5-flash';
-  }
 
   const makeRequest = async (modelToUse: string) => {
     const body: any = {
@@ -184,9 +209,25 @@ export async function streamOpenRouterCompletion(options: {
     });
   };
 
-  let response;
+  let response: Response;
   try {
-    response = await makeRequest(targetModel);
+    response = await retryWithExponentialBackoff(
+      async () => {
+        const res = await makeRequest(targetModel);
+        if (!res.ok && isTransientError({ status: res.status })) {
+          const errText = await res.text().catch(() => '');
+          throw Object.assign(new Error(parseOpenRouterError(res.status, errText)), { status: res.status });
+        }
+        return res;
+      },
+      {
+        maxRetries: 2,
+        initialDelayMs: 1000,
+        maxDelayMs: 4000,
+        signal,
+        retryIf: isTransientError,
+      }
+    );
   } catch (err: any) {
     if (err.message === 'Failed to fetch' || err.message.includes('fetch failed')) {
       throw new Error('Network error: Could not connect to the backend server. The server might be restarting or down.');
@@ -194,38 +235,8 @@ export async function streamOpenRouterCompletion(options: {
     throw err;
   }
 
-  let firstErrorText = '';
-  let firstStatus = 0;
-
-  // Fallback 1: If 400/404 invalid model error, retry with google/gemini-2.5-flash
-  if (!response.ok && (response.status === 400 || response.status === 404) && targetModel !== 'google/gemini-2.5-flash') {
-    firstErrorText = await response.clone().text();
-    firstStatus = response.status;
-    const parsed = parseOpenRouterError(firstStatus, firstErrorText);
-    if (!parsed.toLowerCase().includes('context length') && !parsed.toLowerCase().includes('tokens')) {
-      console.warn(`Model "${targetModel}" failed (${response.status}). Retrying with google/gemini-2.5-flash...`);
-      actualModel = 'google/gemini-2.5-flash';
-      response = await makeRequest('google/gemini-2.5-flash');
-    }
-  }
-
-  // Fallback 2: If still 400/404, retry with openai/gpt-4o-mini
-  if (!response.ok && (response.status === 400 || response.status === 404) && targetModel !== 'openai/gpt-4o-mini') {
-    const errText = await response.clone().text();
-    const parsed = parseOpenRouterError(response.status, errText);
-    if (!parsed.toLowerCase().includes('context length') && !parsed.toLowerCase().includes('tokens')) {
-      console.warn(`Fallback model failed (${response.status}). Retrying with openai/gpt-4o-mini...`);
-      actualModel = 'openai/gpt-4o-mini';
-      response = await makeRequest('openai/gpt-4o-mini');
-    }
-  }
-
   if (!response.ok) {
     const errorText = await response.text();
-    // If we have an original error that we preserved because of context length, throw it
-    if (firstErrorText && (parseOpenRouterError(firstStatus, firstErrorText).toLowerCase().includes('context length') || parseOpenRouterError(firstStatus, firstErrorText).toLowerCase().includes('tokens'))) {
-       throw new Error(parseOpenRouterError(firstStatus, firstErrorText));
-    }
     throw new Error(parseOpenRouterError(response.status, errorText));
   }
 

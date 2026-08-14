@@ -1,10 +1,11 @@
 import { useReducer, useCallback } from 'react';
-import { CouncilRound, PersonaId, PersonaResponse } from '../types';
+import { CouncilRound, PersonaId, PersonaResponse, RoundRating } from '../types';
 
 export type CouncilAction =
   | { type: 'SET_ROUNDS'; payload: CouncilRound[] }
   | { type: 'ADD_ROUND'; payload: CouncilRound }
   | { type: 'DELETE_ROUND'; payload: { roundId: string } }
+  | { type: 'SET_ROUND_RATING'; payload: { roundId: string; rating: RoundRating } }
   | { type: 'START_STAGE1'; payload: { roundId: string; initialStage1: Record<PersonaId, PersonaResponse> } }
   | { type: 'UPDATE_STAGE1_TOKEN'; payload: { roundId: string; personaId: PersonaId; chunk: string } }
   | { type: 'FINISH_STAGE1_PERSONA'; payload: { roundId: string; personaId: PersonaId; content: string; grounding?: any; model?: string } }
@@ -28,6 +29,17 @@ function councilReducer(state: CouncilRound[], action: CouncilAction): CouncilRo
 
     case 'DELETE_ROUND': {
       return state.filter((r) => r.id !== action.payload.roundId);
+    }
+
+    case 'SET_ROUND_RATING': {
+      const { roundId, rating } = action.payload;
+      return state.map((r) => {
+        if (r.id !== roundId) return r;
+        return {
+          ...r,
+          rating,
+        };
+      });
     }
 
     case 'START_STAGE1': {

@@ -22,7 +22,11 @@ export function SmartSelectionAuditCard({
   const [isExpanded, setIsExpanded] = useState(false);
   const [appliedJustNow, setAppliedJustNow] = useState(false);
 
+  const hasChanges = selectionResult?.selectionDetails?.some((d) => d.previousModel !== d.selectedModel) ?? false;
+  const isApplyDisabled = autoSelectModels || !hasChanges;
+
   const handleApply = () => {
+    if (isApplyDisabled) return;
     if (onApplyRecommendations) {
       onApplyRecommendations();
       setAppliedJustNow(true);
@@ -57,12 +61,21 @@ export function SmartSelectionAuditCard({
             <button
               type="button"
               onClick={handleApply}
-              className={`px-2.5 py-1 rounded-lg font-semibold text-[11px] transition-all flex items-center gap-1.5 border cursor-pointer ${
+              disabled={isApplyDisabled}
+              className={`px-2.5 py-1 rounded-lg font-semibold text-[11px] transition-all flex items-center gap-1.5 border ${
                 appliedJustNow
                   ? 'bg-emerald-900/80 border-emerald-500/60 text-emerald-200'
-                  : 'bg-indigo-600 hover:bg-indigo-500 border-indigo-500/50 text-white shadow-sm'
+                  : isApplyDisabled
+                  ? 'bg-slate-800/60 border-slate-700/50 text-slate-500 cursor-not-allowed opacity-50'
+                  : 'bg-indigo-600 hover:bg-indigo-500 border-indigo-500/50 text-white shadow-sm cursor-pointer'
               }`}
-              title="Explicitly apply recommended model assignments to council personas"
+              title={
+                autoSelectModels
+                  ? 'Auto-Select is ON: model recommendations are applied automatically'
+                  : !hasChanges
+                  ? 'No pending model changes to apply'
+                  : 'Explicitly apply recommended model assignments to council personas'
+              }
             >
               {appliedJustNow ? <CheckCircle2 size={13} className="text-emerald-400" /> : <Sparkles size={13} />}
               <span>{appliedJustNow ? 'Applied!' : 'Apply Recommendations'}</span>

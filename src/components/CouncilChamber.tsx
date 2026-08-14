@@ -1,6 +1,7 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Persona, CouncilRound, Settings, PersonaResponse } from '../types';
-import { INITIAL_PERSONAS, CHAIRMAN_PROMPT, defaultSynthesizer } from '../data';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { Persona, CouncilRound, Settings, PersonaResponse, NotificationPreferences, RoundRating, ToastMessage, ToastType } from '../types';
+import { INITIAL_PERSONAS, CHAIRMAN_PROMPT, defaultSynthesizer, PRO_MODEL_SYSTEM_PROMPT } from '../data';
+import { playNotificationChime, sendDesktopNotification } from '../lib/notifications';
 import { MessageMarkdown } from './MessageMarkdown';
 import { SettingsPanel } from './SettingsPanel';
 import { useSessionManager } from '../hooks/useSessionManager';
@@ -48,11 +49,24 @@ import {
   FallbackEvent,
   computeOrderedBackupList,
 } from '../lib/fallbackManager';
+import {
+  loginWithGoogle,
+  logout,
+  onAuthChange,
+  syncUserSettings,
+  loadUserSettings,
+} from '../lib/persistence';
+import { User } from 'firebase/auth';
+import { useTheme } from '../hooks/useTheme';
+import { useFileAttachment, AttachedFile } from '../hooks/useFileAttachment';
+import { CouncilSidebar } from './council/CouncilSidebar';
+import { CouncilHeader } from './council/CouncilHeader';
 import { GroundingSourcesCard } from './GroundingSourcesCard';
 import { HeaderActions } from './HeaderActions';
 import { Composer } from './Composer';
 import { CouncilRoundView } from './CouncilRoundView';
 import { SynthesisCard } from './SynthesisCard';
+import { UnifiedToast } from './UnifiedToast';
 import {
   Settings as SettingsIcon,
   Globe,
@@ -141,7 +155,7 @@ const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
           <span className={`font-semibold ${colorMap.text}`}>{stageLabel}</span>
         </div>
         {model && (
-          <span className="text-[10px] text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono truncate max-w-[140px]">
+          <span className="text-[10px] text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono truncate max-w-[140px]" title={model}>
             {model}
           </span>
         )}
@@ -152,7 +166,9 @@ const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
           <span className={`w-2 h-2 rounded-full ${colorMap.dot} animate-bounce`} style={{ animationDuration: '0.8s', animationDelay: '150ms' }} />
           <span className={`w-2 h-2 rounded-full ${colorMap.dot} animate-bounce`} style={{ animationDuration: '0.8s', animationDelay: '300ms' }} />
         </span>
-        <span className="truncate">{personaName} {role ? `(${role})` : ''} is formulating analysis...</span>
+        <span className="truncate" title={`${personaName} ${role ? `(${role})` : ''} is formulating analysis...`}>
+          {personaName} {role ? `(${role})` : ''} is formulating analysis...
+        </span>
       </div>
     </div>
   );
@@ -179,6 +195,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       const savedCostCeiling = localStorage.getItem('council_cost_ceiling');
       const savedStopStage1 = localStorage.getItem('council_stop_after_stage1');
       const savedSingleModelSimple = localStorage.getItem('council_single_model_simple');
+      const savedArchivistRecentRounds = localStorage.getItem('council_archivist_recent_rounds');
+      const savedProCompareModelId = localStorage.getItem('council_pro_compare_model_id');
 
       const defaultModels = savedModels
         ? JSON.parse(savedModels)
@@ -189,7 +207,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             synthesizer: 'google/gemini-2.5-flash',
           };
       return {
-        apiKey: savedKey,
+        apiKey: '',
         defaultModels,
         temperature: 0.7,
         maxTokens: savedMaxTokens ? parseInt(savedMaxTokens, 10) : 4000,
@@ -200,6 +218,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         maxRoundCostCeiling: savedCostCeiling ? parseFloat(savedCostCeiling) : 0,
         stopAfterStage1: savedStopStage1 === 'true',
         useSingleModelForSimple: savedSingleModelSimple === 'true',
+        archivistRecentRounds: savedArchivistRecentRounds ? parseInt(savedArchivistRecentRounds, 10) : 2,
+        proCompareModelId: savedProCompareModelId || 'anthropic/claude-3.7-sonnet',
       };
     } catch {
       return {
@@ -219,11 +239,53 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         maxRoundCostCeiling: 0,
         stopAfterStage1: false,
         useSingleModelForSimple: false,
+        archivistRecentRounds: 2,
+        proCompareModelId: 'anthropic/claude-3.7-sonnet',
       };
     }
   });
 
   const settings = propsSettings || internalSettings;
+
+  // Firebase Auth State
+  const [user, setUser] = useState<User | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = onAuthChange((u) => {
+      setUser(u);
+      if (u) {
+        showToast(`Signed in as ${u.displayName || u.email}`);
+        // Load cloud preferences if available
+        loadUserSettings(u.uid).then((cloudData) => {
+          if (cloudData) {
+            if (cloudData.settings) {
+              setInternalSettings((prev) => ({ ...prev, ...cloudData.settings }));
+            }
+            if (cloudData.personas && cloudData.personas.length > 0) {
+              setPersonas(cloudData.personas);
+            }
+            if (cloudData.synthesizer) {
+              setSynthesizer(cloudData.synthesizer);
+            }
+          }
+        }).catch(err => console.warn('Could not fetch cloud settings:', err));
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleGoogleLogin = async () => {
+    const loggedUser = await loginWithGoogle();
+    if (loggedUser) {
+      setUser(loggedUser);
+    }
+  };
+
+  const handleGoogleLogout = async () => {
+    await logout();
+    setUser(null);
+    showToast('Signed out of cloud sync');
+  };
 
   const {
     sessions,
@@ -239,7 +301,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     deleteRoundFromActiveSession,
     exportSessionsJSON,
     importSessionsJSON,
-  } = useSessionManager();
+  } = useSessionManager(user);
 
   // Council Reducer for decoupled state updates
   const { rounds, dispatch, setRounds } = useCouncilReducer(activeSession?.rounds || []);
@@ -309,18 +371,54 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   const [isFallbackModalOpen, setIsFallbackModalOpen] = useState(false);
   const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
   const [isProCompareEnabled, setIsProCompareEnabled] = useState<boolean>(() => getProCompareSetting());
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const toastTimerRef = useRef<number | null>(null);
-  const showToast = (msg: string, duration = 3500) => {
-    setToastMessage(msg);
-    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = window.setTimeout(() => setToastMessage(null), duration);
-  };
-  useEffect(() => {
-    return () => {
-      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    };
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  const showToast = useCallback((
+    msgOrToast: string | Omit<ToastMessage, 'id'>,
+    typeOrDuration?: ToastType | number,
+    maybeDuration?: number
+  ) => {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    let finalType: ToastType = 'info';
+    let finalDuration = 4500;
+
+    if (typeof typeOrDuration === 'number') {
+      finalDuration = typeOrDuration;
+    } else if (typeof typeOrDuration === 'string') {
+      finalType = typeOrDuration as ToastType;
+      if (typeof maybeDuration === 'number') {
+        finalDuration = maybeDuration;
+      }
+    }
+
+    let newToast: ToastMessage;
+    if (typeof msgOrToast === 'string') {
+      newToast = { id, message: msgOrToast, type: finalType, duration: finalDuration };
+    } else {
+      newToast = {
+        id,
+        message: msgOrToast.message,
+        title: msgOrToast.title,
+        type: msgOrToast.type || finalType,
+        duration: msgOrToast.duration ?? finalDuration,
+        details: msgOrToast.details,
+        action: msgOrToast.action,
+      };
+    }
+
+    setToasts((prev) => [...prev.slice(-4), newToast]);
+
+    if (newToast.duration && newToast.duration > 0) {
+      window.setTimeout(() => {
+        dismissToast(id);
+      }, newToast.duration);
+    }
+    return id;
+  }, [dismissToast]);
 
   const handleToggleProCompare = () => {
     const nextVal = !isProCompareEnabled;
@@ -415,6 +513,44 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     if (onUpdateSettings) onUpdateSettings(updated);
   };
 
+  const updateArchivistRecentRounds = (val: number) => {
+    localStorage.setItem('council_archivist_recent_rounds', val.toString());
+    const updated = { ...settings, archivistRecentRounds: val };
+    setInternalSettings(updated);
+    if (onUpdateSettings) onUpdateSettings(updated);
+  };
+
+  const updateProCompareModelId = (val: string) => {
+    localStorage.setItem('council_pro_compare_model_id', val);
+    const updated = { ...settings, proCompareModelId: val };
+    setInternalSettings(updated);
+    if (onUpdateSettings) onUpdateSettings(updated);
+  };
+
+  const [isIsolatedRound, setIsIsolatedRound] = useState(false);
+
+  const updateNotificationPreferences = (prefs: NotificationPreferences) => {
+    localStorage.setItem('council_notification_preferences', JSON.stringify(prefs));
+    const updated = { ...settings, notificationPreferences: prefs };
+    setInternalSettings(updated);
+    if (onUpdateSettings) onUpdateSettings(updated);
+  };
+
+  const handleRateRound = (roundId: string, rating: RoundRating) => {
+    dispatch({
+      type: 'SET_ROUND_RATING',
+      payload: { roundId, rating },
+    });
+    const targetRound = rounds.find((r) => r.id === roundId);
+    if (targetRound) {
+      updateRoundInActiveSession(roundId, (r) => ({
+        ...r,
+        rating,
+      }));
+    }
+    showToast(`⭐ Saved feedback: ${rating.score} / 5 stars`);
+  };
+
   const handleImportSessionsFile = (file: File) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -469,198 +605,28 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     }
   };
 
-  // File Upload State
-  interface AttachedFile {
-    name: string;
-    content: string;
-    size: number;
-    type: string;
-    unzippedResult?: ZipArchiveResult;
-  }
-  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
-  const [activeZipResult, setActiveZipResult] = useState<ZipArchiveResult | null>(null);
-  const [isZipModalOpen, setIsZipModalOpen] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // File Upload State Hook
+  const {
+    attachedFiles,
+    setAttachedFiles,
+    fileError,
+    setFileError,
+    activeZipResult,
+    setActiveZipResult,
+    isZipModalOpen,
+    setIsZipModalOpen,
+    fileInputRef,
+    processFiles,
+    handleFileUpload,
+    handlePaste,
+    handleDrop,
+    handleDragOver,
+    removeAttachedFile,
+    clearAttachedFiles,
+  } = useFileAttachment({ showToast });
 
-  // Theme Preference State
-  const [theme, setTheme] = useState<'dark' | 'light' | 'system'>(() => {
-    return (localStorage.getItem('council-theme') as 'dark' | 'light' | 'system') || 'light';
-  });
-
-  useEffect(() => {
-    localStorage.setItem('council-theme', theme);
-    const root = document.documentElement;
-    if (theme === 'dark') {
-      root.classList.add('dark');
-      root.classList.remove('light');
-    } else if (theme === 'light') {
-      root.classList.remove('dark');
-      root.classList.add('light');
-    } else {
-      if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-        root.classList.add('dark');
-        root.classList.remove('light');
-      } else {
-        root.classList.remove('dark');
-        root.classList.add('light');
-      }
-    }
-  }, [theme]);
-
-  const processFiles = async (files: FileList | File[] | DataTransferItemList) => {
-    if (!files || files.length === 0) return;
-    setFileError(null);
-
-    const fileList: File[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const item = files[i];
-      if (item instanceof DataTransferItem) {
-        if (item.kind === 'file') {
-          const file = item.getAsFile();
-          if (file) fileList.push(file);
-        }
-      } else {
-        fileList.push(item);
-      }
-    }
-
-    const allowedExtensions = ['.txt', '.md', '.csv', '.json', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.heic', '.svg', '.zip'];
-    const allowedMimeTypes = ['text/', 'application/json', 'application/pdf', 'image/', 'application/zip', 'application/x-zip-compressed', 'application/zip-compressed'];
-
-    for (let i = 0; i < fileList.length; i++) {
-      const file = fileList[i];
-      const isImage = file.type.startsWith('image/') || /\.(png|jpg|jpeg|webp|gif|svg|heic)$/i.test(file.name);
-      const isAllowed = isImage ||
-                        allowedMimeTypes.some(m => file.type.startsWith(m)) || 
-                        allowedExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
-
-      if (!isAllowed) {
-        setFileError(`Unsupported file format: ${file.name}. Only code, text, PDF, ZIP archives, and images are supported.`);
-        continue;
-      }
-
-      if (file.size > 30 * 1024 * 1024) {
-        setFileError(`File too large: ${file.name}. Maximum size is 30MB.`);
-        continue;
-      }
-
-      if (file.name.toLowerCase().endsWith('.zip') || file.type.includes('zip')) {
-        try {
-          const zipResult = await extractCodeFromZip(file);
-          if (zipResult.extractedCodeFilesCount === 0) {
-            setFileError(`Zip archive ${file.name} contained no readable code or text files.`);
-            continue;
-          }
-          setAttachedFiles((prev) => [
-            ...prev,
-            {
-              name: file.name,
-              content: zipResult.formattedContext,
-              size: file.size,
-              type: 'application/zip',
-              unzippedResult: zipResult,
-            },
-          ]);
-          if (zipResult.wasTruncated) {
-            showToast(`📦 Extracted ${zipResult.extractedCodeFilesCount} files from ${file.name} (capped by guardrails)`);
-          } else {
-            showToast(`📦 Extracted ${zipResult.extractedCodeFilesCount} code files from ${file.name}`);
-          }
-        } catch (error) {
-          console.error("Error reading zip archive:", error);
-          setFileError(`Could not read code from zip file: ${file.name}`);
-        }
-      } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-        try {
-          let text = await extractTextFromPDF(file);
-          if (text.length > 150_000) {
-            text = text.slice(0, 150_000) + '\n\n... [PDF TRUNCATED AFTER 150,000 CHARS]';
-            showToast(`⚠️ PDF ${file.name} truncated to 150,000 characters.`);
-          }
-          setAttachedFiles((prev) => [
-            ...prev,
-            { name: file.name, content: text, size: file.size, type: 'application/pdf' },
-          ]);
-        } catch (error) {
-          console.error("Error reading PDF:", error);
-          setFileError(`Could not read text from PDF: ${file.name}`);
-        }
-      } else if (isImage) {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          if (event.target && typeof event.target.result === 'string') {
-            setAttachedFiles((prev) => [
-              ...prev,
-              { name: file.name, content: event.target!.result as string, size: file.size, type: file.type || 'image/jpeg' },
-            ]);
-          }
-        };
-        reader.readAsDataURL(file);
-      } else {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const result = event.target?.result;
-          if (typeof result === 'string') {
-            let text = result;
-            if (text.length > 150_000) {
-              text = text.slice(0, 150_000) + '\n\n... [FILE TRUNCATED AFTER 150,000 CHARS]';
-              showToast(`⚠️ File ${file.name} truncated to 150,000 characters.`);
-            }
-            setAttachedFiles((prev) => [
-              ...prev,
-              { name: file.name, content: text, size: file.size, type: file.type || 'text/plain' },
-            ]);
-          }
-        };
-        reader.readAsText(file);
-      }
-    }
-  };
-
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      await processFiles(e.target.files);
-    }
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
-  };
-
-  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (e.clipboardData && e.clipboardData.items) {
-      const items = e.clipboardData.items;
-      const files: File[] = [];
-      for (let i = 0; i < items.length; i++) {
-        if (items[i].kind === 'file') {
-          const file = items[i].getAsFile();
-          if (file) files.push(file);
-        }
-      }
-      if (files.length > 0) {
-        e.preventDefault();
-        await processFiles(files);
-      }
-    }
-  };
-
-  const handleDrop = async (e: React.DragEvent<HTMLElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.dataTransfer && e.dataTransfer.items) {
-      await processFiles(e.dataTransfer.items);
-    } else if (e.dataTransfer && e.dataTransfer.files) {
-      await processFiles(e.dataTransfer.files);
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent<HTMLElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-
-  const removeAttachedFile = (index: number) => {
-    setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
-  };
+  // Theme Preference State Hook
+  const { theme, setTheme } = useTheme();
 
   const [personas, setPersonas] = useState<Persona[]>(() => {
     return INITIAL_PERSONAS.map(p => ({
@@ -895,7 +861,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [collapsedRoundIds, setCollapsedRoundIds] = useState<Set<string>>(new Set());
-  const [fileError, setFileError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!fileError) return;
@@ -903,7 +868,45 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     return () => window.clearTimeout(t);
   }, [fileError]);
 
-  const queryTokens = estimateTokens(query);
+  const estimatedQueryTokens = React.useMemo(() => {
+    let text = query || '';
+    if (attachedFiles && attachedFiles.length > 0) {
+      text += '\n' + attachedFiles.map((f) => f.content || '').join('\n');
+    }
+    return estimateTokens(text);
+  }, [query, attachedFiles]);
+
+  const estimatedQueryCost = React.useMemo(() => {
+    if (estimatedQueryTokens === 0) return 0;
+    const activePersonas = personas.filter((p) => p.enabled !== false);
+    if (activePersonas.length === 0) return 0;
+
+    const isQuickMode = (settings.executionMode || 'auto') === 'quick_panel';
+    let totalCost = 0;
+
+    // Stage 1: Individual Persona Analysis
+    activePersonas.forEach((p) => {
+      totalCost += calculateCallCost(estimatedQueryTokens, 400, p.model);
+    });
+
+    // Stage 2: Peer Review (in deep_council or auto mode when not stopAfterStage1)
+    if (!isQuickMode && !settings.stopAfterStage1) {
+      activePersonas.forEach((p) => {
+        const stage2InputTokens = estimatedQueryTokens + activePersonas.length * 400;
+        totalCost += calculateCallCost(stage2InputTokens, 350, p.model);
+      });
+    }
+
+    // Stage 3: Synthesis
+    if (synthesizer && !settings.stopAfterStage1) {
+      const synthInputTokens = estimatedQueryTokens + activePersonas.length * (isQuickMode ? 400 : 750);
+      totalCost += calculateCallCost(synthInputTokens, 600, synthesizer.model);
+    }
+
+    return totalCost;
+  }, [estimatedQueryTokens, personas, synthesizer, settings.executionMode, settings.stopAfterStage1]);
+
+  const queryTokens = estimatedQueryTokens;
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -952,13 +955,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       abortControllerRef.current = null;
       setIsDeliberating(false);
     }
-  };
-
-  const updateApiKey = (key: string) => {
-    const updated = { ...settings, apiKey: key };
-    setInternalSettings(updated);
-    if (onUpdateSettings) onUpdateSettings(updated);
-    localStorage.setItem('openrouter_api_key', key);
   };
 
   const updateMaxTokens = (val: number) => {
@@ -1024,7 +1020,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     let fullSynthesis = '';
 
     try {
-      console.log(`[Synthesis Phase] Initiating stream with model: ${synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash'}`);
+      const targetSynthModel = (synthesizer?.model || settings?.defaultModels?.['synthesizer'] || 'google/gemini-2.5-flash').trim() || 'google/gemini-2.5-flash';
+      console.log(`[Synthesis Phase] Initiating stream with model: ${targetSynthModel}`);
       console.log(`[Synthesis Phase] Messages payload length: ${JSON.stringify(chairmanMessages).length} chars`);
       
       let streamGroundingData: any = undefined;
@@ -1032,7 +1029,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       const streamPromise = streamPersona({
         personaId: 'synthesizer',
         apiKey: settings.apiKey,
-        model: synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash',
+        model: targetSynthModel,
         messages: chairmanMessages,
         temperature: 0.5,
         maxTokens: Math.min(Math.max((settings.maxTokens || 4000) * 2, 8000), 8192),
@@ -1060,7 +1057,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       console.log(`[Synthesis Phase] Stream completed successfully. Total length: ${fullSynthesis.length} characters.`);
 
       const finalSynthGrounding = synthRes?.grounding || streamGroundingData;
-      const executedSynthModel = synthRes?.finalModel || synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash';
+      const executedSynthModel = synthRes?.finalModel || targetSynthModel;
 
       dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId: targetRoundId, grounding: finalSynthGrounding, model: executedSynthModel } });
       updateRoundInActiveSession(targetRoundId, (r) => ({
@@ -1068,6 +1065,16 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         synthesis: { ...r.synthesis, content: fullSynthesis, status: 'completed', grounding: finalSynthGrounding, model: executedSynthModel },
       }));
       console.log(`[Synthesis Phase] Finished successfully for round ${targetRoundId}`);
+
+      // Deliberation completion notifications
+      const notifPrefs = settings.notificationPreferences;
+      if (notifPrefs?.enableSoundAlerts !== false && notifPrefs?.notifyOnDeliberationComplete !== false) {
+        playNotificationChime('complete', notifPrefs?.soundVolume ?? 0.5);
+      }
+      if (notifPrefs?.enableBrowserNotifications && notifPrefs?.notifyOnDeliberationComplete !== false) {
+        sendDesktopNotification('🏛️ Council Deliberation Complete', 'Stage 3 synthesis and verdict are ready to review.');
+      }
+
       return fullSynthesis;
     } catch (err: any) {
       console.error(`[Synthesis Phase] ERROR encountered during stream for round ${targetRoundId}:`, err);
@@ -1083,6 +1090,15 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             error: errorMsg,
           },
         }));
+
+        // Error notification
+        const notifPrefs = settings.notificationPreferences;
+        if (notifPrefs?.enableSoundAlerts !== false && notifPrefs?.notifyOnError !== false) {
+          playNotificationChime('error', notifPrefs?.soundVolume ?? 0.5);
+        }
+        if (notifPrefs?.enableBrowserNotifications && notifPrefs?.notifyOnError !== false) {
+          sendDesktopNotification('⚠️ Deliberation Error', errorMsg);
+        }
       } else {
         console.warn(`[Synthesis Phase] Stream was aborted for round ${targetRoundId}`);
       }
@@ -1111,7 +1127,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
     // Stage 1 & 2 Persona Audits
     activePersonas.forEach((p) => {
-      const selectedModelId = p.model || settings.defaultModels[p.id] || 'google/gemini-2.5-flash';
+      const selectedModelId = p.model || settings?.defaultModels?.[p.id] || 'google/gemini-2.5-flash';
       const s1Resp = stage1Outputs[p.id];
       const resolvedModelId = s1Resp?.model || selectedModelId;
       const authorOrg = getAuthorOrganization(resolvedModelId);
@@ -1135,12 +1151,12 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         totalTokens,
         cost,
         scores,
-        ...(fallbackForPersona ? { fallbackEvent: { reason: fallbackForPersona.triggerReason, replacementModel: fallbackForPersona.replacementModel } } : {}),
+        ...(fallbackForPersona ? { fallbackEvent: { reason: fallbackForPersona.triggerReason, replacementModel: fallbackForPersona.replacementModel || '' } } : {}),
       });
     });
 
     // Synthesizer Audit
-    const synthSelectedModel = synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash';
+    const synthSelectedModel = synthesizer?.model || settings?.defaultModels?.['synthesizer'] || 'google/gemini-2.5-flash';
     const synthResolvedModel = synthesisResponse.model || synthSelectedModel;
     const synthPromptTokens = estimateTokens(userQuery);
     const synthCompletionTokens = estimateTokens(synthesisResponse.content || '');
@@ -1172,13 +1188,13 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     // Phase 2: Blind Pro Comparison Execution if enabled
     if (isProCompareActive && apiKey) {
       try {
-        const proModelId = 'anthropic/claude-3.7-sonnet';
+        const proModelId = settings.proCompareModelId || 'anthropic/claude-3.7-sonnet';
         const proStart = Date.now();
         const proRes = await streamOpenRouterCompletion({
           apiKey,
           model: proModelId,
           messages: [
-            { role: 'system', content: 'You are an elite, world-class AI model providing an exceptionally thorough, precise, and well-reasoned response to the user query.' },
+            { role: 'system', content: PRO_MODEL_SYSTEM_PROMPT },
             { role: 'user', content: userQuery },
           ],
           temperature: 0.5,
@@ -1193,7 +1209,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
         proComparisonAuditObj = {
           proModelId,
-          proModelOrg: 'Anthropic',
+          proModelOrg: getAuthorOrganization(proModelId),
           answerAIsCouncil,
           councilLatencyMs: totalWallClockMs,
           proLatencyMs,
@@ -1232,7 +1248,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       fallbackEvents: roundFallbackLogs.map((f) => ({
         personaId: f.personaId,
         originalModel: f.originalModel,
-        replacementModel: f.replacementModel,
+        replacementModel: f.replacementModel || '',
         reason: f.triggerReason,
       })),
       proComparison: proComparisonAuditObj,
@@ -1286,6 +1302,10 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           attachedImages: round.attachedImages,
           rounds: rounds.filter((r) => r.id !== roundId),
           apiKey: settings.apiKey,
+          recentRoundsWindow: settings.archivistRecentRounds ?? 2,
+          onSummaryGenerated: (summary) => {
+            updateRoundInActiveSession(roundId, (r) => ({ ...r, archivistSummary: summary }));
+          },
         });
 
         let fullContent = '';
@@ -1325,7 +1345,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         });
 
         const finalGrounding1 = res1?.grounding || streamGroundingData;
-        const executedModel1 = res1?.finalModel || persona.model || settings.defaultModels[personaId];
+        const executedModel1 = res1?.finalModel || persona.model || settings?.defaultModels?.[personaId] || 'google/gemini-2.5-flash';
 
         dispatch({
           type: 'FINISH_STAGE1_PERSONA',
@@ -1391,7 +1411,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         const res2 = await streamPersona({
           personaId,
           apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[personaId] || 'google/gemini-2.5-flash',
+          model: persona.model || settings?.defaultModels?.[personaId] || 'google/gemini-2.5-flash',
           messages: stage2Messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens,
@@ -1547,7 +1567,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             attachedImages: round.attachedImages,
             rounds: rounds.filter((r) => r.id !== roundId),
             apiKey: settings.apiKey,
+            recentRoundsWindow: settings.archivistRecentRounds ?? 2,
             signal: abortController.signal,
+            onSummaryGenerated: (summary) => {
+              updateRoundInActiveSession(roundId, (r) => ({ ...r, archivistSummary: summary }));
+            },
           });
 
           let content = '';
@@ -1719,7 +1743,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     roundId: string,
     queryText: string,
     attachedImages: { name: string; url: string; type: string }[] | undefined,
-    mode: ResolvedExecutionMode
+    mode: ResolvedExecutionMode,
+    isIsolated: boolean = false
   ) => {
     const roundStartMs = Date.now();
     setIsDeliberating(true);
@@ -1784,6 +1809,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     updateRoundInActiveSession(roundId, (r) => ({
       ...r,
       resolvedMode: mode,
+      isIsolatedRound: isIsolated,
       deliberation: {
         stage1: initialStage1,
         stage2: mode === 'deep_council' ? initialStage2 : {},
@@ -1802,13 +1828,18 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           : abortController.signal;
       }
 
+      const previousRoundsToPass = isIsolated ? [] : rounds.filter((r) => r.id !== roundId);
       const messages = await buildArchivistContext({
         systemPrompt: persona.systemPrompt,
         userQuery: queryText,
         attachedImages,
-        rounds: rounds.filter((r) => r.id !== roundId),
+        rounds: previousRoundsToPass,
         apiKey: settings.apiKey,
+        recentRoundsWindow: settings.archivistRecentRounds ?? 2,
         signal: perCallSignal,
+        onSummaryGenerated: (summary) => {
+          updateRoundInActiveSession(roundId, (r) => ({ ...r, archivistSummary: summary }));
+        },
       });
 
       let content = '';
@@ -2252,8 +2283,8 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     await runRoundExecution(round.id, round.userQuery, round.attachedImages, mode);
   };
 
-  const handleDeliberate = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleDeliberate = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if ((!query.trim() && attachedFiles.length === 0) || isDeliberating) return;
 
     setFileError(null);
@@ -2278,19 +2309,33 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     const textFiles = attachedFiles.filter(f => !f.type?.startsWith('image/'));
     const imageFiles = attachedFiles.filter(f => f.type?.startsWith('image/')).map(f => ({ name: f.name, url: f.content, type: f.type }));
 
-    let currentQuery = query.trim();
+    const cleanUserQuery = query.trim();
+    let queryTextForLLM = cleanUserQuery;
+    
+    const structuredAttachedTextFiles = textFiles.map((f) => ({
+      name: f.name,
+      type: f.type || 'text/plain',
+      size: f.size,
+      content: f.content,
+      summary: f.unzippedResult
+        ? `${f.unzippedResult.extractedCodeFilesCount} code files extracted (${Math.round(f.size / 1024)} KB)`
+        : `${Math.round(f.content.length / 1000)}k chars (${Math.round(f.size / 1024)} KB)`,
+    }));
+
     if (textFiles.length > 0) {
       const fileText = textFiles
         .map((f) => `--- Attached File: ${f.name} ---\n${f.content}`)
         .join('\n\n');
-      currentQuery = currentQuery ? `${fileText}\n\nUser Question:\n${currentQuery}` : fileText;
+      queryTextForLLM = cleanUserQuery ? `User Question:\n${cleanUserQuery}\n\n${fileText}` : fileText;
     }
+
+    const displayUserQuery = cleanUserQuery || (textFiles.length > 0 ? `Review attached file context (${textFiles.map(f => f.name).join(', ')})` : 'Untitled Deliberation');
 
     setQuery('');
     setAttachedFiles([]);
     setIsDeliberating(true);
 
-    const mode = resolveExecutionMode(settings.executionMode || 'auto', currentQuery, textFiles);
+    const mode = resolveExecutionMode(settings.executionMode || 'auto', queryTextForLLM, textFiles);
     const roundId = `round-${Date.now()}`;
 
     let targetPersonas = activePersonas;
@@ -2306,302 +2351,86 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       initialStage2[p.id] = { personaId: p.id, content: '', status: 'idle' };
     });
 
+    const isCurrentRoundIsolated = isIsolatedRound;
+
     const newRound: CouncilRound = {
       id: roundId,
-      userQuery: currentQuery,
+      userQuery: displayUserQuery,
       timestamp: Date.now(),
       resolvedMode: mode,
+      isIsolatedRound: isCurrentRoundIsolated,
       deliberation: {
         stage1: initialStage1,
         stage2: initialStage2,
       },
       synthesis: { content: '', status: 'idle' },
       attachedImages: imageFiles.length > 0 ? imageFiles : undefined,
+      attachedTextFiles: structuredAttachedTextFiles.length > 0 ? structuredAttachedTextFiles : undefined,
     };
 
     dispatch({ type: 'ADD_ROUND', payload: newRound });
     addRoundToActiveSession(newRound);
 
-    await runRoundExecution(roundId, currentQuery, imageFiles.length > 0 ? imageFiles : undefined, mode);
+    await runRoundExecution(roundId, queryTextForLLM, imageFiles.length > 0 ? imageFiles : undefined, mode, isCurrentRoundIsolated);
   };
 
   return (
     <div className="flex h-screen bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 dark:text-slate-200 font-sans antialiased overflow-hidden selection:bg-cyan-500/20 selection:text-cyan-200 relative">
-      {/* Mobile backdrop overlay for sidebar */}
-      {isSidebarOpen && (
-        <div
-          className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-30 sm:hidden"
-          onClick={() => setIsSidebarOpen(false)}
-        />
-      )}
+      {/* Skip to Main Content Link for Keyboard / Screen Reader Accessibility */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[150] focus:px-4 focus:py-2.5 focus:bg-indigo-600 focus:text-white focus:font-semibold focus:rounded-xl focus:shadow-2xl focus:outline-hidden focus:ring-2 focus:ring-white"
+      >
+        Skip to main content
+      </a>
+
+      {/* Live Region for Screen Readers */}
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {isDeliberating ? 'Council deliberation is in progress.' : ''}
+      </div>
 
       {/* Sidebar for Deliberation Threads */}
-      <aside
-        className={`${
-          isSidebarOpen ? 'w-72 border-r' : 'w-0 border-r-0'
-        } shrink-0 bg-white dark:bg-slate-900/95 backdrop-blur-md border-slate-200 dark:border-slate-700/80 transition-all duration-300 ease-in-out flex flex-col h-full z-40 overflow-hidden relative`}
-      >
-        {/* Sidebar Header */}
-        <div className="p-3.5 border-b border-slate-200 dark:border-slate-700/80 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <MessageSquare size={16} className="text-cyan-400 shrink-0" />
-            <span className="font-bold text-xs uppercase tracking-wider text-slate-700 dark:text-slate-200 font-mono truncate">
-              Deliberation Threads
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setIsSidebarOpen(false)}
-            className="p-1 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0"
-            title="Close sidebar"
-          >
-            <PanelLeftClose size={16} />
-          </button>
-        </div>
-
-        {/* Sidebar Action & Search */}
-        <div className="p-3 border-b border-slate-200 dark:border-slate-700/50 space-y-2">
-          <button
-            type="button"
-            onClick={() => createNewSession()}
-            className="w-full py-2 px-3 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-md shadow-cyan-950/40 transition-all"
-          >
-            <Plus size={14} /> New Thread
-          </button>
-
-          <div className="relative">
-            <Search size={12} className="absolute left-2.5 top-2.5 text-slate-500 dark:text-slate-400" />
-            <input
-              type="text"
-              placeholder="Filter threads..."
-              value={sessionSearchQuery}
-              onChange={(e) => setSessionSearchQuery(e.target.value)}
-              className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs text-slate-700 dark:text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500/50 font-sans"
-            />
-            {sessionSearchQuery && (
-              <button
-                type="button"
-                onClick={() => setSessionSearchQuery('')}
-                className="absolute right-2 top-2 text-slate-500 dark:text-slate-400 hover:text-slate-600"
-              >
-                <X size={12} />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Thread List */}
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {filteredSessions.length === 0 ? (
-            <div className="text-xs text-slate-500 dark:text-slate-400 text-center py-8 font-mono">
-              {sessionSearchQuery ? 'No matching threads' : 'No saved threads'}
-            </div>
-          ) : (
-            filteredSessions.map((s) => {
-              const isActive = s.id === activeSessionId;
-              return (
-                <div
-                  key={s.id}
-                  onClick={() => selectSession(s.id)}
-                  className={`group relative p-2.5 rounded-lg text-xs cursor-pointer transition-all flex items-start justify-between gap-2 border ${
-                    isActive
-                      ? 'bg-slate-100/90 dark:bg-slate-800/90 border-cyan-500/50 text-slate-800 dark:text-slate-100 shadow-sm'
-                      : 'bg-slate-50 dark:bg-slate-900/40 hover:bg-slate-100/50 border-slate-200 dark:border-slate-700/40 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200'
-                  }`}
-                >
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <div className="font-medium truncate leading-snug">{s.title || 'Untitled Session'}</div>
-                    <div className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400 font-mono">
-                      <span className="flex items-center gap-1">
-                        <Clock size={10} />
-                        {new Date(s.updatedAt || s.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                      </span>
-                      <span>•</span>
-                      <span>{s.rounds?.length || 0} {s.rounds?.length === 1 ? 'round' : 'rounds'}</span>
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (confirm(`Delete thread "${s.title || 'Untitled Session'}" and its entire chat history?`)) {
-                        deleteSession(s.id);
-                      }
-                    }}
-                    className="text-slate-400 hover:text-red-500 hover:bg-red-500/10 dark:hover:bg-red-950/40 p-1.5 rounded transition-all shrink-0"
-                    title="Delete thread and history"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              );
-            })
-          )}
-        </div>
-
-        {/* Sidebar Footer */}
-        {sessions.length > 0 && (
-          <div className="p-2 border-t border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-900/60">
-            <button
-              type="button"
-              onClick={() => {
-                if (confirm('Clear all stored deliberation threads?')) {
-                  clearAllSessions();
-                }
-              }}
-              className="w-full text-left text-[11px] text-red-400 hover:text-red-300 p-2 rounded hover:bg-red-950/30 transition-colors flex items-center justify-center gap-1.5 font-mono"
-            >
-              <Trash2 size={12} /> Clear All Threads ({sessions.length})
-            </button>
-          </div>
-        )}
-      </aside>
+      <CouncilSidebar
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
+        sessions={sessions}
+        filteredSessions={filteredSessions}
+        activeSessionId={activeSessionId}
+        activeSession={activeSession}
+        sessionSearchQuery={sessionSearchQuery}
+        setSessionSearchQuery={setSessionSearchQuery}
+        onCreateNewSession={createNewSession}
+        onSelectSession={selectSession}
+        onDeleteSession={deleteSession}
+        onClearAllSessions={clearAllSessions}
+        onClearActiveHistory={handleClearActiveHistory}
+        isDeliberating={isDeliberating}
+      />
 
       {/* Main Workspace Area */}
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-y-auto relative" onScroll={handleMainScroll}>
         {/* Header */}
-        <header className="sticky top-0 z-30 bg-slate-50 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-700/80 px-2.5 sm:px-4 py-2.5 sm:py-3 flex items-center justify-between gap-2 min-w-0">
-          <div className="flex items-center space-x-2 sm:space-x-3 min-w-0 shrink">
-            {!isSidebarOpen && (
-              <button
-                type="button"
-                onClick={() => setIsSidebarOpen(true)}
-                className="p-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 border border-slate-200 dark:border-slate-700 text-slate-600 transition-colors flex items-center gap-1 text-xs font-mono shrink-0"
-                title="Open Deliberation Threads"
-              >
-                <PanelLeft size={16} className="text-cyan-400" />
-                <span className="hidden sm:inline">Threads ({sessions.length})</span>
-              </button>
-            )}
-            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-gradient-to-tr from-cyan-600 to-indigo-600 flex items-center justify-center text-white shadow-md shadow-cyan-950/50 shrink-0">
-              <Sparkles size={16} className="sm:hidden" />
-              <Sparkles size={18} className="hidden sm:block" />
-            </div>
-            <div className="min-w-0 truncate">
-              <h1 className="font-bold text-xs sm:text-base tracking-tight text-slate-800 dark:text-slate-100 truncate">
-                AI Council
-              </h1>
-              <p className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 hidden md:flex items-center gap-2">
-                <span>Multi-Model Deliberation Engine</span>
-                <span
-                  className="inline-flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded-md border border-emerald-800/60 shadow-sm"
-                  title={`Total Tokens: ${sessionCostMetrics.totalTokens.toLocaleString()}
-• Prompt Tokens: ${sessionCostMetrics.promptTokens.toLocaleString()} (${formatCost(sessionCostMetrics.promptCost)})
-• Completion Tokens: ${sessionCostMetrics.completionTokens.toLocaleString()} (${formatCost(sessionCostMetrics.completionCost)})`}
-                >
-                  <DollarSign size={11} className="text-emerald-400" />
-                  <span className="font-bold">{formatCost(sessionCostMetrics.totalCost)}</span>
-                  <span className="text-slate-500 dark:text-slate-400 text-[9px] border-l border-emerald-800/80 pl-1.5">
-                    {sessionCostMetrics.promptTokens > 1000 ? `${(sessionCostMetrics.promptTokens / 1000).toFixed(1)}k in` : `${sessionCostMetrics.promptTokens} in`} / {sessionCostMetrics.completionTokens > 1000 ? `${(sessionCostMetrics.completionTokens / 1000).toFixed(1)}k out` : `${sessionCostMetrics.completionTokens} out`}
-                  </span>
-                </span>
-                {basicMode && (
-                  <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/80 px-2 py-0.5 rounded-md border border-cyan-800/60">
-                    Consensus View: Showing consensus only — full debate runs in background
-                  </span>
-                )}
-              </p>
-            </div>
-          </div>
-
-          {/* Header Actions */}
-          <div className="flex items-center space-x-1 sm:space-x-2 shrink-0">
-            {/* Clear Thread History Button */}
-            {activeSession && rounds.length > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (confirm('Clear chat history for this thread? All messages in this deliberation will be deleted.')) {
-                    handleClearActiveHistory();
-                  }
-                }}
-                className="p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 border border-red-500/30 transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm shrink-0"
-                title="Clear chat history for the current thread"
-              >
-                <Trash2 size={14} />
-                <span className="hidden sm:inline">Clear History</span>
-              </button>
-            )}
-
-            {/* Google Search Grounding Quick Toggle */}
-            <button
-              type="button"
-              onClick={() => updateEnableSearchGrounding(!settings.enableSearchGrounding)}
-              className={`p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-sm shrink-0 ${
-                settings.enableSearchGrounding
-                  ? 'bg-emerald-500/10 dark:bg-emerald-950/60 border-emerald-500/50 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30'
-                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
-              }`}
-              title={settings.enableSearchGrounding ? "Search Grounding active: Gemini models will fact-check using live Google Search" : "Enable Search Grounding for live web fact-checking"}
-            >
-              <Globe size={14} className={settings.enableSearchGrounding ? 'text-emerald-500 shrink-0 animate-pulse' : 'text-slate-400 shrink-0'} />
-              <span className="hidden md:inline">Google Search</span>
-              <span className={`text-[10px] px-1 py-0.2 rounded font-mono ${settings.enableSearchGrounding ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 font-bold' : 'bg-slate-200 dark:bg-slate-800 text-slate-500'}`}>
-                {settings.enableSearchGrounding ? 'ON' : 'OFF'}
-              </span>
-            </button>
-
-            {/* Consensus View / Full Debate Toggle */}
-            <button
-              type="button"
-              onClick={toggleBasicMode}
-              className={`p-1.5 sm:px-3 sm:py-1.5 rounded-lg border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-sm shrink-0 ${
-                basicMode
-                  ? 'bg-cyan-500/10 dark:bg-cyan-950/60 border-cyan-500/50 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-500/30'
-                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
-              }`}
-              title={
-                basicMode
-                  ? "Consensus View active: Showing consensus only — full debate runs in background"
-                  : "Full Debate active: Showing all persona stage outputs and peer reviews"
-              }
-            >
-              {basicMode ? (
-                <>
-                  <Eye size={14} className="text-cyan-500 shrink-0" />
-                  <span className="hidden sm:inline">Consensus View</span>
-                </>
-              ) : (
-                <>
-                  <EyeOff size={14} className="text-slate-400 shrink-0" />
-                  <span className="hidden sm:inline">Full Debate</span>
-                </>
-              )}
-            </button>
-
-            {/* Header Actions Component */}
-            <HeaderActions
-              executionMode={settings.executionMode || 'auto'}
-              onUpdateExecutionMode={updateExecutionMode}
-              isProCompareEnabled={isProCompareEnabled}
-              onToggleProCompare={handleToggleProCompare}
-              theme={theme}
-              onSetTheme={setTheme}
-              onOpenAuditModal={() => setIsAuditModalOpen(true)}
-              onExportSessions={exportSessionsJSON}
-              onImportSessions={handleImportSessionsFile}
-              onOpenSettings={() => setIsSettingsOpen(true)}
-              maxRoundCostCeiling={settings.maxRoundCostCeiling}
-              stopAfterStage1={settings.stopAfterStage1}
-              useSingleModelForSimple={settings.useSingleModelForSimple}
-            />
-
-            {/* New Thread Button */}
-            <button
-              type="button"
-              onClick={() => createNewSession()}
-              className="p-1.5 sm:px-3 sm:py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition-colors flex items-center gap-1.5 text-xs font-semibold shadow-sm shrink-0"
-              title="Start New Deliberation Thread"
-            >
-              <Plus size={15} />
-              <span className="hidden sm:inline">New Thread</span>
-            </button>
-          </div>
-        </header>
+        <CouncilHeader
+          isSidebarOpen={isSidebarOpen}
+          onOpenSidebar={() => setIsSidebarOpen(true)}
+          sessionsCount={sessions.length}
+          sessionCostMetrics={sessionCostMetrics}
+          formatCost={formatCost}
+          basicMode={basicMode}
+          onToggleBasicMode={toggleBasicMode}
+          theme={theme}
+          onSetTheme={setTheme}
+          onOpenAuditModal={() => setIsAuditModalOpen(true)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          user={user}
+          onLogin={handleGoogleLogin}
+          onLogout={handleGoogleLogout}
+          onCreateNewSession={createNewSession}
+          isDeliberating={isDeliberating}
+        />
 
       {/* Main Content Feed */}
-      <main className="flex-1 max-w-5xl w-full mx-auto p-4 md:p-6 space-y-6 pb-32">
+      <main id="main-content" tabIndex={-1} aria-label="Council Deliberation Feed" className="flex-1 max-w-5xl w-full mx-auto p-4 md:p-6 space-y-6 pb-32 focus:outline-hidden">
         {!basicMode && (
           <CouncilSummaryBar
             presetId={activePresetId}
@@ -2696,6 +2525,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                   setCopiedId(id);
                   setTimeout(() => setCopiedId(null), 2000);
                 }}
+                onSaveRating={handleRateRound}
                 isCollapsed={collapsedRoundIds.has(round.id)}
                 onToggleCollapse={toggleRoundCollapse}
                 onReRunRound={reRunRoundDeliberation}
@@ -2742,6 +2572,8 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         handleDragOver={handleDragOver}
         handlePaste={handlePaste}
         queryTokens={queryTokens}
+        estimatedQueryTokens={estimatedQueryTokens}
+        estimatedQueryCost={estimatedQueryCost}
         sessionCostMetrics={sessionCostMetrics}
         basicMode={basicMode}
         selectedTaskDomain={selectedTaskDomain}
@@ -2762,11 +2594,19 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         setActiveZipResult={setActiveZipResult}
         setIsZipModalOpen={setIsZipModalOpen}
         hasPreviousRounds={rounds.length > 0}
+        isIsolatedRound={isIsolatedRound}
+        setIsIsolatedRound={setIsIsolatedRound}
+        onStartNewSession={() => {
+          createNewSession();
+          showToast('Started new deliberation thread');
+        }}
         stopAfterStage1={settings.stopAfterStage1}
         setStopAfterStage1={updateStopAfterStage1}
         useSingleModelForSimple={settings.useSingleModelForSimple}
         setUseSingleModelForSimple={updateUseSingleModelForSimple}
         maxRoundCostCeiling={settings.maxRoundCostCeiling}
+        enableSearchGrounding={!!settings.enableSearchGrounding}
+        onToggleSearchGrounding={() => updateEnableSearchGrounding(!settings.enableSearchGrounding)}
       />
 
       {/* Settings Modal */}
@@ -2776,8 +2616,6 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         setIsAuditModalOpen={setIsAuditModalOpen}
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        apiKey={settings.apiKey}
-        setApiKey={updateApiKey}
         personas={personas}
         setPersonas={setPersonas}
         synthesizer={synthesizer}
@@ -2815,6 +2653,15 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         setStopAfterStage1={updateStopAfterStage1}
         useSingleModelForSimple={settings.useSingleModelForSimple}
         setUseSingleModelForSimple={updateUseSingleModelForSimple}
+        archivistRecentRounds={settings.archivistRecentRounds ?? 2}
+        setArchivistRecentRounds={updateArchivistRecentRounds}
+        proCompareModelId={settings.proCompareModelId || 'anthropic/claude-3.7-sonnet'}
+        setProCompareModelId={updateProCompareModelId}
+        notificationPreferences={settings.notificationPreferences}
+        onUpdateNotifications={updateNotificationPreferences}
+        onExportSessions={exportSessionsJSON}
+        onImportSessions={handleImportSessionsFile}
+        sessionsCount={sessions.length}
       />
 
       {/* Fallback Audit Modal */}
@@ -2838,23 +2685,16 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         onClose={() => setIsZipModalOpen(false)}
       />
 
-      {/* Toast Notification Banner */}
-      {toastMessage && (
-        <div
-          className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-white dark:bg-slate-900 border border-cyan-500/60 text-cyan-200 px-4 py-2.5 rounded-xl shadow-2xl text-xs font-mono flex items-center gap-2 animate-bounce cursor-pointer"
-          onClick={() => setToastMessage(null)}
-        >
-          <span>{toastMessage}</span>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setToastMessage(null);
-            }}
-            className="text-cyan-400 hover:text-cyan-100 ml-1 cursor-pointer"
-          >
-            <X size={12} />
-          </button>
+      {/* Unified Accessible Toast Notifications */}
+      <UnifiedToast toasts={toasts} onDismiss={dismissToast} />
+
+      {/* Global Busy Overlay (Full screen, non-interactive) */}
+      {isDeliberating && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/40 backdrop-blur-xs pointer-events-auto">
+          <div className="flex items-center gap-3 p-4 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl text-slate-200 text-sm font-semibold animate-pulse">
+            <Loader2 size={20} className="animate-spin text-cyan-400" />
+            <span>Council Deliberating...</span>
+          </div>
         </div>
       )}
     </div>

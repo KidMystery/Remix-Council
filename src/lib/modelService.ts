@@ -6,6 +6,7 @@ import {
   STALE_THRESHOLD_MS,
 } from './modelCache';
 import { mapOpenRouterModels, MappedModels } from './modelMapper';
+import { retryWithExponentialBackoff, isTransientError } from './retryUtils';
 
 export interface RefreshRecommendationsOptions {
   force?: boolean;
@@ -73,11 +74,27 @@ export async function refreshModelRecommendations(
   // Execute network request
   const refreshPromise = (async (): Promise<RefreshRecommendationsResult> => {
     try {
-      const [newestRes, throughputRes, latencyRes] = await Promise.all([
-        fetch('/api/council/models?sort=newest', { signal }),
-        fetch('/api/council/models?sort=throughput-high-to-low', { signal }),
-        fetch('/api/council/models?sort=latency-low-to-high', { signal }),
-      ]);
+      const [newestRes, throughputRes, latencyRes] = await retryWithExponentialBackoff(
+        async () => {
+          const [nRes, tRes, lRes] = await Promise.all([
+            fetch('/api/council/models?sort=newest', { signal }),
+            fetch('/api/council/models?sort=throughput-high-to-low', { signal }),
+            fetch('/api/council/models?sort=latency-low-to-high', { signal }),
+          ]);
+
+          if (!nRes.ok && isTransientError({ status: nRes.status })) {
+            throw Object.assign(new Error(`OpenRouter API responded with status ${nRes.status}`), { status: nRes.status });
+          }
+          return [nRes, tRes, lRes];
+        },
+        {
+          maxRetries: 2,
+          initialDelayMs: 1000,
+          maxDelayMs: 4000,
+          signal,
+          retryIf: isTransientError,
+        }
+      );
 
       if (!newestRes.ok) {
         throw new Error(`OpenRouter API responded with status ${newestRes.status}`);
