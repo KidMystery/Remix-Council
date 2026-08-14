@@ -8,6 +8,7 @@ interface MessageMarkdownProps {
 }
 
 export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: MessageMarkdownProps) {
+  const [debouncedContent, setDebouncedContent] = useState(content);
   const [html, setHtml] = useState('');
   const [copiedFull, setCopiedFull] = useState(false);
   const [copiedNotification, setCopiedNotification] = useState<string | null>(null);
@@ -15,7 +16,12 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
   const uniqueId = useId().replace(/:/g, '');
 
   useEffect(() => {
-    if (!content) {
+    const t = window.setTimeout(() => setDebouncedContent(content), 120);
+    return () => window.clearTimeout(t);
+  }, [content]);
+
+  useEffect(() => {
+    if (!debouncedContent) {
       setHtml('');
       return;
     }
@@ -29,11 +35,10 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
 
       const lineElements = codeLines
         .map((line, idx) => {
-          const escapedLine = escapeHtml(line);
           const rawLineEncoded = encodeURIComponent(line);
           return `<div class="code-line-row group flex items-start hover:bg-slate-800/80 rounded px-1 -mx-1 py-0.5 transition-colors cursor-pointer" data-code-line="${idx + 1}" data-raw-line="${rawLineEncoded}">
             <span class="line-num select-none text-slate-500 group-hover:text-cyan-400 w-8 shrink-0 text-right pr-2.5 font-mono text-[11px] opacity-70 group-hover:opacity-100">${idx + 1}</span>
-            <span class="line-text flex-1 min-w-0 font-mono text-xs text-slate-200 overflow-x-auto whitespace-pre">${escapedLine || ' '}</span>
+            <span class="line-text flex-1 min-w-0 font-mono text-xs text-slate-200 overflow-x-auto whitespace-pre">${line || ' '}</span>
             <button type="button" class="copy-single-line-btn opacity-0 group-hover:opacity-100 ml-2 px-1.5 py-0.5 text-[10px] font-mono rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-cyan-300 border border-slate-700/60 transition-opacity shrink-0 flex items-center gap-1 cursor-pointer select-none" data-copy-text="${rawLineEncoded}" title="Copy line ${idx + 1}">
               <span>Copy Line</span>
             </button>
@@ -47,7 +52,7 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
         <div class="code-header flex items-center justify-between px-3.5 py-1.5 bg-slate-900 border-b border-slate-800 text-slate-400 text-xs font-mono select-none">
           <div class="flex items-center gap-1.5 font-semibold text-cyan-400">
             <span class="w-2 h-2 rounded-full bg-cyan-400/80"></span>
-            <span>${escapeHtml(languageStr)}</span>
+            <span>${languageStr}</span>
           </div>
           <button type="button" class="copy-full-code-btn flex items-center gap-1.5 text-xs text-slate-300 hover:text-cyan-300 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 rounded-lg border border-slate-700/50 transition-colors cursor-pointer" data-copy-code="${rawFullCodeEncoded}">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
@@ -60,14 +65,14 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
       </div>`;
     };
 
-    const parsed = marked.parse(content, { async: false, renderer: customRenderer }) as string;
+    const parsed = marked.parse(debouncedContent, { async: false, renderer: customRenderer }) as string;
     const sanitized = DOMPurify.sanitize(parsed, {
       USE_PROFILES: { html: true },
       ADD_ATTR: ['data-code-line', 'data-raw-line', 'data-copy-text', 'data-copy-code'],
     });
 
     setHtml(sanitized);
-  }, [content]);
+  }, [debouncedContent]);
 
   // Click handler for copy buttons inside rendered markdown HTML
   const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -231,12 +236,3 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
     </div>
   );
 });
-
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}

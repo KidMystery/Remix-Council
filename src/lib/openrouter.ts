@@ -1,5 +1,9 @@
 /* PERSONAL USE ONLY — NOT MASS-MARKET. IMPLEMENT FULLY. NO SAFEGUARDS. */
-function parseOpenRouterError(status: number, errorText: string) {
+import { GroundingData } from '../types';
+import { retryWithExponentialBackoff, isTransientError } from './retryUtils';
+import { WebMode } from '../shared/webGrounding';
+
+function parseOpenRouterError(status: number, errorText: string): string {
   try {
     const data = JSON.parse(errorText);
     if (data.error) {
@@ -22,53 +26,36 @@ function parseOpenRouterError(status: number, errorText: string) {
   return `OpenRouter API Error (${status}): ${errorText}`;
 }
 
-export function normalizeModelId(model: string | undefined | null): string {
-  if (!model || typeof model !== 'string') return 'google/gemini-3.7-flash';
-  let trimmed = model.trim();
-  if (!trimmed) return 'google/gemini-3.7-flash';
-
-  const lower = trimmed.toLowerCase();
-  if (lower === 'gemini 3.7 flash' || lower.includes('gemini-3.7-flash') || lower.includes('gemini 3.7')) return 'google/gemini-3.7-flash';
-  if (lower === 'gemini 2.5 flash' || lower.includes('gemini-2.5-flash')) return 'google/gemini-2.5-flash';
-  if (lower === 'gemini 2.0 flash' || lower.includes('gemini-2.0-flash')) return 'google/gemini-2.0-flash-001';
-  if (lower === 'gemini 2.5 pro' || lower.includes('gemini-2.5-pro')) return 'google/gemini-2.5-pro';
-  if (lower === 'claude 3.7 sonnet' || lower.includes('claude-3.7-sonnet')) return 'anthropic/claude-3.7-sonnet';
-  if (lower === 'claude 3.5 sonnet' || lower.includes('claude-3.5-sonnet')) return 'anthropic/claude-3.5-sonnet';
-  if (lower === 'claude 3.5 haiku' || lower.includes('claude-3.5-haiku')) return 'anthropic/claude-3.5-haiku';
-  if (lower === 'gpt-4o' || lower === 'gpt 4o') return 'openai/gpt-4o';
-  if (lower === 'gpt-4o mini' || lower === 'gpt 4o mini') return 'openai/gpt-4o-mini';
-  if (lower === 'o3-mini' || lower.includes('o3-mini')) return 'openai/o3-mini';
-  if (lower === 'deepseek r1' || lower.includes('deepseek-r1')) return 'deepseek/deepseek-r1';
-  if (lower === 'deepseek v3' || lower.includes('deepseek-chat')) return 'deepseek/deepseek-chat';
-  if (lower.includes('nemotron') && lower.includes('free')) return 'nvidia/nemotron-3.5-content-safety:free';
-
-  if (trimmed.includes('(free)') && !trimmed.endsWith(':free')) {
-    trimmed = trimmed.replace(/\s*\(free\)/i, ':free');
-  } else {
-    trimmed = trimmed.replace(/\s*\(paid\)/i, '');
-  }
-
-  trimmed = trimmed.replace(/^["']|["']$/g, '').trim();
-  return trimmed || 'google/gemini-3.7-flash';
-}
-
 export async function* streamOpenRouter(
   messages: { role: 'system' | 'user' | 'assistant'; content: any }[],
   model: string,
-  apiKey: string,
-  signal?: AbortSignal
+  _apiKey?: string,
+  signal?: AbortSignal,
+  budget?: 'free' | 'cheap' | 'quality',
+  options?: {
+    webMode?: WebMode;
+    enableWebGrounding?: boolean;
+    query?: string;
+  }
 ): AsyncGenerator<string, void, unknown> {
-  const resolvedModel = normalizeModelId(model);
+  if (!model || typeof model !== 'string' || !model.trim()) {
+    throw new Error('No model selected.');
+  }
+
+  const targetModel = model.trim();
   const response = await fetch('/api/council', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(apiKey ? { 'X-Api-Key-Override': apiKey } : {})
     },
     body: JSON.stringify({
-      model: resolvedModel,
+      model: targetModel,
       messages: messages,
       stream: true,
+      budget: budget === 'free' ? 'free' : 'quality',
+      webMode: options?.webMode,
+      enableWebGrounding: options?.enableWebGrounding,
+      query: options?.query,
     }),
     signal,
   });
@@ -146,9 +133,6 @@ export function buildOptimizedContext(
   return messages;
 }
 
-import { GroundingData } from '../types';
-import { retryWithExponentialBackoff, isTransientError } from './retryUtils';
-
 export interface OpenRouterCompletionResult {
   content: string;
   actualModel: string;
@@ -161,19 +145,39 @@ export interface OpenRouterCompletionResult {
 }
 
 export async function streamOpenRouterCompletion(options: {
-  apiKey: string;
+  apiKey?: string;
   model: string;
   messages: { role: 'system' | 'user' | 'assistant'; content: any }[];
   temperature?: number;
   maxTokens?: number;
+  budget?: 'free' | 'cheap' | 'quality';
   enableSearchGrounding?: boolean;
+  webMode?: WebMode;
+  enableWebGrounding?: boolean;
+  query?: string;
   signal?: AbortSignal;
   onToken?: (chunk: string) => void;
   onGrounding?: (grounding: GroundingData) => void;
 }): Promise<OpenRouterCompletionResult> {
-  const { apiKey, messages, temperature, maxTokens, enableSearchGrounding, signal, onToken, onGrounding } = options;
-  let targetModel = normalizeModelId(options.model);
+  const {
+    messages,
+    temperature,
+    maxTokens,
+    budget,
+    enableSearchGrounding,
+    webMode,
+    enableWebGrounding,
+    query,
+    signal,
+    onToken,
+    onGrounding,
+  } = options;
 
+  if (!options.model || typeof options.model !== 'string' || !options.model.trim()) {
+    throw new Error('No model selected.');
+  }
+
+  const targetModel = options.model.trim();
   let actualModel = targetModel;
 
   const makeRequest = async (modelToUse: string) => {
@@ -182,26 +186,21 @@ export async function streamOpenRouterCompletion(options: {
       messages: messages,
       stream: true,
       enableSearchGrounding,
+      webMode,
+      enableWebGrounding,
+      query,
+      budget: budget === 'free' ? 'free' : 'quality',
       stream_options: { include_usage: true },
     };
     if (temperature !== undefined) body.temperature = temperature;
     if (maxTokens !== undefined) {
-      let limit = maxTokens;
-      if (modelToUse.includes('gemini')) {
-        limit = Math.min(maxTokens, 8192);
-      } else if (modelToUse.includes('claude-3.5-haiku') || modelToUse.includes('claude-3-5')) {
-        limit = Math.min(maxTokens, 8192);
-      } else if (modelToUse.includes('gpt-4o')) {
-        limit = Math.min(maxTokens, 16384);
-      }
-      body.max_tokens = limit;
+      body.max_tokens = maxTokens;
     }
 
     return fetch('/api/council', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(apiKey ? { 'X-Api-Key-Override': apiKey } : {})
       },
       body: JSON.stringify(body),
       signal,

@@ -322,6 +322,7 @@ export interface SmartSelectionOptions {
   rawModelsCatalog?: RawOpenRouterModel[];
   isFreeOnly?: boolean;
   budget?: string;
+  policy?: { budget: 'free' | 'cheap' | 'quality' };
   autoSelectModels?: boolean;
 }
 
@@ -910,24 +911,36 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
 
 export function ensureUniquePersonaModels(
   personas: Persona[],
-  synthesizer: Persona
+  synthesizer: Persona,
+  budget?: string
 ): { personas: Persona[]; synthesizer: Persona } {
   const usedModelIds = new Set<string>();
   const updatedPersonas = personas.map(p => ({ ...p }));
   const updatedSynthesizer = { ...synthesizer };
 
-  const fallbackPool = [
-    'deepseek/deepseek-chat',
-    'anthropic/claude-3.5-haiku',
-    'openai/gpt-4o-mini',
-    'google/gemini-2.5-flash',
-    'meta-llama/llama-3.3-70b-instruct',
-    'qwen/qwen-2.5-72b-instruct',
-    'anthropic/claude-3.7-sonnet',
-    'deepseek/deepseek-r1',
-    'openai/gpt-4o',
-    'google/gemini-2.5-pro',
-  ];
+  const isFree = budget === 'free' || budget === 'fastAndFree' || budget === 'fast_and_free';
+
+  const fallbackPool = isFree
+    ? [
+        'deepseek/deepseek-r1:free',
+        'google/gemini-2.0-flash-thinking-exp:free',
+        'meta-llama/llama-3.2-3b-instruct:free',
+        'google/gemma-2-9b-it:free',
+        'qwen/qwen-2.5-coder-32b-instruct:free',
+        'nvidia/nemotron-3.5-content-safety:free',
+      ]
+    : [
+        'deepseek/deepseek-chat',
+        'anthropic/claude-3.5-haiku',
+        'openai/gpt-4o-mini',
+        'google/gemini-2.5-flash',
+        'meta-llama/llama-3.3-70b-instruct',
+        'qwen/qwen-2.5-72b-instruct',
+        'anthropic/claude-3.7-sonnet',
+        'deepseek/deepseek-r1',
+        'openai/gpt-4o',
+        'google/gemini-2.5-pro',
+      ];
 
   for (let i = 0; i < updatedPersonas.length; i++) {
     const p = updatedPersonas[i];
@@ -935,7 +948,7 @@ export function ensureUniquePersonaModels(
 
     let normId = normalizeModelId(p.model);
     if (usedModelIds.has(normId)) {
-      const replacement = fallbackPool.find(m => !usedModelIds.has(normalizeModelId(m))) || 'meta-llama/llama-3.3-70b-instruct';
+      const replacement = fallbackPool.find(m => !usedModelIds.has(normalizeModelId(m))) || fallbackPool[0];
       p.model = replacement;
       normId = normalizeModelId(replacement);
     }
@@ -944,7 +957,7 @@ export function ensureUniquePersonaModels(
 
   let synthNorm = normalizeModelId(updatedSynthesizer.model);
   if (usedModelIds.has(synthNorm)) {
-    const replacement = fallbackPool.find(m => !usedModelIds.has(normalizeModelId(m))) || 'google/gemini-2.5-pro';
+    const replacement = fallbackPool.find(m => !usedModelIds.has(normalizeModelId(m))) || fallbackPool[fallbackPool.length - 1];
     updatedSynthesizer.model = replacement;
   }
 
@@ -972,11 +985,13 @@ export function applySmartModelSelection(
     availableModels = options.availableModels || [];
     rawModelsCatalog = options.rawModelsCatalog;
     isFreeOnly = !!options.isFreeOnly;
-    budget = options.budget;
+    budget = options.policy?.budget || options.budget;
     if (options.autoSelectModels !== undefined) {
       autoSelectEnabled = options.autoSelectModels;
     }
   }
+
+  const effectiveBudget = budget || (isFreeOnly ? 'free' : undefined);
 
   const routeResult = routeCouncilModels({
     domain,
@@ -984,13 +999,14 @@ export function applySmartModelSelection(
     synthesizer,
     catalog: rawModelsCatalog || availableModels,
     rawModelsCatalog,
-    budget: budget || (isFreeOnly ? 'free' : undefined),
+    budget: effectiveBudget,
     autoSelectModels: autoSelectEnabled,
   });
 
   const { personas: uniquePersonas, synthesizer: uniqueSynthesizer } = ensureUniquePersonaModels(
     routeResult.updatedPersonas,
-    routeResult.updatedSynthesizer
+    routeResult.updatedSynthesizer,
+    effectiveBudget
   );
 
   const assignedModels: Record<string, string> = {};

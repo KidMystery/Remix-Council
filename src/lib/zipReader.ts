@@ -96,6 +96,21 @@ export async function extractCodeFromZip(file: File): Promise<ZipArchiveResult> 
 
   const entries = Object.keys(loadedZip.files);
 
+  // Safety checks: uncompressed size ceiling (50MB) and zip-bomb ratio guard (>200x)
+  const uncompressedSize = entries.reduce(
+    (sum, path) => sum + ((loadedZip.files[path] as any)?._data?.uncompressedSize || 0),
+    0
+  );
+  const compressedSize = file.size;
+
+  if (uncompressedSize > 50_000_000) {
+    throw new Error('Zip archive expands beyond the 50MB safety limit.');
+  }
+
+  if (compressedSize > 0 && uncompressedSize > 0 && (uncompressedSize / compressedSize) > 200) {
+    throw new Error('Zip archive has an unsafe compression ratio.');
+  }
+
   let totalExtractedChars = 0;
   let fileCount = 0;
   let wasTruncated = false;

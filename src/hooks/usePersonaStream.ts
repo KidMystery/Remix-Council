@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { PersonaId, GroundingData } from '../types';
 import { streamOpenRouterCompletion } from '../lib/openrouter';
+import { WebMode } from '../shared/webGrounding';
 
 export interface PersonaStreamOptions {
   personaId: PersonaId;
@@ -10,6 +11,9 @@ export interface PersonaStreamOptions {
   temperature?: number;
   maxTokens?: number;
   enableSearchGrounding?: boolean;
+  webMode?: WebMode;
+  enableWebGrounding?: boolean;
+  query?: string;
   signal?: AbortSignal;
   onToken?: (chunk: string) => void;
   onGrounding?: (grounding: GroundingData) => void;
@@ -24,6 +28,9 @@ export function usePersonaStream() {
       temperature: options.temperature,
       maxTokens: options.maxTokens,
       enableSearchGrounding: options.enableSearchGrounding,
+      webMode: options.webMode,
+      enableWebGrounding: options.enableWebGrounding,
+      query: options.query,
       signal: options.signal,
       onToken: options.onToken,
       onGrounding: options.onGrounding,

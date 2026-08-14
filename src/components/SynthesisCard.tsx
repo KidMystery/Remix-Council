@@ -4,6 +4,7 @@ import { CouncilRound, Persona } from '../types';
 import { MessageMarkdown } from './MessageMarkdown';
 import { GroundingSourcesCard } from './GroundingSourcesCard';
 import { ThinkingIndicator } from './ThinkingIndicator';
+import { LATEST_GEMINI_FLASH } from '../config/modelCatalog';
 
 interface SynthesisCardProps {
   round: CouncilRound;
@@ -26,7 +27,7 @@ export const SynthesisCard: React.FC<SynthesisCardProps> = ({
   onSpeak,
   onCopy,
   onResynthesize,
-  defaultSynthModel = 'google/gemini-2.5-flash',
+  defaultSynthModel = LATEST_GEMINI_FLASH,
 }) => {
   if (!round.synthesis?.content && round.synthesis?.status !== 'streaming') {
     return null;

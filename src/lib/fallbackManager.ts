@@ -2,6 +2,7 @@ import { Persona, PersonaId, GroundingData } from '../types';
 import { RawOpenRouterModel, cleanModelName } from './presets';
 import { isFreeModel, getAuthorOrganization, getFamily, getCanonicalTarget } from './modelMapper';
 import { streamOpenRouterCompletion } from './openrouter';
+import { WebMode } from '../shared/webGrounding';
 
 export type TriggerReason = 
   | 'HTTP 429 (Rate Limit)'
@@ -267,6 +268,9 @@ export interface StreamPersonaWithFallbackOptions {
   temperature?: number;
   maxTokens?: number;
   enableSearchGrounding?: boolean;
+  webMode?: WebMode;
+  enableWebGrounding?: boolean;
+  query?: string;
   signal?: AbortSignal;
   onToken?: (chunk: string) => void;
   onGrounding?: (grounding: GroundingData) => void;
@@ -304,6 +308,9 @@ export async function streamPersonaWithFallback(
     temperature,
     maxTokens,
     enableSearchGrounding,
+    webMode,
+    enableWebGrounding,
+    query,
     signal,
     onToken,
     onGrounding,
@@ -336,6 +343,9 @@ export async function streamPersonaWithFallback(
         temperature,
         maxTokens,
         enableSearchGrounding,
+        webMode,
+        enableWebGrounding,
+        query,
         signal,
         onToken: (chunk) => {
           if (chunk) hasTokenStreamed = true;
@@ -364,8 +374,11 @@ export async function streamPersonaWithFallback(
     } catch (err: any) {
       lastError = err;
 
-      // Do not trigger fallback on user cancellation
+      // Do not trigger fallback on user cancellation or explicit web grounding unavailabilities
       if (err.name === 'AbortError' && signal?.aborted) {
+        throw err;
+      }
+      if (err.message && err.message.includes('WEB_GROUNDING_UNAVAILABLE')) {
         throw err;
       }
 

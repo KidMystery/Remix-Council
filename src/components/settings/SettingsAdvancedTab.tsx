@@ -1,6 +1,7 @@
 import React, { useRef } from 'react';
-import { Globe, Download, Upload, Database } from 'lucide-react';
+import { Globe, Download, Upload, Database, Search } from 'lucide-react';
 import { Persona } from '../../types';
+import { WebMode } from '../../shared/webGrounding';
 
 interface SettingsAdvancedTabProps {
   personas: Persona[];
@@ -22,6 +23,8 @@ interface SettingsAdvancedTabProps {
   setIsAuditModalOpen?: (val: boolean) => void;
   enableSearchGrounding?: boolean;
   setEnableSearchGrounding?: (enabled: boolean) => void;
+  webMode?: WebMode;
+  setWebMode?: (mode: WebMode) => void;
   maxRoundCostCeiling: number;
   setMaxRoundCostCeiling?: (val: number) => void;
   stopAfterStage1: boolean;
@@ -58,6 +61,8 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
   setIsAuditModalOpen,
   enableSearchGrounding,
   setEnableSearchGrounding,
+  webMode = 'auto',
+  setWebMode,
   maxRoundCostCeiling,
   setMaxRoundCostCeiling,
   stopAfterStage1,
@@ -457,31 +462,59 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
             </p>
           </div>
 
-          {/* Google Search Grounding Section */}
-          <div className="pt-3 space-y-2 border-t border-slate-200/60 dark:border-slate-800/60">
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5 pr-2">
-                <label className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
-                  <Globe size={14} className="text-emerald-500 shrink-0" />
-                  <span>Google Search Grounding</span>
-                </label>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
-                  Live web search lookup & fact-checking via Google Search for Gemini models (e.g., gemini-2.5-flash & gemini-2.0-flash).
-                </p>
-              </div>
+          {/* OpenRouter Web Grounding Section */}
+          <div className="pt-3 space-y-3 border-t border-slate-200/60 dark:border-slate-800/60">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                <Globe size={14} className="text-cyan-500 shrink-0" />
+                <span>OpenRouter Web Grounding Mode</span>
+              </label>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                Connects council models to real-time web search via the OpenRouter Chat Completions Web Plugin with live citations and date grounding.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
               <button
                 type="button"
-                onClick={() => setEnableSearchGrounding?.(!enableSearchGrounding)}
-                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                  enableSearchGrounding ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
+                onClick={() => setWebMode?.('off')}
+                className={`px-3 py-2 rounded-xl text-left border transition-all cursor-pointer ${
+                  webMode === 'off'
+                    ? 'border-red-500/60 bg-red-500/10 text-red-700 dark:text-red-300 ring-1 ring-red-500/30'
+                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-700'
                 }`}
-                title={enableSearchGrounding ? 'Grounding active' : 'Grounding disabled'}
               >
-                <span
-                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                    enableSearchGrounding ? 'translate-x-4' : 'translate-x-0'
-                  }`}
-                />
+                <div className="text-xs font-bold font-mono">OFF</div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 leading-tight">No web search</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setWebMode?.('auto')}
+                className={`px-3 py-2 rounded-xl text-left border transition-all cursor-pointer ${
+                  webMode === 'auto'
+                    ? 'border-cyan-500/60 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-500/30'
+                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-700'
+                }`}
+              >
+                <div className="text-xs font-bold font-mono flex items-center justify-between">
+                  <span>AUTO</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-500/20 text-cyan-700 dark:text-cyan-300 font-semibold">Recommended</span>
+                </div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 leading-tight">Freshness-sensitive only</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setWebMode?.('always')}
+                className={`px-3 py-2 rounded-xl text-left border transition-all cursor-pointer ${
+                  webMode === 'always'
+                    ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30'
+                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-700'
+                }`}
+              >
+                <div className="text-xs font-bold font-mono">ALWAYS</div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 leading-tight">Search every request</div>
               </button>
             </div>
           </div>

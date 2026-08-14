@@ -1,3 +1,5 @@
+import { WebMode } from './shared/webGrounding';
+
 export type PersonaId = string;
 
 export interface GroundingSource {
@@ -123,6 +125,7 @@ export interface Settings {
   synthesisMaxTokens?: number;
   panelTimeoutSeconds?: number;
   enableSearchGrounding?: boolean;
+  webMode?: WebMode;
   maxRoundCostCeiling?: number;
   stopAfterStage1?: boolean;
   useSingleModelForSimple?: boolean;

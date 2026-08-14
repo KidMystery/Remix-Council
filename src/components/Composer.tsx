@@ -1,9 +1,10 @@
 /* PERSONAL USE ONLY — NOT MASS-MARKET. IMPLEMENT FULLY. NO SAFEGUARDS. */
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { Send, Square, Paperclip, X, Cpu, Zap, Layers, Coins, Globe } from 'lucide-react';
 import { ExecutionMode } from '../types';
 import { ZipArchiveResult } from '../lib/zipReader';
 import { formatCost } from '../lib/archivist';
+import { WebMode } from '../shared/webGrounding';
 
 export interface FileAttachment {
   name: string;
@@ -40,6 +41,8 @@ export interface ComposerProps {
   estimatedQueryCost?: number;
   enableSearchGrounding?: boolean;
   onToggleSearchGrounding?: () => void;
+  webMode?: WebMode;
+  onUpdateWebMode?: (mode: WebMode) => void;
   [key: string]: any;
 }
 
@@ -70,8 +73,11 @@ export const Composer: React.FC<ComposerProps> = ({
   estimatedQueryCost,
   enableSearchGrounding = false,
   onToggleSearchGrounding,
+  webMode = 'auto',
+  onUpdateWebMode,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [showCostDetails, setShowCostDetails] = useState(false);
 
   // Auto-expand textarea smoothly as the user types so the entire prompt is easily readable
   useEffect(() => {
@@ -126,12 +132,12 @@ export const Composer: React.FC<ComposerProps> = ({
 
         {/* Context Continuity & Round Distinction Pill Bar */}
         {hasPreviousRounds && (
-          <div className="flex items-center justify-between gap-2 px-1 text-xs select-none flex-wrap">
+          <div className="flex items-center justify-between gap-1.5 sm:gap-2 px-1 text-xs select-none flex-wrap">
             <div className="flex items-center gap-1 bg-slate-200/60 dark:bg-slate-800/60 p-0.5 sm:p-1 rounded-xl border border-slate-300/40 dark:border-slate-700/60 shadow-2xs">
               <button
                 type="button"
                 onClick={() => setIsIsolatedRound?.(false)}
-                className={`px-2.5 py-1 rounded-lg font-mono text-[11px] flex items-center gap-1.5 transition-all cursor-pointer ${
+                className={`px-2 sm:px-2.5 py-1 rounded-lg font-mono text-[10px] sm:text-[11px] flex items-center gap-1 sm:gap-1.5 transition-all cursor-pointer ${
                   !isIsolatedRound
                     ? 'bg-cyan-600 text-white shadow-xs font-semibold'
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
@@ -139,13 +145,13 @@ export const Composer: React.FC<ComposerProps> = ({
                 title="Follow-up Round: Deliberation personas build on previous consensus, debate, and Archivist memory"
               >
                 <span>💬</span>
-                <span>Follow-up Round</span>
+                <span>Follow-up<span className="hidden sm:inline"> Round</span></span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setIsIsolatedRound?.(true)}
-                className={`px-2.5 py-1 rounded-lg font-mono text-[11px] flex items-center gap-1.5 transition-all cursor-pointer ${
+                className={`px-2 sm:px-2.5 py-1 rounded-lg font-mono text-[10px] sm:text-[11px] flex items-center gap-1 sm:gap-1.5 transition-all cursor-pointer ${
                   isIsolatedRound
                     ? 'bg-amber-600 text-white shadow-xs font-semibold'
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
@@ -153,7 +159,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 title="Fresh Topic Round: Starts an isolated question without injecting previous deliberation rounds"
               >
                 <span>🆕</span>
-                <span>Fresh Topic (Isolated)</span>
+                <span>Fresh<span className="hidden sm:inline"> Topic</span></span>
               </button>
             </div>
 
@@ -161,10 +167,10 @@ export const Composer: React.FC<ComposerProps> = ({
               <button
                 type="button"
                 onClick={onStartNewSession}
-                className="text-[11px] font-mono text-slate-500 dark:text-slate-400 hover:text-cyan-500 dark:hover:text-cyan-400 flex items-center gap-1 transition-colors cursor-pointer py-1 px-2 rounded-lg hover:bg-slate-200/50 dark:hover:bg-slate-800/50 ml-auto"
+                className="text-[10px] sm:text-[11px] font-mono text-slate-500 dark:text-slate-400 hover:text-cyan-500 dark:hover:text-cyan-400 flex items-center gap-1 transition-colors cursor-pointer py-1 px-1.5 sm:px-2 rounded-lg hover:bg-slate-200/50 dark:hover:bg-slate-800/50 ml-auto"
                 title="Create an entirely new deliberation session"
               >
-                <span>➕ New Thread</span>
+                <span>➕ New<span className="hidden sm:inline"> Thread</span></span>
               </button>
             )}
           </div>
@@ -197,8 +203,53 @@ export const Composer: React.FC<ComposerProps> = ({
             <Paperclip size={18} />
           </button>
 
-          {/* Google Search Grounding toggle (integrated directly where prompts are written) */}
-          {onToggleSearchGrounding && (
+          {/* Web Grounding Mode Switch (Auto / Always / Off) */}
+          {onUpdateWebMode ? (
+            <button
+              type="button"
+              onClick={() => {
+                const nextMode: WebMode = webMode === 'auto' ? 'always' : webMode === 'always' ? 'off' : 'auto';
+                onUpdateWebMode(nextMode);
+              }}
+              className={`min-h-[44px] sm:h-[48px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-xs shrink-0 cursor-pointer ${
+                webMode === 'always'
+                  ? 'bg-emerald-500/15 dark:bg-emerald-950/60 border-emerald-500/50 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30'
+                  : webMode === 'auto'
+                  ? 'bg-cyan-500/15 dark:bg-cyan-950/60 border-cyan-500/50 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-500/30'
+                  : 'bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800/80'
+              }`}
+              title={
+                webMode === 'always'
+                  ? 'Web Grounding (ALWAYS): Live web search enabled for every council model request'
+                  : webMode === 'auto'
+                  ? 'Web Grounding (AUTO): Live web search triggers automatically for freshness-sensitive questions'
+                  : 'Web Grounding (OFF): Web search disabled'
+              }
+            >
+              <Globe
+                size={16}
+                className={
+                  webMode === 'always'
+                    ? 'text-emerald-500 shrink-0 animate-pulse'
+                    : webMode === 'auto'
+                    ? 'text-cyan-500 shrink-0'
+                    : 'text-slate-400 shrink-0'
+                }
+              />
+              <span className="hidden md:inline font-mono text-[11px]">Web</span>
+              <span
+                className={`text-[9px] px-1 py-0.2 rounded font-mono font-bold uppercase ${
+                  webMode === 'always'
+                    ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300'
+                    : webMode === 'auto'
+                    ? 'bg-cyan-500/20 text-cyan-600 dark:text-cyan-300'
+                    : 'bg-slate-200 dark:bg-slate-800 text-slate-500'
+                }`}
+              >
+                {webMode}
+              </span>
+            </button>
+          ) : onToggleSearchGrounding ? (
             <button
               type="button"
               onClick={onToggleSearchGrounding}
@@ -225,7 +276,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 {enableSearchGrounding ? 'ON' : 'OFF'}
               </span>
             </button>
-          )}
+          ) : null}
 
           {/* Quick/Deep Mode Switcher */}
           {updateExecutionMode && (
@@ -307,32 +358,43 @@ export const Composer: React.FC<ComposerProps> = ({
 
         {/* Proactive Token & Cost Estimate Bar */}
         {estimatedQueryTokens !== undefined && estimatedQueryTokens > 0 && (
-          <div className="flex items-center justify-between px-1.5 py-0.5 text-[11px] font-mono text-slate-500 dark:text-slate-400 select-none animate-fadeIn">
-            <div className="flex items-center gap-3 flex-wrap">
-              <span className="flex items-center gap-1.5" title="Estimated input tokens including query prompt and attached files">
-                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-                <span className="font-semibold text-slate-700 dark:text-slate-300">~{estimatedQueryTokens.toLocaleString()}</span> tokens
-              </span>
-              {estimatedQueryCost !== undefined && (
-                <span
-                  className={`flex items-center gap-1 font-semibold ${
-                    estimatedQueryCost <= 0
-                      ? 'text-emerald-600 dark:text-emerald-400'
-                      : 'text-amber-600 dark:text-amber-400'
-                  }`}
-                  title="Estimated deliberation cost across active personas and synthesizer"
-                >
-                  <Coins size={11} className="inline opacity-80" />
-                  <span>Est. Cost:</span>
-                  <span>{estimatedQueryCost <= 0 ? 'Free ($0.0000)' : formatCost(estimatedQueryCost)}</span>
+          <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 select-none">
+            <div className="flex sm:hidden items-center justify-between px-1 py-0.5">
+              <button
+                type="button"
+                onClick={() => setShowCostDetails(!showCostDetails)}
+                className="text-[10px] text-cyan-600 dark:text-cyan-400 hover:underline flex items-center gap-1 cursor-pointer"
+              >
+                <span>{showCostDetails ? 'Hide token & cost est.' : `~${estimatedQueryTokens.toLocaleString()} tokens · ${estimatedQueryCost && estimatedQueryCost > 0 ? formatCost(estimatedQueryCost) : 'Free'} (details)`}</span>
+              </button>
+            </div>
+            <div className={`${showCostDetails ? 'flex' : 'hidden sm:flex'} items-center justify-between px-1.5 py-0.5 animate-fadeIn`}>
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="flex items-center gap-1.5" title="Estimated input tokens including query prompt and attached files">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                  <span className="font-semibold text-slate-700 dark:text-slate-300">~{estimatedQueryTokens.toLocaleString()}</span> tokens
+                </span>
+                {estimatedQueryCost !== undefined && (
+                  <span
+                    className={`flex items-center gap-1 font-semibold ${
+                      estimatedQueryCost <= 0
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-amber-600 dark:text-amber-400'
+                    }`}
+                    title="Estimated deliberation cost across active personas and synthesizer"
+                  >
+                    <Coins size={11} className="inline opacity-80" />
+                    <span>Est. Cost:</span>
+                    <span>{estimatedQueryCost <= 0 ? 'Free ($0.0000)' : formatCost(estimatedQueryCost)}</span>
+                  </span>
+                )}
+              </div>
+              {attachedFiles.length > 0 && (
+                <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                  {attachedFiles.length} file{attachedFiles.length > 1 ? 's' : ''} attached
                 </span>
               )}
             </div>
-            {attachedFiles.length > 0 && (
-              <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                {attachedFiles.length} file{attachedFiles.length > 1 ? 's' : ''} attached
-              </span>
-            )}
           </div>
         )}
       </div>

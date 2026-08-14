@@ -49,6 +49,13 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
   const hasSynthesis = !!round.synthesis?.content || round.synthesis?.status === 'streaming';
   const isSynthesisFinished = !isDeliberating && (round.synthesis?.status === 'completed' || !!round.synthesis?.content);
 
+  const completedStage1 = Object.values(round.deliberation?.stage1 || {}).filter(
+    (r: PersonaResponse | any) => r?.status === 'completed' || r?.content
+  ).length;
+  const completedStage2 = Object.values(round.deliberation?.stage2 || {}).filter(
+    (r: PersonaResponse | any) => r?.status === 'completed' || r?.content
+  ).length;
+
   // Consensus view: only show synthesis
   if (basicMode) {
     return (
@@ -80,7 +87,14 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
             {round.synthesis?.status === 'streaming' ? (
               <ThinkingIndicator stageLabel="Synthesis" personaName={synthesizer.name} role="Consensus Builder" model={synthesizer.model} accentColor="amber" />
             ) : (
-              <span>Consensus pending. Run deliberation to generate synthesis.</span>
+              <div className="flex flex-col gap-1.5">
+                <span>Consensus pending. Run deliberation to generate synthesis.</span>
+                {(completedStage1 > 0 || completedStage2 > 0) && (
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    Stage 1: {completedStage1}/{activePersonas.length} · Stage 2: {completedStage2}/{activePersonas.length}
+                  </span>
+                )}
+              </div>
             )}
           </div>
         )}

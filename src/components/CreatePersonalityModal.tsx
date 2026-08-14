@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { X, Plus, Sparkles, UserPlus, Check, Trash2 } from 'lucide-react';
 import { Persona } from '../types';
 import { COLOR_THEMES } from '../lib/councilPresets';
+import { LATEST_GEMINI_FLASH } from '../config/modelCatalog';
 
 interface CreatePersonalityModalProps {
   isOpen: boolean;
@@ -20,10 +21,11 @@ export function CreatePersonalityModal({
   availableModels,
   editingPersona,
 }: CreatePersonalityModalProps) {
+  const defaultModel = availableModels[0]?.id || LATEST_GEMINI_FLASH;
   const [name, setName] = useState(editingPersona?.name || '');
   const [role, setRole] = useState(editingPersona?.role || '');
   const [avatar, setAvatar] = useState(editingPersona?.avatar || '🧠');
-  const [model, setModel] = useState(editingPersona?.model || 'google/gemini-2.5-flash');
+  const [model, setModel] = useState(editingPersona?.model || defaultModel);
   const [color, setColor] = useState(editingPersona?.color || COLOR_THEMES[0].value);
   const [systemPrompt, setSystemPrompt] = useState(
     editingPersona?.systemPrompt ||
@@ -43,13 +45,13 @@ export function CreatePersonalityModal({
       setName('');
       setRole('');
       setAvatar('🧠');
-      setModel('google/gemini-2.5-flash');
+      setModel(availableModels[0]?.id || LATEST_GEMINI_FLASH);
       setColor(COLOR_THEMES[0].value);
       setSystemPrompt(
         'You are a specialized council member. Provide rigorous, clear, and actionable feedback based on your domain expertise.'
       );
     }
-  }, [editingPersona, isOpen]);
+  }, [editingPersona, isOpen, availableModels]);
 
   if (!isOpen) return null;
 
@@ -63,7 +65,7 @@ export function CreatePersonalityModal({
       name: name.trim(),
       role: role.trim(),
       avatar: avatar.trim() || '🧠',
-      model: model.trim() || 'google/gemini-2.5-flash',
+      model: model.trim() || defaultModel,
       color,
       systemPrompt: systemPrompt.trim(),
       enabled: true,

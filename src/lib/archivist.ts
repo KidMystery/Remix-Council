@@ -1,6 +1,7 @@
 import { CouncilRound, PersonaResponse } from '../types';
 import { streamOpenRouterCompletion } from './openrouter';
 import type { RawOpenRouterModel } from './presets';
+import { LATEST_GEMINI_FLASH } from '../config/modelCatalog';
 
 export function estimateTokens(text: string): number {
   if (!text) return 0;
@@ -93,7 +94,7 @@ export function countRoundCost(round: CouncilRound): RoundCostMetrics {
 
   const processResponse = (r?: PersonaResponse | { content: string; model?: string; promptTokens?: number; completionTokens?: number; cost?: number }) => {
     if (!r || !r.content) return;
-    const model = r.model || 'google/gemini-2.5-flash';
+    const model = r.model || LATEST_GEMINI_FLASH;
     const rates = getModelRates(model);
 
     let pTokens = r.promptTokens ?? userQueryTokens;
@@ -241,7 +242,7 @@ export async function buildArchivistContext(
       try {
         const summaryRes = await streamOpenRouterCompletion({
           apiKey,
-          model: 'google/gemini-2.5-flash',
+          model: LATEST_GEMINI_FLASH,
           messages: [
             {
               role: 'system',

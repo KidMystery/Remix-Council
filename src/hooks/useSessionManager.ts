@@ -346,12 +346,18 @@ export function useSessionManager(user: User | null = null) {
       let activeId: string | null = null;
 
       if (Array.isArray(parsed)) {
+        if (parsed.some((s: any) => !s || !s.id || !Array.isArray(s.rounds))) {
+          return { success: false, count: 0, error: 'Invalid session schema.' };
+        }
         importedSessions = parsed;
-      } else if (parsed && Array.isArray(parsed.sessions)) {
+      } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.sessions)) {
+        if (parsed.sessions.some((s: any) => !s || !s.id || !Array.isArray(s.rounds))) {
+          return { success: false, count: 0, error: 'Invalid session schema.' };
+        }
         importedSessions = parsed.sessions;
         activeId = parsed.activeSessionId || null;
       } else {
-        return { success: false, count: 0, error: 'Invalid JSON structure.' };
+        return { success: false, count: 0, error: 'Invalid session schema.' };
       }
 
       if (importedSessions.length === 0) {
@@ -397,4 +403,32 @@ export function useSessionManager(user: User | null = null) {
     exportSessionsJSON,
     importSessionsJSON,
   };
+}
+
+export function usePersistRounds(
+  rounds: CouncilRound[],
+  persist: (rounds: CouncilRound[]) => void,
+  delay = 750
+) {
+  const timerRef = useRef<number | null>(null);
+  const latestRef = useRef(rounds);
+
+  latestRef.current = rounds;
+
+  useEffect(() => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+    }
+
+    timerRef.current = window.setTimeout(() => {
+      persist(latestRef.current);
+      timerRef.current = null;
+    }, delay);
+
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+      }
+    };
+  }, [rounds, persist, delay]);
 }

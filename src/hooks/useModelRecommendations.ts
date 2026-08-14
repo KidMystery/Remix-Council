@@ -52,9 +52,9 @@ export function useModelRecommendations() {
 
   const [presetWarnings, setPresetWarnings] = useState<string[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [debounceUntil, setDebounceUntil] = useState<number>(0);
-
-
+  const [isDebounced, setIsDebounced] = useState(false);
+  const lastForcedRefreshRef = useRef<number>(0);
+  const debounceTimerRef = useRef<number | null>(null);
 
   const handleRefresh = useCallback(async (options?: { force?: boolean }): Promise<RefreshRecommendationsResult | null> => {
     const force = options?.force ?? false;
@@ -62,11 +62,19 @@ export function useModelRecommendations() {
     // Enforce 5 second click debounce lock for manual forced refreshes
     if (force) {
       const now = Date.now();
-      if (now < debounceUntil) {
+      if (now - lastForcedRefreshRef.current < 5000) {
         console.log('Refresh debounced — please wait 5s between manual refreshes');
         return null;
       }
-      setDebounceUntil(now + 5000); // 5s debounce window
+      lastForcedRefreshRef.current = now;
+      setIsDebounced(true);
+      if (debounceTimerRef.current !== null) {
+        window.clearTimeout(debounceTimerRef.current);
+      }
+      debounceTimerRef.current = window.setTimeout(() => {
+        setIsDebounced(false);
+        debounceTimerRef.current = null;
+      }, 5000);
     }
 
     setIsRefreshing(true);
@@ -103,7 +111,7 @@ export function useModelRecommendations() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [debounceUntil]);
+  }, []);
 
   // App load behavior:
   // - Show cached recommendations immediately if available (already set in initial state)
@@ -130,8 +138,6 @@ export function useModelRecommendations() {
 
     return () => clearInterval(interval);
   }, [handleRefresh]);
-
-  const isDebounced = Date.now() < debounceUntil;
 
   return {
     metadata,
