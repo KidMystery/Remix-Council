@@ -252,16 +252,20 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
-    handleAuthRedirectResult()
-      .then((redirectUser) => {
-        if (redirectUser) {
-          setUser(redirectUser);
-        }
-      })
-      .catch((err) => {
-        console.warn('Redirect auth check completed:', err);
-      });
+    let cancelled = false;
 
+    handleAuthRedirectResult().then((u) => {
+      if (!cancelled && u) {
+        setUser(u);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const unsubscribe = onAuthChange((u) => {
       setUser(u);
       if (u) {
@@ -287,12 +291,20 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
   const handleGoogleLogin = async () => {
     try {
-      const loggedUser = await loginWithGoogle();
-      if (loggedUser && loggedUser !== 'redirecting') {
-        setUser(loggedUser);
+      const result = await loginWithGoogle();
+
+      if (result === 'redirecting') {
+        showToast('Google sign-in will continue after redirect...');
+        return;
       }
-    } catch (e: any) {
-      showToast(e?.message || 'Google sign-in failed', 'error');
+
+      if (result) {
+        setUser(result);
+        showToast(`Signed in as ${result.displayName || result.email}`);
+        return;
+      }
+    } catch (err: any) {
+      showToast(`Google sign-in failed: ${err?.message || String(err)}`, 'error', 6500);
     }
   };
 

@@ -32,14 +32,20 @@ export interface UserCloudData {
   updatedAt?: number;
 }
 
-const firebaseConfig = {
-  apiKey: config.apiKey || "AIzaSyDbNiNRUpnBFN7JStWKAxtqTTd4hE_A8dk",
-  authDomain: config.authDomain || "gen-lang-client-0644203869.firebaseapp.com",
-  projectId: config.projectId || "gen-lang-client-0644203869",
-  storageBucket: config.storageBucket || "gen-lang-client-0644203869.firebasestorage.app",
-  messagingSenderId: config.messagingSenderId || "326388929532",
-  appId: config.appId || "1:326388929532:web:ea8aba91f95988cd7c1879"
-};
+function resolveFirebaseConfig() {
+  const env = import.meta.env;
+
+  return {
+    apiKey: env.VITE_FIREBASE_API_KEY || config.apiKey || '',
+    authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || config.authDomain || '',
+    projectId: env.VITE_FIREBASE_PROJECT_ID || config.projectId || '',
+    storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || config.storageBucket || '',
+    messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || config.messagingSenderId || '',
+    appId: env.VITE_FIREBASE_APP_ID || config.appId || '',
+  };
+}
+
+const firebaseConfig = resolveFirebaseConfig();
 
 let app: FirebaseApp | null = null;
 let db: Firestore | null = null;
@@ -58,7 +64,8 @@ export function initPersistence(): boolean {
       db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
       auth = getAuth(app);
       persistenceInitialized = true;
-      console.log("Firebase persistence initialized successfully.");
+      console.log('Firebase persistence initialized successfully.');
+      console.log('Firebase active project:', firebaseConfig.projectId);
       return true;
     } catch (e) {
       console.error("Failed to initialize Firebase:", e);
