@@ -1,4 +1,20 @@
-import { RawOpenRouterModel, cleanModelName } from './presets';
+import { RawOpenRouterModel } from './presets';
+
+export function cleanModelName(modelId: string, modelName?: string): string {
+  if (modelName && modelName.trim() && modelName !== modelId) {
+    return modelName.replace(/\s*\(free\)/i, '').replace(/\s*\(nitro\)/i, '').trim();
+  }
+  if (!modelId) return 'Unknown Model';
+  const parts = modelId.split('/');
+  const namePart = parts.length > 1 ? parts[1] : parts[0];
+  return namePart
+    .replace(/:free$/i, '')
+    .replace(/:thinking$/i, '')
+    .replace(/:extended$/i, '')
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, (l) => l.toUpperCase())
+    .trim();
+}
 
 export interface AssignedModel {
   personaId: 'skeptic' | 'visionary' | 'pragmatist' | 'synthesizer';
@@ -238,8 +254,16 @@ function selectGreedyUniqueOrgAndFamily(candidates: RawOpenRouterModel[]): RawOp
     const family = getFamily(m);
     const target = getCanonicalTarget(m);
 
-    // Filter pure auto router / generic router alias IDs unless explicitly concrete
-    if (m.id === 'openrouter/auto' || m.id === 'openrouter/free') {
+    // Filter pure auto router / generic router alias IDs or unverified test endpoints
+    const lowerId = m.id.toLowerCase();
+    if (
+      lowerId === 'openrouter/auto' ||
+      lowerId === 'openrouter/free' ||
+      lowerId.startsWith('~') ||
+      lowerId.includes('/~') ||
+      lowerId.includes(':batch') ||
+      lowerId.includes('auto-beta')
+    ) {
       continue;
     }
 
@@ -622,7 +646,7 @@ export function mapOpenRouterModels(rawModels: RawOpenRouterModel[]): MappedMode
   const assignRoles = (council: RawOpenRouterModel[], currentPresetName: string): AssignedModel[] => {
     const roles: ('skeptic' | 'visionary' | 'pragmatist' | 'synthesizer')[] = ['skeptic', 'visionary', 'pragmatist', 'synthesizer'];
     if (council.length === 0) {
-      return roles.map(r => ({ personaId: r, model: 'google/gemini-2.5-flash', name: 'Gemini 2.0 Flash' }));
+      return roles.map(r => ({ personaId: r, model: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash' }));
     }
 
   // Role capability scoring functions based on personality traits
@@ -640,9 +664,10 @@ export function mapOpenRouterModels(rawModels: RawOpenRouterModel[]): MappedMode
       else if (id.includes('claude-3.5-sonnet') || id.includes('claude-3-5-sonnet')) coding = 0.98;
       else if (id.includes('deepseek-r1') || id.includes('deepseek-coder')) coding = 0.96;
       else if (id.includes('qwen-2.5-coder') || id.includes('qwen-2.5-72b')) coding = 0.94;
-      else if (id.includes('o3-mini') || id.includes('o1')) coding = 0.92;
+      else if (id.includes('o3-mini') || id.includes('o1')) coding = 0.93;
       else if (id.includes('claude-3.5-haiku') || id.includes('claude-3-5-haiku')) coding = 0.90;
-      else if (id.includes('gpt-4o')) coding = 0.88;
+      else if (id.includes('gpt-4o')) coding = 0.90;
+      else if (id.includes('gemini-3.7-flash')) coding = 0.92;
       else if (id.includes('gemini-2.5-pro') || id.includes('gemini-2.0-pro')) coding = 0.90;
       else if (id.includes('gemini-2.5-flash') || id.includes('gemini-2.0-flash')) coding = 0.85;
       else if (id.includes('anthropic/')) coding = 0.92;
@@ -656,8 +681,9 @@ export function mapOpenRouterModels(rawModels: RawOpenRouterModel[]): MappedMode
       else if (id.includes('o3-mini') || id.includes('o1')) intel = 0.97;
       else if (id.includes('claude-3.5-sonnet') || id.includes('claude-3-5-sonnet')) intel = 0.96;
       else if (id.includes('gpt-4o')) intel = 0.95;
-      else if (id.includes('gemini-2.5-pro') || id.includes('gemini-2.0-pro')) intel = 0.95;
-      else if (id.includes('gemini-2.5-flash') || id.includes('gemini-2.0-flash')) intel = 0.90;
+      else if (id.includes('gemini-3.7-flash')) intel = 0.94;
+      else if (id.includes('gemini-2.5-pro') || id.includes('gemini-2.0-pro')) intel = 0.93;
+      else if (id.includes('gemini-2.5-flash') || id.includes('gemini-2.0-flash')) intel = 0.88;
       else if (id.includes('llama-3.3-70b')) intel = 0.89;
       else intel = 0.60;
     }
@@ -666,12 +692,12 @@ export function mapOpenRouterModels(rawModels: RawOpenRouterModel[]): MappedMode
       if (id.includes('claude-3.7-sonnet') || id.includes('claude-3.5-sonnet')) agentic = 0.98;
       else if (id.includes('gpt-4o') || id.includes('o3-mini')) agentic = 0.94;
       else if (id.includes('deepseek-r1')) agentic = 0.93;
-      else if (id.includes('gemini-2.5') || id.includes('gemini-2.0')) agentic = 0.90;
+      else if (id.includes('gemini-3.7') || id.includes('gemini-2.5')) agentic = 0.92;
       else agentic = 0.60;
     }
 
     if (design === undefined) {
-      if (id.includes('gemini-2.5-flash') || id.includes('gemini-2.0-pro') || id.includes('gemini-2.5-pro')) design = 0.98;
+      if (id.includes('gemini-3.7-flash') || id.includes('gemini-2.5-flash')) design = 0.98;
       else if (id.includes('claude-3.7-sonnet') || id.includes('claude-3.5-sonnet')) design = 0.96;
       else if (id.includes('gpt-4o')) design = 0.95;
       else design = 0.60;

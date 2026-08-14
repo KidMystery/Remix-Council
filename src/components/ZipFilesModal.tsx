@@ -123,8 +123,8 @@ export const ZipFilesModal: React.FC<ZipFilesModalProps> = ({ zipResult, isOpen,
                 {/* Code Header */}
                 <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-800 bg-slate-900/60">
                   <div className="flex items-center gap-2 min-w-0">
-                    <FileText size={15} className="text-cyan-400" />
-                    <span className="font-mono text-xs font-semibold text-slate-200 truncate">
+                    <FileText size={15} className="text-cyan-400 shrink-0" />
+                    <span className="font-mono text-xs font-semibold text-slate-200 whitespace-normal break-words">
                       {activeFile.path}
                     </span>
                   </div>

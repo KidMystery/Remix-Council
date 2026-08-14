@@ -106,7 +106,7 @@ export function SynthesizeConsensusPanel({
 
   return (
     <div
-      className={`rounded-2xl border border-amber-500/30 bg-gradient-to-br from-amber-950/20 via-slate-900/90 to-cyan-950/20 p-5 shadow-xl backdrop-blur-md space-y-4 ${className}`}
+      className={`rounded-2xl border border-amber-300 dark:border-amber-500/30 bg-white dark:bg-slate-900 p-5 shadow-lg space-y-4 text-slate-800 dark:text-slate-100 ${className}`}
     >
       {/* Panel Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-500/20 pb-3">

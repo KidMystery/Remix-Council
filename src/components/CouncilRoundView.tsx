@@ -42,8 +42,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
   onReRunRound, onEditPrompt, onResumeRound, incompleteStage, onSaveRating,
 }) {
   const activePersonas = personas.filter((p) => p.enabled !== false);
-  const hasStage2 = round.resolvedMode === 'deep_council' &&
-    Object.keys(round.deliberation?.stage2 || {}).length > 0 &&
+  const hasStage2 = Object.keys(round.deliberation?.stage2 || {}).length > 0 &&
     Object.values(round.deliberation?.stage2 || {}).some(
       (r: PersonaResponse | any) => r?.content || r?.status === 'streaming'
     );
@@ -122,11 +121,11 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
                 return (
                   <div key={persona.id} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full`}>
                     <div className="flex items-center justify-between gap-2 min-w-0">
-                      <div className="flex items-center gap-2 min-w-0 truncate">
+                      <div className="flex items-center gap-2 min-w-0">
                         <span className="text-xl shrink-0">{persona.avatar}</span>
-                        <div className="min-w-0 truncate">
-                          <h4 className="font-bold text-sm truncate" title={persona.name}>{persona.name}</h4>
-                          <p className="text-[10px] text-slate-500 truncate" title={persona.role}>{persona.role}</p>
+                        <div className="min-w-0">
+                          <h4 className="font-bold text-sm text-slate-800 dark:text-white whitespace-normal break-words" title={persona.name}>{persona.name}</h4>
+                          <p className="text-[10px] text-slate-500 dark:text-slate-400 whitespace-normal break-words" title={persona.role}>{persona.role}</p>
                         </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
@@ -181,11 +180,11 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
                   return (
                     <div key={`s2-${persona.id}`} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full`}>
                       <div className="flex items-center justify-between gap-2 min-w-0">
-                        <div className="flex items-center gap-2 min-w-0 truncate">
+                        <div className="flex items-center gap-2 min-w-0">
                           <span className="text-xl shrink-0">{persona.avatar}</span>
-                          <div className="min-w-0 truncate">
-                            <h4 className="font-bold text-sm truncate" title={persona.name}>{persona.name}</h4>
-                            <p className="text-[10px] text-purple-400 truncate" title="Peer Review">Peer Review</p>
+                          <div className="min-w-0">
+                            <h4 className="font-bold text-sm text-slate-800 dark:text-white whitespace-normal break-words" title={persona.name}>{persona.name}</h4>
+                            <p className="text-[10px] text-purple-400 whitespace-normal break-words" title="Peer Review">Peer Review</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">

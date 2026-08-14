@@ -126,16 +126,16 @@ export const FallbackAuditModal: React.FC<FallbackAuditModalProps> = ({
 
                 {/* Model Replacement Flow */}
                 <div className="flex flex-wrap items-center gap-2 p-2.5 rounded-lg bg-slate-900 border border-slate-800/60 font-mono text-xs">
-                  <div className="flex items-center gap-1.5 text-red-300 font-semibold truncate max-w-[260px]">
+                  <div className="flex items-center gap-1.5 text-red-300 font-semibold whitespace-normal break-words max-w-full">
                     <Cpu size={13} className="text-red-400 shrink-0" />
-                    <span className="truncate" title={log.failedModel}>{log.failedModel}</span>
+                    <span className="whitespace-normal break-words" title={log.failedModel}>{log.failedModel}</span>
                   </div>
 
                   <ArrowRight size={14} className="text-slate-500 shrink-0" />
 
-                  <div className="flex items-center gap-1.5 text-emerald-300 font-semibold truncate max-w-[280px]">
+                  <div className="flex items-center gap-1.5 text-emerald-300 font-semibold whitespace-normal break-words max-w-full">
                     <Layers size={13} className="text-emerald-400 shrink-0" />
-                    <span className="truncate" title={log.replacementModel || 'None'}>
+                    <span className="whitespace-normal break-words" title={log.replacementModel || 'None'}>
                       {log.replacementModelName || log.replacementModel || 'No candidate found'}
                     </span>
                   </div>

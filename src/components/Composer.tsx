@@ -109,7 +109,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800 max-w-full shadow-xs"
               >
                 <Paperclip size={12} className="text-cyan-500 shrink-0" />
-                <span className="font-mono text-[11px] truncate max-w-[160px] text-slate-700 dark:text-slate-300" title={file.name}>
+                <span className="font-mono text-[11px] whitespace-normal break-words max-w-full text-slate-700 dark:text-slate-300" title={file.name}>
                   {file.name}
                 </span>
                 <button

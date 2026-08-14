@@ -134,6 +134,7 @@ export function SettingsPanel({
   const refreshModelRecommendations = hookRecs.refreshModelRecommendations;
 
   const [localActivePresetId, setLocalActivePresetId] = useState<PresetId>('fast_and_free');
+  const activePresetId = propActivePresetId || localActivePresetId;
   const setActivePresetId = propSetActivePresetId || setLocalActivePresetId;
 
   const handleSavePersona = (savedPersona: Persona) => {
@@ -245,7 +246,10 @@ export function SettingsPanel({
             <SettingsPresetsTab
               personas={personas}
               synthesizer={synthesizer}
+              activePresetId={activePresetId}
+              onApplyPreset={handleApplyPreset}
               onApplyCouncilPreset={handleApplyCouncilPreset}
+              rawModelsCatalog={rawModelsCatalog}
             />
           )}
 

@@ -55,6 +55,7 @@ import {
   onAuthChange,
   syncUserSettings,
   loadUserSettings,
+  handleAuthRedirectResult,
 } from '../lib/persistence';
 import { User } from 'firebase/auth';
 import { useTheme } from '../hooks/useTheme';
@@ -201,10 +202,10 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       const defaultModels = savedModels
         ? JSON.parse(savedModels)
         : {
-            skeptic: 'google/gemini-2.5-flash',
+            skeptic: 'deepseek/deepseek-chat',
             visionary: 'anthropic/claude-3.5-haiku',
             pragmatist: 'openai/gpt-4o-mini',
-            synthesizer: 'google/gemini-2.5-flash',
+            synthesizer: 'google/gemini-3.7-flash',
           };
       return {
         apiKey: '',
@@ -223,12 +224,12 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       };
     } catch {
       return {
-        apiKey:  '',
+        apiKey: '',
         defaultModels: {
-          skeptic: 'google/gemini-2.5-flash',
+          skeptic: 'deepseek/deepseek-chat',
           visionary: 'anthropic/claude-3.5-haiku',
           pragmatist: 'openai/gpt-4o-mini',
-          synthesizer: 'google/gemini-2.5-flash',
+          synthesizer: 'google/gemini-3.7-flash',
         },
         temperature: 0.7,
         maxTokens: 4000,
@@ -251,6 +252,16 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
+    handleAuthRedirectResult()
+      .then((redirectUser) => {
+        if (redirectUser) {
+          setUser(redirectUser);
+        }
+      })
+      .catch((err) => {
+        console.warn('Redirect auth check completed:', err);
+      });
+
     const unsubscribe = onAuthChange((u) => {
       setUser(u);
       if (u) {
@@ -275,9 +286,13 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   }, []);
 
   const handleGoogleLogin = async () => {
-    const loggedUser = await loginWithGoogle();
-    if (loggedUser) {
-      setUser(loggedUser);
+    try {
+      const loggedUser = await loginWithGoogle();
+      if (loggedUser && loggedUser !== 'redirecting') {
+        setUser(loggedUser);
+      }
+    } catch (e: any) {
+      showToast(e?.message || 'Google sign-in failed', 'error');
     }
   };
 
@@ -696,6 +711,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       availableModels,
       rawModelsCatalog,
       isFreeOnly,
+      budget: activePresetId,
       autoSelectModels,
     });
 
@@ -753,6 +769,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           availableModels: freshAvailableModels,
           rawModelsCatalog: freshModels,
           isFreeOnly,
+          budget: activePresetId,
           autoSelectModels,
         }
       );
@@ -825,6 +842,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         availableModels,
         rawModelsCatalog,
         isFreeOnly,
+        budget: presetId,
         autoSelectModels: true,
       }
     );
@@ -842,7 +860,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
   useEffect(() => {
     const models: Record<string, string> = {
-      synthesizer: synthesizer.model || 'google/gemini-2.5-flash'
+      synthesizer: synthesizer.model || 'google/gemini-3.7-flash'
     };
     personas.forEach(p => {
       if (p.model) {
@@ -1020,7 +1038,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     let fullSynthesis = '';
 
     try {
-      const targetSynthModel = (synthesizer?.model || settings?.defaultModels?.['synthesizer'] || 'google/gemini-2.5-flash').trim() || 'google/gemini-2.5-flash';
+      const targetSynthModel = (synthesizer?.model || settings?.defaultModels?.['synthesizer'] || 'google/gemini-3.7-flash').trim() || 'google/gemini-3.7-flash';
       console.log(`[Synthesis Phase] Initiating stream with model: ${targetSynthModel}`);
       console.log(`[Synthesis Phase] Messages payload length: ${JSON.stringify(chairmanMessages).length} chars`);
       
@@ -1127,7 +1145,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
     // Stage 1 & 2 Persona Audits
     activePersonas.forEach((p) => {
-      const selectedModelId = p.model || settings?.defaultModels?.[p.id] || 'google/gemini-2.5-flash';
+      const selectedModelId = p.model || settings?.defaultModels?.[p.id] || 'google/gemini-3.7-flash';
       const s1Resp = stage1Outputs[p.id];
       const resolvedModelId = s1Resp?.model || selectedModelId;
       const authorOrg = getAuthorOrganization(resolvedModelId);
@@ -1156,7 +1174,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     });
 
     // Synthesizer Audit
-    const synthSelectedModel = synthesizer?.model || settings?.defaultModels?.['synthesizer'] || 'google/gemini-2.5-flash';
+    const synthSelectedModel = synthesizer?.model || settings?.defaultModels?.['synthesizer'] || 'google/gemini-3.7-flash';
     const synthResolvedModel = synthesisResponse.model || synthSelectedModel;
     const synthPromptTokens = estimateTokens(userQuery);
     const synthCompletionTokens = estimateTokens(synthesisResponse.content || '');
@@ -1314,7 +1332,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         const res1 = await streamPersona({
           personaId,
           apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[personaId] || 'google/gemini-2.5-flash',
+          model: persona.model || settings.defaultModels[personaId] || 'google/gemini-3.7-flash',
           messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens,
@@ -1345,7 +1363,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         });
 
         const finalGrounding1 = res1?.grounding || streamGroundingData;
-        const executedModel1 = res1?.finalModel || persona.model || settings?.defaultModels?.[personaId] || 'google/gemini-2.5-flash';
+        const executedModel1 = res1?.finalModel || persona.model || settings?.defaultModels?.[personaId] || 'google/gemini-3.7-flash';
 
         dispatch({
           type: 'FINISH_STAGE1_PERSONA',
@@ -1411,7 +1429,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         const res2 = await streamPersona({
           personaId,
           apiKey: settings.apiKey,
-          model: persona.model || settings?.defaultModels?.[personaId] || 'google/gemini-2.5-flash',
+          model: persona.model || settings?.defaultModels?.[personaId] || 'google/gemini-3.7-flash',
           messages: stage2Messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens,
@@ -1579,7 +1597,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             const res1 = await streamPersona({
               personaId: persona.id,
               apiKey: settings.apiKey,
-              model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.5-flash',
+              model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-3.7-flash',
               messages,
               temperature: settings.temperature,
               maxTokens: settings.maxTokens,
@@ -1684,7 +1702,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
               const res2 = await streamPersona({
                 personaId: persona.id,
                 apiKey: settings.apiKey,
-                model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.5-flash',
+                model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-3.7-flash',
                 messages: stage2Messages,
                 temperature: settings.temperature,
                 maxTokens: settings.maxTokens,
@@ -1947,8 +1965,31 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     if (abortController.signal.aborted) return;
 
     if (mode === 'quick_panel' || activePersonas.length === 1) {
-      setIsDeliberating(false);
-      abortControllerRef.current = null;
+      try {
+        const fullSynthText = await runSynthesisPhase(roundId, queryText, attachedImages, stage1Outputs, {}, abortController.signal);
+        const roundWallClockMs = Date.now() - roundStartMs;
+        await buildAndSaveAuditLog(
+          roundId,
+          queryText,
+          activePresetId,
+          mode,
+          activePersonas,
+          synthesizer,
+          stage1Outputs,
+          {},
+          { content: fullSynthText || '', model: synthesizer.model || settings.defaultModels['synthesizer'] },
+          roundWallClockMs,
+          fallbackLogs,
+          isProCompareEnabled,
+          settings.apiKey,
+          abortController.signal
+        );
+      } catch (err) {
+        console.error('Error executing quick panel synthesis:', err);
+      } finally {
+        setIsDeliberating(false);
+        abortControllerRef.current = null;
+      }
       return;
     }
 
@@ -2073,7 +2114,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           personaName: persona.name,
           roundId,
           apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-2.5-flash',
+          model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-3.7-flash',
           messages: stage2Messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens,
@@ -2227,7 +2268,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       ];
 
       let fullSynthesis = '';
-      const synthModel = synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-2.5-flash';
+      const synthModel = synthesizer.model || settings.defaultModels['synthesizer'] || 'google/gemini-3.7-flash';
 
       const res = await streamPersona({
         personaId: 'synthesizer',
@@ -2431,17 +2472,16 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
 
       {/* Main Content Feed */}
       <main id="main-content" tabIndex={-1} aria-label="Council Deliberation Feed" className="flex-1 max-w-5xl w-full mx-auto p-4 md:p-6 space-y-6 pb-32 focus:outline-hidden">
-        {!basicMode && (
-          <CouncilSummaryBar
-            presetId={activePresetId}
-            answerMode={settings.executionMode || 'auto'}
-            taskDomain={activeAppliedDomain || undefined}
-            personas={personas}
-            synthesizer={synthesizer}
-            rawModels={rawModelsCatalog}
-            updatedAt={recommendationMetadata?.updatedAt}
-          />
-        )}
+        <CouncilSummaryBar
+          presetId={activePresetId}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          answerMode={settings.executionMode || 'auto'}
+          taskDomain={activeAppliedDomain || undefined}
+          personas={personas}
+          synthesizer={synthesizer}
+          rawModels={rawModelsCatalog}
+          updatedAt={recommendationMetadata?.updatedAt}
+        />
         {(() => {
           if (basicMode) return null;
           const activePersonas = personas.filter((p) => p.enabled !== false);

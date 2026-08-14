@@ -47,11 +47,11 @@ export const GroundingSourcesCard: React.FC<GroundingSourcesCardProps> = ({ grou
                 href={source.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700/60 text-[11px] font-medium text-emerald-900 dark:text-emerald-200 hover:text-emerald-700 dark:hover:text-emerald-100 hover:border-emerald-400 dark:hover:border-emerald-500 transition-colors truncate max-w-[260px] shadow-xs"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700/60 text-[11px] font-medium text-emerald-900 dark:text-emerald-200 hover:text-emerald-700 dark:hover:text-emerald-100 hover:border-emerald-400 dark:hover:border-emerald-500 transition-colors whitespace-normal break-words max-w-full shadow-xs"
                 title={source.title || source.url}
               >
                 <ExternalLink size={10} className="shrink-0 text-emerald-600 dark:text-emerald-400" />
-                <span className="truncate">{source.title || (source.url ? new URL(source.url).hostname : 'Source Link')}</span>
+                <span className="whitespace-normal break-words">{source.title || (source.url ? new URL(source.url).hostname : 'Source Link')}</span>
               </a>
             ))}
           </div>

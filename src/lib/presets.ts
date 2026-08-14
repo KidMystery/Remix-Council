@@ -58,10 +58,10 @@ export const MODEL_PRESETS: ModelPreset[] = [
     badge: '⚡ $0 Speed & Efficiency',
     description: '$0 models optimized for speed',
     assignments: {
-      skeptic: { model: 'nvidia/nemotron-3.5-content-safety:free', name: 'Nemotron 3.5 Content Safety (free)' },
-      visionary: { model: 'poolside/laguna-xs-2.1:free', name: 'Laguna XS 2.1 (free)' },
-      pragmatist: { model: 'inclusionai/ling-3.0-tiny:free', name: 'Ling 3.0 Tiny (free)' },
-      synthesizer: { model: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B (free)' },
+      skeptic: { model: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1 (free)' },
+      visionary: { model: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash (free)' },
+      pragmatist: { model: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B Instruct (free)' },
+      synthesizer: { model: 'nvidia/nemotron-3.5-content-safety:free', name: 'Nemotron 3.5 Content Safety (free)' },
     },
   },
   {
@@ -71,9 +71,9 @@ export const MODEL_PRESETS: ModelPreset[] = [
     description: 'Fast paid models at a low cost',
     assignments: {
       skeptic: { model: 'deepseek/deepseek-chat', name: 'DeepSeek V3' },
-      visionary: { model: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B Instruct' },
-      pragmatist: { model: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct' },
-      synthesizer: { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+      visionary: { model: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
+      pragmatist: { model: 'openai/gpt-4o-mini', name: 'GPT-4o Mini' },
+      synthesizer: { model: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct' },
     },
   },
   {
@@ -85,7 +85,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
       skeptic: { model: 'deepseek/deepseek-r1', name: 'DeepSeek R1' },
       visionary: { model: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku' },
       pragmatist: { model: 'openai/gpt-4o-mini', name: 'GPT-4o Mini' },
-      synthesizer: { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+      synthesizer: { model: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
     },
   },
   {
@@ -97,7 +97,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
       skeptic: { model: 'anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet' },
       visionary: { model: 'openai/gpt-4o', name: 'GPT-4o' },
       pragmatist: { model: 'deepseek/deepseek-r1', name: 'DeepSeek R1' },
-      synthesizer: { model: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+      synthesizer: { model: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
     },
   },
 ];
@@ -272,8 +272,9 @@ export function getDynamicPresetSummary(
   rawModels?: RawOpenRouterModel[]
 ): string {
   const result = applyPreset(presetId, currentPersonas, currentSynthesizer, rawModels);
-  const activeNames = result.updatedPersonas
-    .filter(p => p.enabled !== false)
-    .map(p => cleanModelName(p.model));
+  const activeNames = [
+    ...result.updatedPersonas.filter(p => p.enabled !== false).map(p => cleanModelName(p.model)),
+    cleanModelName(result.updatedSynthesizer.model),
+  ];
   return activeNames.join(' • ');
 }

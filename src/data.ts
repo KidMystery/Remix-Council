@@ -69,7 +69,7 @@ export const defaultSynthesizer: Persona = {
   role: 'Consensus Builder',
   avatar: '⚖️',
   systemPrompt: CHAIRMAN_PROMPT,
-  model: 'google/gemini-2.5-flash',
+  model: 'google/gemini-3.7-flash',
   color: 'border-amber-300 dark:border-amber-500/40 bg-amber-50/80 dark:bg-amber-950/50 text-amber-900 dark:text-amber-200',
 };
 

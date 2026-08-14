@@ -1,6 +1,16 @@
 import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
 import { getFirestore, doc, setDoc, getDoc, collection, query, getDocs, deleteDoc, Firestore } from 'firebase/firestore';
-import { getAuth, signInWithPopup, GoogleAuthProvider, User, Auth, onAuthStateChanged, signOut } from 'firebase/auth';
+import {
+  getAuth,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  GoogleAuthProvider,
+  User,
+  Auth,
+  onAuthStateChanged,
+  signOut,
+} from 'firebase/auth';
 import config from '../../firebase-applet-config.json';
 import { Session, Settings, Persona } from '../types';
 
@@ -176,18 +186,54 @@ export async function loadUserSettings(userId: string): Promise<UserCloudData | 
   }
 }
 
-export async function loginWithGoogle(): Promise<User | null> {
+export async function loginWithGoogle(): Promise<User | 'redirecting' | null> {
   if (!auth) initPersistence();
   if (!auth) {
-    console.warn("Firebase Auth not initialized.");
-    return null;
+    throw new Error('Firebase Auth is not initialized. Check Firebase config.');
   }
+
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+
   try {
-    const provider = new GoogleAuthProvider();
     const result = await signInWithPopup(auth, provider);
-    return result.user;
+    return result.user || null;
   } catch (error: any) {
-    console.error("Google login failed:", error);
+    const code = error?.code || '';
+
+    if (code === 'auth/unauthorized-domain') {
+      throw new Error(
+        'Unauthorized domain. Add your Railway URL to Firebase Authentication → Settings → Authorized domains.'
+      );
+    }
+
+    if (
+      code === 'auth/popup-blocked' ||
+      code === 'auth/operation-not-supported-in-this-environment' ||
+      code === 'auth/web-storage-unsupported' ||
+      code === 'auth/cancelled-popup-request'
+    ) {
+      await signInWithRedirect(auth, provider);
+      return 'redirecting';
+    }
+
+    if (code === 'auth/popup-closed-by-user') {
+      throw new Error('Google sign-in popup closed before login completed.');
+    }
+
+    throw new Error(error?.message || 'Google sign-in failed.');
+  }
+}
+
+export async function handleAuthRedirectResult(): Promise<User | null> {
+  if (!auth) initPersistence();
+  if (!auth) return null;
+
+  try {
+    const result = await getRedirectResult(auth);
+    return result?.user || null;
+  } catch (error: any) {
+    console.error('Failed to complete Google redirect sign-in:', error);
     return null;
   }
 }

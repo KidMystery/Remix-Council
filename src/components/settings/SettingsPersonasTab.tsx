@@ -1,11 +1,6 @@
 import React from 'react';
 import {
-  Zap,
-  Coins,
-  Scale,
-  Award,
   AlertTriangle,
-  Compass,
   UserPlus,
   RefreshCw,
   Edit3,
@@ -13,16 +8,12 @@ import {
 } from 'lucide-react';
 import { Persona } from '../../types';
 import {
-  MODEL_PRESETS,
-  getDynamicPresetSummary,
   checkDuplicateModels,
   checkDuplicateOrganizations,
   PresetId,
 } from '../../lib/presets';
 import { CouncilPreset } from '../../lib/councilPresets';
-import { CouncilSummaryBar } from '../CouncilSummaryBar';
 import { ModelDetailsCard } from '../ModelDetailsCard';
-import { CouncilPreloadSelector } from '../CouncilPreloadSelector';
 
 interface SettingsPersonasTabProps {
   personas: Persona[];
@@ -136,124 +127,6 @@ export const SettingsPersonasTab: React.FC<SettingsPersonasTabProps> = ({
         </div>
       )}
 
-      {/* Auto-Selection Presets */}
-      <section className="space-y-3 bg-slate-50 dark:bg-slate-800/40 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800">
-        <div className="flex items-center justify-between">
-          <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-            Smart Persona Auto-Selection Presets
-          </h3>
-          <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold uppercase tracking-wider">
-            Zero Duplicates guaranteed
-          </span>
-        </div>
-        <p className="text-[11px] text-slate-500 dark:text-slate-400">
-          Quickly fill all 4 active council slots (Skeptic, Visionary, Pragmatist, and Synthesizer) with distinct models.
-        </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
-          <button
-            type="button"
-            onClick={() => onApplyPreset('fast_and_free')}
-            className="p-3 border border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-900 hover:border-emerald-500 dark:hover:border-emerald-500 rounded-lg text-left transition-all hover:shadow-sm group cursor-pointer"
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-emerald-600 dark:group-hover:text-emerald-400 flex items-center gap-1.5">
-                <Zap size={14} className="text-emerald-500" />
-                Fast & Free
-              </span>
-              <span className="text-[9px] font-mono px-1.5 py-0.5 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded font-semibold">
-                $0 Cost
-              </span>
-            </div>
-            <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1.5 leading-snug">
-              {getDynamicPresetSummary('fast_and_free', personas, synthesizer, rawModelsCatalog)}
-            </p>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onApplyPreset('fast_and_cheap')}
-            className="p-3 border border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-900 hover:border-amber-500 dark:hover:border-amber-500 rounded-lg text-left transition-all hover:shadow-sm group cursor-pointer"
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-amber-600 dark:group-hover:text-amber-400 flex items-center gap-1.5">
-                <Coins size={14} className="text-amber-500" />
-                Fast & Cheap
-              </span>
-              <span className="text-[9px] font-mono px-1.5 py-0.5 bg-amber-500/10 text-amber-600 dark:text-amber-400 rounded font-semibold">
-                Low Cost
-              </span>
-            </div>
-            <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1.5 leading-snug">
-              {getDynamicPresetSummary('fast_and_cheap', personas, synthesizer, rawModelsCatalog)}
-            </p>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onApplyPreset('best_value')}
-            className="p-3 border border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-900 hover:border-blue-500 dark:hover:border-blue-500 rounded-lg text-left transition-all hover:shadow-sm group cursor-pointer"
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 flex items-center gap-1.5">
-                <Scale size={14} className="text-blue-500" />
-                Best Value
-              </span>
-              <span className="text-[9px] font-mono px-1.5 py-0.5 bg-blue-500/10 text-blue-600 dark:text-blue-400 rounded font-semibold">
-                Balanced
-              </span>
-            </div>
-            <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1.5 leading-snug">
-              {getDynamicPresetSummary('best_value', personas, synthesizer, rawModelsCatalog)}
-            </p>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onApplyPreset('highest_quality')}
-            className="p-3 border border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-900 hover:border-indigo-500 dark:hover:border-indigo-500 rounded-lg text-left transition-all hover:shadow-sm group cursor-pointer"
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-indigo-600 dark:group-hover:text-indigo-400 flex items-center gap-1.5">
-                <Award size={14} className="text-indigo-500" />
-                Highest Quality
-              </span>
-              <span className="text-[9px] font-mono px-1.5 py-0.5 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 rounded font-semibold">
-                Top Rank
-              </span>
-            </div>
-            <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1.5 leading-snug">
-              {getDynamicPresetSummary('highest_quality', personas, synthesizer, rawModelsCatalog)}
-            </p>
-          </button>
-        </div>
-      </section>
-
-      {/* Domain Council Preloads */}
-      <section className="space-y-3 bg-slate-50/70 dark:bg-slate-800/30 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800">
-        <div className="flex items-center justify-between">
-          <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-            <Compass size={14} className="text-indigo-500" />
-            Domain Councils & Preloaded Advisory Boards
-          </h3>
-        </div>
-        <p className="text-[11px] text-slate-500 dark:text-slate-400">
-          Preselect specialized councils (Finance, Life, Tech, Product) with curated names, directives, and models.
-        </p>
-        <CouncilPreloadSelector
-          onApplyCouncil={onApplyCouncilPreset}
-          currentPersonas={personas}
-          currentSynthesizer={synthesizer}
-        />
-      </section>
-
-      {/* Council Summary Bar */}
-      <CouncilSummaryBar
-        personas={personas}
-        synthesizer={synthesizer}
-        rawModels={rawModelsCatalog}
-        updatedAt={metadata?.updatedAt}
-      />
-
       {/* Persona Cards */}
       <section className="space-y-4">
         <div className="flex items-start justify-between gap-3">
@@ -320,9 +193,9 @@ export const SettingsPersonasTab: React.FC<SettingsPersonasTabProps> = ({
               }`}
             >
               <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2 truncate pr-2" title={persona.name}>
+                <div className="flex items-center space-x-2 pr-2 min-w-0" title={persona.name}>
                   <span className="text-base shrink-0">{persona.avatar}</span>
-                  <span className="text-sm font-bold text-slate-800 dark:text-white truncate">{persona.name}</span>
+                  <span className="text-sm font-bold text-slate-800 dark:text-white whitespace-normal break-words">{persona.name}</span>
                   <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wider border shrink-0 ${persona.color}`}>
                     {persona.role}
                   </span>

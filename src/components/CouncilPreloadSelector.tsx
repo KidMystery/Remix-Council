@@ -322,7 +322,7 @@ export function CouncilPreloadSelector({
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">{preset.name}</h4>
+                      <h4 className="text-xs font-bold text-slate-900 dark:text-white whitespace-normal break-words">{preset.name}</h4>
                       <span className={`text-[9px] px-2 py-0.5 font-semibold rounded-full border ${
                         preset.isCustom
                           ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-700 dark:text-indigo-300 font-bold'
@@ -331,7 +331,7 @@ export function CouncilPreloadSelector({
                         {preset.badge}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug whitespace-normal break-words">
                       {preset.description}
                     </p>
                   </div>
@@ -387,27 +387,27 @@ export function CouncilPreloadSelector({
                   {preset.personas.map((p) => (
                     <div
                       key={p.id}
-                      className="p-1.5 bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 rounded-lg flex items-center justify-between text-[10px]"
+                      className="p-1.5 bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 rounded-lg flex items-center justify-between text-[10px] gap-1"
                     >
-                      <div className="flex items-center gap-1.5 truncate pr-1" title={p.name}>
-                        <span>{p.avatar}</span>
-                        <span className="font-bold text-slate-800 dark:text-slate-200 truncate">{p.name}</span>
+                      <div className="flex items-center gap-1.5 min-w-0" title={p.name}>
+                        <span className="shrink-0">{p.avatar}</span>
+                        <span className="font-bold text-slate-800 dark:text-slate-200 whitespace-normal break-words">{p.name}</span>
                       </div>
-                      <span className="font-mono text-[9px] text-slate-500 dark:text-slate-400 shrink-0 bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 max-w-[100px] truncate" title={p.model}>
+                      <span className="font-mono text-[9px] text-slate-500 dark:text-slate-400 shrink-0 bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 whitespace-normal break-words max-w-[120px]" title={p.model}>
                         {p.model?.split('/')[1] || p.model}
                       </span>
                     </div>
                   ))}
 
                   {/* Chair */}
-                  <div className="p-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg flex items-center justify-between text-[10px]">
-                    <div className="flex items-center gap-1.5 truncate pr-1" title={preset.synthesizer.name}>
-                      <span>{preset.synthesizer.avatar}</span>
-                      <span className="font-bold text-amber-900 dark:text-amber-200 truncate">
+                  <div className="p-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg flex items-center justify-between text-[10px] gap-1">
+                    <div className="flex items-center gap-1.5 min-w-0" title={preset.synthesizer.name}>
+                      <span className="shrink-0">{preset.synthesizer.avatar}</span>
+                      <span className="font-bold text-amber-900 dark:text-amber-200 whitespace-normal break-words">
                         {preset.synthesizer.name}
                       </span>
                     </div>
-                    <span className="font-mono text-[9px] text-amber-700 dark:text-amber-400 shrink-0 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30 max-w-[100px] truncate" title={preset.synthesizer.model}>
+                    <span className="font-mono text-[9px] text-amber-700 dark:text-amber-400 shrink-0 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30 whitespace-normal break-words max-w-[120px]" title={preset.synthesizer.model}>
                       {preset.synthesizer.model?.split('/')[1] || preset.synthesizer.model}
                     </span>
                   </div>

@@ -23,11 +23,12 @@ function parseOpenRouterError(status: number, errorText: string) {
 }
 
 export function normalizeModelId(model: string | undefined | null): string {
-  if (!model || typeof model !== 'string') return 'google/gemini-2.5-flash';
+  if (!model || typeof model !== 'string') return 'google/gemini-3.7-flash';
   let trimmed = model.trim();
-  if (!trimmed) return 'google/gemini-2.5-flash';
+  if (!trimmed) return 'google/gemini-3.7-flash';
 
   const lower = trimmed.toLowerCase();
+  if (lower === 'gemini 3.7 flash' || lower.includes('gemini-3.7-flash') || lower.includes('gemini 3.7')) return 'google/gemini-3.7-flash';
   if (lower === 'gemini 2.5 flash' || lower.includes('gemini-2.5-flash')) return 'google/gemini-2.5-flash';
   if (lower === 'gemini 2.0 flash' || lower.includes('gemini-2.0-flash')) return 'google/gemini-2.0-flash-001';
   if (lower === 'gemini 2.5 pro' || lower.includes('gemini-2.5-pro')) return 'google/gemini-2.5-pro';
@@ -36,12 +37,10 @@ export function normalizeModelId(model: string | undefined | null): string {
   if (lower === 'claude 3.5 haiku' || lower.includes('claude-3.5-haiku')) return 'anthropic/claude-3.5-haiku';
   if (lower === 'gpt-4o' || lower === 'gpt 4o') return 'openai/gpt-4o';
   if (lower === 'gpt-4o mini' || lower === 'gpt 4o mini') return 'openai/gpt-4o-mini';
+  if (lower === 'o3-mini' || lower.includes('o3-mini')) return 'openai/o3-mini';
   if (lower === 'deepseek r1' || lower.includes('deepseek-r1')) return 'deepseek/deepseek-r1';
   if (lower === 'deepseek v3' || lower.includes('deepseek-chat')) return 'deepseek/deepseek-chat';
   if (lower.includes('nemotron') && lower.includes('free')) return 'nvidia/nemotron-3.5-content-safety:free';
-  if (lower.includes('laguna') && lower.includes('free')) return 'poolside/laguna-xs-2.1:free';
-  if (lower.includes('ling') && lower.includes('free')) return 'inclusionai/ling-3.0-tiny:free';
-  if (lower.includes('gemma') && lower.includes('free')) return 'google/gemma-4-31b-it:free';
 
   if (trimmed.includes('(free)') && !trimmed.endsWith(':free')) {
     trimmed = trimmed.replace(/\s*\(free\)/i, ':free');
@@ -50,7 +49,7 @@ export function normalizeModelId(model: string | undefined | null): string {
   }
 
   trimmed = trimmed.replace(/^["']|["']$/g, '').trim();
-  return trimmed || 'google/gemini-2.5-flash';
+  return trimmed || 'google/gemini-3.7-flash';
 }
 
 export async function* streamOpenRouter(

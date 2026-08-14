@@ -1,9 +1,10 @@
 import { Persona } from '../types';
 import { FileAttachment } from './modeClassifier';
-import { RawOpenRouterModel, cleanModelName } from './presets';
+import { RawOpenRouterModel, cleanModelName, PresetId } from './presets';
 import { buildRankMap, computeModelScore, estimatedCost, isFreeModel, getAuthorOrganization, getFamily } from './modelMapper';
 
 export type TaskDomain = 'code' | 'math' | 'finance' | 'creative' | 'general';
+export type BudgetMode = 'free' | 'fast_and_cheap' | 'best_value' | 'highest_quality' | PresetId;
 
 export interface DomainModelMap {
   skeptic: string;
@@ -18,26 +19,26 @@ export const DOMAIN_MODEL_MAPPINGS: Record<TaskDomain, DomainModelMap> = {
     skeptic: 'deepseek/deepseek-r1',
     visionary: 'anthropic/claude-3.7-sonnet',
     pragmatist: 'qwen/qwen-2.5-72b-instruct',
-    synthesizer: 'google/gemini-2.5-pro',
-    defaultFallback: 'anthropic/claude-3.5-sonnet',
+    synthesizer: 'google/gemini-3.7-flash',
+    defaultFallback: 'anthropic/claude-3.7-sonnet',
   },
   math: {
     skeptic: 'deepseek/deepseek-r1',
     visionary: 'openai/o3-mini',
-    pragmatist: 'google/gemini-2.5-flash',
-    synthesizer: 'google/gemini-2.5-pro',
+    pragmatist: 'google/gemini-3.7-flash',
+    synthesizer: 'anthropic/claude-3.7-sonnet',
     defaultFallback: 'deepseek/deepseek-r1',
   },
   finance: {
     skeptic: 'deepseek/deepseek-r1',
     visionary: 'openai/gpt-4o',
     pragmatist: 'anthropic/claude-3.5-haiku',
-    synthesizer: 'google/gemini-2.5-flash',
-    defaultFallback: 'google/gemini-2.5-flash',
+    synthesizer: 'google/gemini-3.7-flash',
+    defaultFallback: 'google/gemini-3.7-flash',
   },
   creative: {
     skeptic: 'anthropic/claude-3.5-haiku',
-    visionary: 'google/gemini-2.5-flash',
+    visionary: 'google/gemini-3.7-flash',
     pragmatist: 'meta-llama/llama-3.3-70b-instruct',
     synthesizer: 'anthropic/claude-3.7-sonnet',
     defaultFallback: 'openai/gpt-4o',
@@ -46,8 +47,8 @@ export const DOMAIN_MODEL_MAPPINGS: Record<TaskDomain, DomainModelMap> = {
     skeptic: 'deepseek/deepseek-chat',
     visionary: 'openai/gpt-4o-mini',
     pragmatist: 'meta-llama/llama-3.3-70b-instruct',
-    synthesizer: 'google/gemini-2.5-flash',
-    defaultFallback: 'google/gemini-2.5-flash',
+    synthesizer: 'google/gemini-3.7-flash',
+    defaultFallback: 'google/gemini-3.7-flash',
   },
 };
 
@@ -320,6 +321,7 @@ export interface SmartSelectionOptions {
   availableModels?: { id: string; name: string }[];
   rawModelsCatalog?: RawOpenRouterModel[];
   isFreeOnly?: boolean;
+  budget?: string;
   autoSelectModels?: boolean;
 }
 
@@ -328,7 +330,7 @@ export interface SmartSelectionResult extends RouteCouncilModelsResult {
 }
 
 /**
- * Free tier fallback ordered candidates per role
+ * Free tier fallback ordered candidates per role (100% $0 cost)
  */
 const FREE_ROLE_CANDIDATES: Record<'skeptic' | 'visionary' | 'pragmatist' | 'synthesizer', string[]> = {
   skeptic: [
@@ -359,33 +361,122 @@ const FREE_ROLE_CANDIDATES: Record<'skeptic' | 'visionary' | 'pragmatist' | 'syn
 };
 
 /**
+ * Fast & Cheap fallback ordered candidates per role (low cost <= $0.005 / round)
+ */
+const CHEAP_ROLE_CANDIDATES: Record<'skeptic' | 'visionary' | 'pragmatist' | 'synthesizer', string[]> = {
+  skeptic: [
+    'deepseek/deepseek-chat',
+    'google/gemini-3.7-flash',
+    'meta-llama/llama-3.3-70b-instruct',
+    'qwen/qwen-2.5-72b-instruct',
+  ],
+  visionary: [
+    'google/gemini-3.7-flash',
+    'deepseek/deepseek-chat',
+    'openai/gpt-4o-mini',
+    'meta-llama/llama-3.3-70b-instruct',
+  ],
+  pragmatist: [
+    'openai/gpt-4o-mini',
+    'meta-llama/llama-3.3-70b-instruct',
+    'deepseek/deepseek-chat',
+    'google/gemini-3.7-flash',
+  ],
+  synthesizer: [
+    'google/gemini-3.7-flash',
+    'meta-llama/llama-3.3-70b-instruct',
+    'deepseek/deepseek-chat',
+    'openai/gpt-4o-mini',
+  ],
+};
+
+/**
+ * Best Value fallback ordered candidates per role (optimal quality-to-cost ratio)
+ */
+const BEST_VALUE_ROLE_CANDIDATES: Record<'skeptic' | 'visionary' | 'pragmatist' | 'synthesizer', string[]> = {
+  skeptic: [
+    'deepseek/deepseek-r1',
+    'anthropic/claude-3.5-haiku',
+    'openai/gpt-4o-mini',
+    'google/gemini-3.7-flash',
+  ],
+  visionary: [
+    'anthropic/claude-3.5-haiku',
+    'google/gemini-3.7-flash',
+    'deepseek/deepseek-r1',
+    'openai/gpt-4o-mini',
+  ],
+  pragmatist: [
+    'openai/gpt-4o-mini',
+    'google/gemini-3.7-flash',
+    'qwen/qwen-2.5-72b-instruct',
+    'anthropic/claude-3.5-haiku',
+  ],
+  synthesizer: [
+    'google/gemini-3.7-flash',
+    'anthropic/claude-3.5-haiku',
+    'openai/gpt-4o-mini',
+    'deepseek/deepseek-r1',
+  ],
+};
+
+/**
+ * Highest Quality fallback ordered candidates per role (top frontier capability)
+ */
+const HIGHEST_QUALITY_ROLE_CANDIDATES: Record<'skeptic' | 'visionary' | 'pragmatist' | 'synthesizer', string[]> = {
+  skeptic: [
+    'anthropic/claude-3.7-sonnet',
+    'deepseek/deepseek-r1',
+    'openai/gpt-4o',
+    'openai/o3-mini',
+  ],
+  visionary: [
+    'openai/gpt-4o',
+    'deepseek/deepseek-r1',
+    'anthropic/claude-3.7-sonnet',
+    'google/gemini-3.7-flash',
+  ],
+  pragmatist: [
+    'deepseek/deepseek-r1',
+    'openai/gpt-4o',
+    'qwen/qwen-2.5-72b-instruct',
+    'meta-llama/llama-3.3-70b-instruct',
+  ],
+  synthesizer: [
+    'google/gemini-3.7-flash',
+    'anthropic/claude-3.7-sonnet',
+    'openai/gpt-4o',
+    'deepseek/deepseek-r1',
+  ],
+};
+
+/**
  * Standard ordered fallback candidates per role
  */
 const STANDARD_ROLE_CANDIDATES: Record<'skeptic' | 'visionary' | 'pragmatist' | 'synthesizer', string[]> = {
   skeptic: [
     'anthropic/claude-3.7-sonnet',
-    'anthropic/claude-3.5-sonnet',
     'deepseek/deepseek-r1',
+    'anthropic/claude-3.5-sonnet',
     'qwen/qwen-2.5-72b-instruct',
     'anthropic/claude-3.5-haiku',
   ],
   visionary: [
     'deepseek/deepseek-r1',
-    'google/gemini-2.5-flash',
-    'openai/o3-mini',
+    'google/gemini-3.7-flash',
     'openai/gpt-4o',
+    'openai/o3-mini',
     'anthropic/claude-3.7-sonnet',
   ],
   pragmatist: [
-    'qwen/qwen-2.5-72b-instruct',
     'meta-llama/llama-3.3-70b-instruct',
-    'anthropic/claude-3.5-haiku',
-    'google/gemini-2.5-flash',
+    'qwen/qwen-2.5-72b-instruct',
+    'openai/gpt-4o-mini',
+    'google/gemini-3.7-flash',
   ],
   synthesizer: [
+    'google/gemini-3.7-flash',
     'anthropic/claude-3.7-sonnet',
-    'google/gemini-2.5-flash',
-    'google/gemini-2.5-pro',
     'openai/gpt-4o',
     'deepseek/deepseek-r1',
   ],
@@ -515,6 +606,7 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
   const isFreeBudget = budgetMode === 'free' || budgetMode === 'fastAndFree' || budgetMode === 'fast_and_free' || budgetMode === 'fastest_cheapest';
   const isCheapBudget = budgetMode === 'fastAndCheap' || budgetMode === 'fast_and_cheap';
   const isBestValueBudget = budgetMode === 'bestValue' || budgetMode === 'best_value';
+  const isHighestQualityBudget = budgetMode === 'highestQuality' || budgetMode === 'highest_quality';
 
   allEntities.forEach(({ persona, isSynth }) => {
     const personaId = persona.id;
@@ -561,7 +653,7 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
       // Build candidate list from catalog
       let eligibleCatalog = [...rawCatalog];
 
-      // Filter by Budget constraint
+      // Filter by Preset / Budget constraint
       if (isFreeBudget) {
         eligibleCatalog = eligibleCatalog.filter((m) => {
           if (typeof (m as any).pricing !== 'undefined') {
@@ -579,6 +671,29 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
         eligibleCatalog = eligibleCatalog.filter((m) => {
           const c = estimatedCost(m as RawOpenRouterModel);
           return c > 0 && c <= 0.02;
+        });
+      } else if (isHighestQualityBudget && fullCatalog.length > 0) {
+        // Highest Quality: Prioritize top-tier frontier and benchmark models
+        eligibleCatalog = eligibleCatalog.filter((m) => {
+          const id = m.id.toLowerCase();
+          const cost = estimatedCost(m as RawOpenRouterModel);
+          const isKnownFrontier =
+            id.includes('claude-3.7') ||
+            id.includes('claude-3-7') ||
+            id.includes('claude-3.5-sonnet') ||
+            id.includes('claude-3-5-sonnet') ||
+            id.includes('gpt-4o') ||
+            id.includes('o3-mini') ||
+            id.includes('o1') ||
+            id.includes('deepseek-r1') ||
+            id.includes('gemini-2.5-pro') ||
+            id.includes('gemini-2.0-pro') ||
+            id.includes('qwen-2.5-72b');
+          const isHighBenchmark =
+            (m.benchmarks?.intelligence ?? 0) >= 0.85 ||
+            (m.benchmarks?.coding ?? 0) >= 0.85 ||
+            (m.benchmarks?.arena_elo ?? 0) >= 1250;
+          return isKnownFrontier || isHighBenchmark || cost >= 0.003;
         });
       }
 
@@ -613,9 +728,9 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
 
         selectedModel = candId;
         selectedScore = score;
-        selectedSource = isFreeBudget || isCheapBudget || isBestValueBudget ? 'preset_budget_filter' : 'auto_domain_routing';
-        selectedReason = `Step ${selectedSource === 'preset_budget_filter' ? '3 (Preset/Budget Filter)' : '2 (Auto Domain Routing)'}: Top domain-weighted candidate for '${normalizedDomain}' domain (${score !== undefined ? `Score: ${score.toFixed(3)}` : 'Catalog matched'}).`;
-        evaluations.push({ candidateId: candId, score, passedFilter: true, reason: 'Passed strict uniqueness & domain budget filter.' });
+        selectedSource = isFreeBudget || isCheapBudget || isBestValueBudget || isHighestQualityBudget ? 'preset_budget_filter' : 'auto_domain_routing';
+        selectedReason = `Step ${selectedSource === 'preset_budget_filter' ? '3 (Preset/Budget Filter)' : '2 (Auto Domain Routing)'}: Top candidate for '${budgetMode || normalizedDomain}' (${score !== undefined ? `Score: ${score.toFixed(3)}` : 'Catalog matched'}).`;
+        evaluations.push({ candidateId: candId, score, passedFilter: true, reason: 'Passed strict uniqueness & preset criteria filter.' });
         break;
       }
 
@@ -661,11 +776,19 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
     if (!selectedModel) {
       const domainMap = DOMAIN_MODEL_MAPPINGS[normalizedDomain] || DOMAIN_MODEL_MAPPINGS.general;
       const primaryTarget = domainMap[roleKey] || domainMap.defaultFallback;
-      const roleCandidates = isFreeBudget ? FREE_ROLE_CANDIDATES[roleKey] : STANDARD_ROLE_CANDIDATES[roleKey];
+      const roleCandidates = isFreeBudget
+        ? FREE_ROLE_CANDIDATES[roleKey]
+        : isCheapBudget
+        ? CHEAP_ROLE_CANDIDATES[roleKey]
+        : isBestValueBudget
+        ? BEST_VALUE_ROLE_CANDIDATES[roleKey]
+        : isHighestQualityBudget
+        ? HIGHEST_QUALITY_ROLE_CANDIDATES[roleKey]
+        : STANDARD_ROLE_CANDIDATES[roleKey];
 
       const fallbackPool = [
         primaryTarget,
-        ...roleCandidates,
+        ...(roleCandidates || []),
         domainMap.defaultFallback,
         'google/gemini-2.5-flash',
       ];
@@ -841,6 +964,7 @@ export function applySmartModelSelection(
   let rawModelsCatalog: RawOpenRouterModel[] | undefined = undefined;
   let isFreeOnly = false;
   let autoSelectEnabled = true;
+  let budget: string | undefined = undefined;
 
   if (Array.isArray(options)) {
     availableModels = options;
@@ -848,6 +972,7 @@ export function applySmartModelSelection(
     availableModels = options.availableModels || [];
     rawModelsCatalog = options.rawModelsCatalog;
     isFreeOnly = !!options.isFreeOnly;
+    budget = options.budget;
     if (options.autoSelectModels !== undefined) {
       autoSelectEnabled = options.autoSelectModels;
     }
@@ -859,7 +984,7 @@ export function applySmartModelSelection(
     synthesizer,
     catalog: rawModelsCatalog || availableModels,
     rawModelsCatalog,
-    budget: isFreeOnly ? 'free' : undefined,
+    budget: budget || (isFreeOnly ? 'free' : undefined),
     autoSelectModels: autoSelectEnabled,
   });
 

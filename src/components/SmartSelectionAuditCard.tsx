@@ -148,12 +148,12 @@ export function SmartSelectionAuditCard({
                     </div>
 
                     {/* Transition: previous -> selected */}
-                    <div className="flex items-center gap-1.5 text-[11px]">
-                      <span className="text-slate-400 line-through truncate max-w-[140px]" title={detail.previousModel}>
+                    <div className="flex items-center gap-1.5 text-[11px] flex-wrap">
+                      <span className="text-slate-400 line-through whitespace-normal break-words max-w-full" title={detail.previousModel}>
                         {detail.previousModel || 'None'}
                       </span>
                       <span className="text-indigo-400">→</span>
-                      <span className={`font-bold truncate max-w-[180px] ${isChanged ? 'text-emerald-400' : 'text-slate-200'}`} title={detail.selectedModel}>
+                      <span className={`font-bold whitespace-normal break-words max-w-full ${isChanged ? 'text-emerald-400' : 'text-slate-200'}`} title={detail.selectedModel}>
                         {detail.selectedModel}
                       </span>
                     </div>

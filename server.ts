@@ -51,7 +51,7 @@ async function startServer() {
     const key = req.ip || "unknown";
     const now = Date.now();
     const windowMs = 60_000;
-    const maxRequests = 30;
+    const maxRequests = 120;
 
     const current = requestWindow.get(key);
     if (!current || now - current.startedAt > windowMs) {
@@ -63,6 +63,8 @@ async function startServer() {
   }
 
   const KNOWN_MODEL_NAME_MAP: Record<string, string> = {
+    "gemini 3.7 flash": "google/gemini-3.7-flash",
+    "gemini-3.7-flash": "google/gemini-3.7-flash",
     "gemini 2.5 flash": "google/gemini-2.5-flash",
     "gemini 2.0 flash": "google/gemini-2.0-flash-001",
     "gemini 2.5 pro": "google/gemini-2.5-pro",
@@ -77,16 +79,13 @@ async function startServer() {
     "deepseek v3": "deepseek/deepseek-chat",
     "qwen 2.5 72b instruct": "qwen/qwen-2.5-72b-instruct",
     "llama 3.3 70b instruct": "meta-llama/llama-3.3-70b-instruct",
-    "gemma 4 31b": "google/gemma-4-31b-it:free",
     "nemotron 3.5 content safety": "nvidia/nemotron-3.5-content-safety:free",
-    "laguna xs 2.1": "poolside/laguna-xs-2.1:free",
-    "ling 3.0 tiny": "inclusionai/ling-3.0-tiny:free",
   };
 
   function sanitizeAndResolveModel(value: unknown): string {
-    if (typeof value !== "string") return "google/gemini-2.5-flash";
+    if (typeof value !== "string") return "google/gemini-3.7-flash";
     let trimmed = value.trim();
-    if (!trimmed) return "google/gemini-2.5-flash";
+    if (!trimmed) return "google/gemini-3.7-flash";
 
     const lower = trimmed.toLowerCase();
     const withoutFree = lower.replace(/\s*\(free\)/g, "").replace(/\s*\(paid\)/g, "").trim();
@@ -112,7 +111,7 @@ async function startServer() {
       return match[0];
     }
 
-    return "google/gemini-2.5-flash";
+    return "google/gemini-3.7-flash";
   }
 
   app.get("/api/health", (req, res) => {
@@ -165,12 +164,10 @@ async function startServer() {
           httpOptions: { headers: { "User-Agent": "aistudio-build" } },
         });
 
-        let targetModel = "gemini-2.5-flash";
-        if (actualModelUsed && (actualModelUsed.includes("3.5-flash") || actualModelUsed.includes("3.5"))) {
-          targetModel = "gemini-3.5-flash";
-        } else if (actualModelUsed && (actualModelUsed.includes("3.6-flash") || actualModelUsed.includes("3.6"))) {
-          targetModel = "gemini-3.6-flash";
-        } else if (actualModelUsed && actualModelUsed.includes("2.5-flash")) {
+        let targetModel = "gemini-3.7-flash";
+        if (actualModelUsed && (actualModelUsed.includes("3.7-flash") || actualModelUsed.includes("3.7"))) {
+          targetModel = "gemini-3.7-flash";
+        } else if (actualModelUsed && (actualModelUsed.includes("2.5-flash") || actualModelUsed.includes("2.5"))) {
           targetModel = "gemini-2.5-flash";
         } else if (actualModelUsed && (actualModelUsed.startsWith("gemini-") || actualModelUsed.startsWith("google/gemini"))) {
           targetModel = actualModelUsed.replace("google/", "");
@@ -328,7 +325,7 @@ async function startServer() {
       }
 
       try {
-        const geminiTargetModel = "gemini-2.5-flash";
+        const geminiTargetModel = "gemini-3.7-flash";
         const body: any = {
           model: geminiTargetModel,
           messages,
@@ -345,6 +342,19 @@ async function startServer() {
           },
           body: JSON.stringify(body),
         });
+
+        // Fallback to gemini-2.5-flash if 3.7 returns 404 in current endpoint
+        if (!response.ok && (response.status === 404 || response.status === 400)) {
+          body.model = "gemini-2.5-flash";
+          response = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${geminiKey}`,
+            },
+            body: JSON.stringify(body),
+          });
+        }
       } catch (err: any) {
         console.error("[API Proxy] Gemini API Error:", err);
         return res.status(500).json({ error: err.message || "Failed to contact Gemini API." });
@@ -383,9 +393,19 @@ async function startServer() {
 
   app.get("/api/council/models", async (req, res) => {
     try {
-      const sort = req.query.sort || "newest";
-      const response = await fetch(`https://openrouter.ai/api/v1/models?sort=${sort}`);
+      const response = await fetch(`https://openrouter.ai/api/v1/models`);
       const data = await response.json();
+      if (data && Array.isArray(data.data)) {
+        // Filter out unverified community user uploads (~), batch pricing endpoints (:batch), and placeholders
+        data.data = data.data.filter((m: any) => {
+          if (!m || !m.id) return false;
+          const id = m.id.toLowerCase();
+          if (id.startsWith("~") || id.includes("/~")) return false;
+          if (id.includes(":batch")) return false;
+          if (id === "openrouter/auto" || id === "openrouter/free") return false;
+          return true;
+        });
+      }
       res.json(data);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
