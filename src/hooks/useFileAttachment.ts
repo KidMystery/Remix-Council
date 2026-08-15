@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { extractCodeFromZip, ZipArchiveResult } from '../lib/zipReader';
+import { extractCodeFromArchive, ZipArchiveResult } from '../lib/zipReader';
 import { extractTextFromPDF } from '../lib/pdfUtils';
 
 export interface AttachedFile {
@@ -41,23 +41,36 @@ export function useFileAttachment({ showToast }: UseFileAttachmentOptions) {
     const allowedExtensions = [
       '.txt', '.md', '.csv', '.json', '.js', '.ts', '.jsx', '.tsx',
       '.html', '.css', '.pdf', '.png', '.jpg', '.jpeg', '.webp',
-      '.gif', '.heic', '.svg', '.zip',
+      '.gif', '.heic', '.svg', '.zip', '.rar', '.tar', '.gz', '.tgz', '.7z'
     ];
     const allowedMimeTypes = [
       'text/', 'application/json', 'application/pdf', 'image/',
       'application/zip', 'application/x-zip-compressed', 'application/zip-compressed',
+      'application/x-rar', 'application/vnd.rar', 'application/x-rar-compressed', 'application/rar',
     ];
 
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
+      const lowerName = file.name.toLowerCase();
       const isImage = file.type.startsWith('image/') || /\.(png|jpg|jpeg|webp|gif|svg|heic)$/i.test(file.name);
+      const isArchive =
+        lowerName.endsWith('.zip') ||
+        lowerName.endsWith('.rar') ||
+        lowerName.endsWith('.tar') ||
+        lowerName.endsWith('.gz') ||
+        lowerName.endsWith('.tgz') ||
+        lowerName.endsWith('.7z') ||
+        file.type.includes('zip') ||
+        file.type.includes('rar');
+
       const isAllowed =
         isImage ||
+        isArchive ||
         allowedMimeTypes.some((m) => file.type.startsWith(m)) ||
-        allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext));
+        allowedExtensions.some((ext) => lowerName.endsWith(ext));
 
       if (!isAllowed) {
-        setFileError(`Unsupported file format: ${file.name}. Only code, text, PDF, ZIP archives, and images are supported.`);
+        setFileError(`Unsupported file format: ${file.name}. Only code, text, PDF, ZIP/RAR archives, and images are supported.`);
         continue;
       }
 
@@ -66,33 +79,35 @@ export function useFileAttachment({ showToast }: UseFileAttachmentOptions) {
         continue;
       }
 
-      if (file.name.toLowerCase().endsWith('.zip') || file.type.includes('zip')) {
+      if (isArchive) {
         try {
-          const zipResult = await extractCodeFromZip(file);
-          if (zipResult.extractedCodeFilesCount === 0) {
-            setFileError(`Zip archive ${file.name} contained no readable code or text files.`);
+          const archiveResult = await extractCodeFromArchive(file);
+          if (archiveResult.extractedCodeFilesCount === 0) {
+            setFileError(`Archive ${file.name} contained no readable code or text files.`);
             continue;
           }
+          const isRar = lowerName.endsWith('.rar') || file.type.includes('rar');
           setAttachedFiles((prev) => [
             ...prev,
             {
               name: file.name,
-              content: zipResult.formattedContext,
+              content: archiveResult.formattedContext,
               size: file.size,
-              type: 'application/zip',
-              unzippedResult: zipResult,
+              type: isRar ? 'application/x-rar' : 'application/zip',
+              unzippedResult: archiveResult,
             },
           ]);
-          if (zipResult.wasTruncated) {
-            showToast(`📦 Extracted ${zipResult.extractedCodeFilesCount} files from ${file.name} (capped by guardrails)`);
+          const label = isRar ? 'RAR' : 'ZIP';
+          if (archiveResult.wasTruncated) {
+            showToast(`📦 Extracted ${archiveResult.extractedCodeFilesCount} files from ${file.name} (capped by guardrails)`);
           } else {
-            showToast(`📦 Extracted ${zipResult.extractedCodeFilesCount} code files from ${file.name}`);
+            showToast(`📦 Extracted ${archiveResult.extractedCodeFilesCount} code files from ${file.name} (${label})`);
           }
-        } catch (error) {
-          console.error('Error reading zip archive:', error);
-          setFileError(`Could not read code from zip file: ${file.name}`);
+        } catch (error: any) {
+          console.error('Error reading archive:', error);
+          setFileError(`Could not read code from archive: ${file.name}. ${error?.message || ''}`);
         }
-      } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      } else if (file.type === 'application/pdf' || lowerName.endsWith('.pdf')) {
         try {
           let text = await extractTextFromPDF(file);
           if (text.length > 150_000) {

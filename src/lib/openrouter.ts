@@ -156,10 +156,12 @@ export async function streamOpenRouterCompletion(options: {
   enableWebGrounding?: boolean;
   query?: string;
   signal?: AbortSignal;
+  disableFallback?: boolean;
   onToken?: (chunk: string) => void;
   onGrounding?: (grounding: GroundingData) => void;
 }): Promise<OpenRouterCompletionResult> {
   const {
+    apiKey,
     messages,
     temperature,
     maxTokens,
@@ -169,6 +171,7 @@ export async function streamOpenRouterCompletion(options: {
     enableWebGrounding,
     query,
     signal,
+    disableFallback,
     onToken,
     onGrounding,
   } = options;
@@ -189,6 +192,8 @@ export async function streamOpenRouterCompletion(options: {
       webMode,
       enableWebGrounding,
       query,
+      disableFallback,
+      apiKey,
       budget: budget === 'free' ? 'free' : 'quality',
       stream_options: { include_usage: true },
     };
@@ -197,11 +202,19 @@ export async function streamOpenRouterCompletion(options: {
       body.max_tokens = maxTokens;
     }
 
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+    if (disableFallback) {
+      headers['X-Disable-Fallback'] = 'true';
+    }
+
     return fetch('/api/council', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify(body),
       signal,
     });

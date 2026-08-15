@@ -1,4 +1,4 @@
-import { CouncilRound, PersonaResponse } from '../types';
+import { CouncilRound, PersonaResponse, AttachedTextFile } from '../types';
 import { streamOpenRouterCompletion } from './openrouter';
 import type { RawOpenRouterModel } from './presets';
 import { LATEST_GEMINI_FLASH } from '../config/modelCatalog';
@@ -165,6 +165,7 @@ export interface BuildArchivistContextOptions {
   systemPrompt: string;
   userQuery: string;
   attachedImages?: { name: string; url: string; type: string }[];
+  sessionFiles?: AttachedTextFile[];
   rounds: CouncilRound[];
   apiKey: string;
   maxTokensWindow?: number; // e.g. 3000 tokens
@@ -189,6 +190,7 @@ export async function buildArchivistContext(
     systemPrompt,
     userQuery,
     attachedImages,
+    sessionFiles,
     rounds,
     apiKey,
     maxTokensWindow = 3000,
@@ -199,21 +201,46 @@ export async function buildArchivistContext(
 
   const recentRoundsWindow = Math.max(1, Math.min(10, customRecentRounds));
 
+  const hasCodeArchive =
+    sessionFiles?.some((f) => f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.rar') || f.content?.includes('[CODEBASE FILE CONTENTS]')) ||
+    userQuery.includes('[CODEBASE FILE CONTENTS]') ||
+    userQuery.includes('[CODEBASE FILE TREE]');
+
+  let effectiveSystemPrompt = systemPrompt;
+  if (hasCodeArchive) {
+    effectiveSystemPrompt += `\n\n[ATTACHED CODEBASE DIRECTIVE]: The user has attached an unpacked codebase archive. All source files have been pre-extracted and provided in plain text. You have complete direct access to inspect and cite every file, function, and line of code. Never claim that you cannot read zip archives or view source code.`;
+  }
+
   const messages: { role: 'system' | 'user' | 'assistant'; content: any }[] = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: effectiveSystemPrompt },
   ];
 
+  // Helper to format persistent session files if not already in query
+  const formatSessionFilesBlock = (): string | null => {
+    if (!sessionFiles || sessionFiles.length === 0) return null;
+    const formatted = sessionFiles
+      .map((f) => `--- Attached Thread File: ${f.name} (${f.summary || `${f.size} bytes`}) ---\n${f.content}`)
+      .join('\n\n');
+    return `[PERSISTENT THREAD FILES & CODEBASE CONTEXT]\n${formatted}`;
+  };
+
+  const sessionFilesBlock = formatSessionFilesBlock();
+
   if (rounds.length === 0) {
+    const fullPrompt = sessionFilesBlock && !userQuery.includes('[CODEBASE FILE TREE]') && !userQuery.includes('--- Attached File:')
+      ? `${sessionFilesBlock}\n\n[User Question]:\n${userQuery}`
+      : userQuery;
+
     if (attachedImages && attachedImages.length > 0) {
       messages.push({
         role: 'user',
         content: [
-          { type: 'text', text: userQuery },
+          { type: 'text', text: fullPrompt },
           ...attachedImages.map((img) => ({ type: 'image_url', image_url: { url: img.url } })),
         ],
       });
     } else {
-      messages.push({ role: 'user', content: userQuery });
+      messages.push({ role: 'user', content: fullPrompt });
     }
     const res: ArchivistContextMessages = messages as any;
     return res;
@@ -225,6 +252,11 @@ export async function buildArchivistContext(
 
   let contextBlocks: string[] = [];
   let archivistSummary: string | undefined = undefined;
+
+  // Add persistent codebase / thread files if present
+  if (sessionFilesBlock && !userQuery.includes('[CODEBASE FILE TREE]') && !userQuery.includes('--- Attached File:')) {
+    contextBlocks.push(sessionFilesBlock);
+  }
 
   // If there are older rounds, run Archivist compression on them
   if (olderRounds.length > 0) {

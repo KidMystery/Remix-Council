@@ -3,21 +3,32 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { z } from "zod";
+import JSZip from "jszip";
+import { createExtractorFromData } from "node-unrar-js";
 import { decideWebUse, buildWebGroundingSystemPrompt } from "./src/lib/webPolicy";
 import { resolveOpenRouterCandidate, isLocalOnlyModel, OPENROUTER_MODEL_ALIASES } from "./src/shared/modelCandidates";
 import { parseWebMode, WebMode } from "./src/shared/webGrounding";
+import {
+  isIgnoredArchiveEntry,
+  isTextContent,
+  isLikelyCode,
+  buildCodebaseContext,
+  MAX_EXTRACTED_FILES,
+  MAX_FILE_CHARS,
+  MAX_TOTAL_CONTEXT_CHARS,
+} from "./src/lib/zipReader";
 
 dotenv.config();
 
 // --- Input Validation Schemas ---
 const imagePartSchema = z.object({
   type: z.literal("image_url"),
-  image_url: z.object({ url: z.string().url().max(2048, "Image URL too long") }),
+  image_url: z.object({ url: z.string().max(10000000, "Image URL too long") }),
 });
 
 const textPartSchema = z.object({
   type: z.literal("text"),
-  text: z.string().min(1, "Text content cannot be empty").max(150000, "Text content too long"),
+  text: z.string().min(1, "Text content cannot be empty").max(3000000, "Text content too long"),
 });
 
 const contentPartSchema = z.discriminatedUnion("type", [textPartSchema, imagePartSchema]);
@@ -25,8 +36,8 @@ const contentPartSchema = z.discriminatedUnion("type", [textPartSchema, imagePar
 const messageSchema = z.object({
   role: z.enum(["system", "user", "assistant"]),
   content: z.union([
-    z.string().min(1, "Message content cannot be empty").max(150000, "Message content too long"),
-    z.array(contentPartSchema).min(1, "Message content array cannot be empty").max(10, "Too many content parts"),
+    z.string().min(1, "Message content cannot be empty").max(3000000, "Message content too long"),
+    z.array(contentPartSchema).min(1, "Message content array cannot be empty").max(50, "Too many content parts"),
   ]),
 });
 
@@ -34,13 +45,15 @@ const llmRequestSchema = z.object({
   model: z.string().min(2, "Model ID too short").max(120, "Model ID too long"),
   messages: z.array(messageSchema).min(1, "Messages array cannot be empty").max(100, "Too many messages"),
   temperature: z.number().min(0).max(2).optional(),
-  max_tokens: z.number().int().positive().min(1).max(16384).optional(),
+  max_tokens: z.number().int().positive().min(1).max(32768).optional(),
   stream: z.boolean().optional(),
   budget: z.enum(["free", "cheap", "quality"]).optional(),
   webMode: z.enum(["off", "auto", "always"]).optional(),
   enableWebGrounding: z.boolean().optional(),
   enableSearchGrounding: z.boolean().optional(),
   query: z.string().optional(),
+  disableFallback: z.boolean().optional(),
+  apiKey: z.string().optional(),
 });
 
 const ALLOWED_MODEL_PATTERN =
@@ -51,9 +64,9 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-  // 10MB limit as a pragmatic compromise for payload uploads
-  app.use(express.json({ limit: "10mb" }));
-  app.use(express.urlencoded({ limit: "10mb", extended: true }));
+  // 50MB limit for codebase archive uploads
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
   const requestWindow = new Map<string, { startedAt: number; count: number }>();
 
@@ -125,6 +138,213 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  app.post("/api/council/extract-archive", async (req, res) => {
+    if (isRateLimited(req)) {
+      return res.status(429).json({ error: "Too many requests. Please slow down." });
+    }
+
+    try {
+      const { filename, dataBase64 } = req.body;
+      if (!filename || !dataBase64) {
+        return res.status(400).json({ error: "Missing filename or dataBase64 payload." });
+      }
+
+      const buffer = Buffer.from(dataBase64, "base64");
+      if (buffer.length > 50_000_000) {
+        return res.status(400).json({ error: "Archive exceeds the 50MB safety ceiling." });
+      }
+
+      const lowerName = filename.toLowerCase();
+      const isRar = lowerName.endsWith(".rar");
+
+      const extractedFiles: {
+        path: string;
+        name: string;
+        size: number;
+        content: string;
+        isCode: boolean;
+        truncated?: boolean;
+      }[] = [];
+      const fileTree: string[] = [];
+      const warnings: string[] = [];
+      let wasTruncated = false;
+      let totalExtractedChars = 0;
+      let fileCount = 0;
+
+      if (isRar) {
+        const arrayBuf = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+        const extractor = await createExtractorFromData({ data: arrayBuf });
+        const extracted = extractor.extract();
+
+        for (const item of extracted.files) {
+          const header = item.fileHeader;
+          const relativePath = header.name;
+          if (header.flags.directory || isIgnoredArchiveEntry(relativePath)) {
+            continue;
+          }
+
+          fileTree.push(relativePath);
+
+          if (fileCount >= MAX_EXTRACTED_FILES) {
+            warnings.push(`Extraction capped at ${MAX_EXTRACTED_FILES} files limit.`);
+            wasTruncated = true;
+            break;
+          }
+
+          if (totalExtractedChars >= MAX_TOTAL_CONTEXT_CHARS) {
+            warnings.push(`Total context limit of ${MAX_TOTAL_CONTEXT_CHARS.toLocaleString()} characters reached.`);
+            wasTruncated = true;
+            break;
+          }
+
+          const fname = relativePath.split(/[/\\]/).pop() || relativePath;
+          const ext = fname.split(".").pop()?.toLowerCase() || "";
+
+          if (item.extraction) {
+            let content = Buffer.from(item.extraction).toString("utf-8");
+            if (isTextContent(content)) {
+              let isFileTruncated = false;
+              if (content.length > MAX_FILE_CHARS) {
+                content = content.slice(0, MAX_FILE_CHARS) + `\n\n... [FILE TRUNCATED AFTER ${MAX_FILE_CHARS.toLocaleString()} CHARS]`;
+                isFileTruncated = true;
+                wasTruncated = true;
+                warnings.push(`File ${relativePath} truncated at ${MAX_FILE_CHARS.toLocaleString()} chars.`);
+              }
+
+              if (totalExtractedChars + content.length > MAX_TOTAL_CONTEXT_CHARS) {
+                const remaining = MAX_TOTAL_CONTEXT_CHARS - totalExtractedChars;
+                if (remaining > 200) {
+                  content = content.slice(0, remaining) + `\n\n... [TOTAL CONTEXT LIMIT REACHED]`;
+                  extractedFiles.push({
+                    path: relativePath,
+                    name: fname,
+                    size: content.length,
+                    content,
+                    isCode: isLikelyCode(fname, content),
+                    truncated: true,
+                  });
+                  totalExtractedChars += content.length;
+                }
+                wasTruncated = true;
+                warnings.push(`Total context limit reached at ${relativePath}.`);
+                break;
+              }
+
+              extractedFiles.push({
+                path: relativePath,
+                name: fname,
+                size: content.length,
+                content,
+                isCode: isLikelyCode(fname, content),
+                truncated: isFileTruncated,
+              });
+
+              totalExtractedChars += content.length;
+              fileCount++;
+            }
+          }
+        }
+      } else {
+        // ZIP extraction
+        const zip = new JSZip();
+        const loadedZip = await zip.loadAsync(buffer);
+        const entries = Object.keys(loadedZip.files);
+
+        for (const relativePath of entries) {
+          const entry = loadedZip.files[relativePath];
+          if (entry.dir || isIgnoredArchiveEntry(relativePath)) {
+            continue;
+          }
+
+          fileTree.push(relativePath);
+
+          if (fileCount >= MAX_EXTRACTED_FILES) {
+            warnings.push(`Extraction capped at ${MAX_EXTRACTED_FILES} files limit.`);
+            wasTruncated = true;
+            break;
+          }
+
+          if (totalExtractedChars >= MAX_TOTAL_CONTEXT_CHARS) {
+            warnings.push(`Total context limit of ${MAX_TOTAL_CONTEXT_CHARS.toLocaleString()} characters reached.`);
+            wasTruncated = true;
+            break;
+          }
+
+          const fname = relativePath.split(/[/\\]/).pop() || relativePath;
+
+          try {
+            let content = await entry.async("string");
+            if (isTextContent(content)) {
+              let isFileTruncated = false;
+              if (content.length > MAX_FILE_CHARS) {
+                content = content.slice(0, MAX_FILE_CHARS) + `\n\n... [FILE TRUNCATED AFTER ${MAX_FILE_CHARS.toLocaleString()} CHARS]`;
+                isFileTruncated = true;
+                wasTruncated = true;
+                warnings.push(`File ${relativePath} truncated at ${MAX_FILE_CHARS.toLocaleString()} chars.`);
+              }
+
+              if (totalExtractedChars + content.length > MAX_TOTAL_CONTEXT_CHARS) {
+                const remaining = MAX_TOTAL_CONTEXT_CHARS - totalExtractedChars;
+                if (remaining > 200) {
+                  content = content.slice(0, remaining) + `\n\n... [TOTAL CONTEXT LIMIT REACHED]`;
+                  extractedFiles.push({
+                    path: relativePath,
+                    name: fname,
+                    size: content.length,
+                    content,
+                    isCode: isLikelyCode(fname, content),
+                    truncated: true,
+                  });
+                  totalExtractedChars += content.length;
+                }
+                wasTruncated = true;
+                warnings.push(`Total context limit reached at ${relativePath}.`);
+                break;
+              }
+
+              extractedFiles.push({
+                path: relativePath,
+                name: fname,
+                size: content.length,
+                content,
+                isCode: isLikelyCode(fname, content),
+                truncated: isFileTruncated,
+              });
+
+              totalExtractedChars += content.length;
+              fileCount++;
+            }
+          } catch (err) {
+            console.warn(`Could not read file ${relativePath}:`, err);
+          }
+        }
+      }
+
+      const formattedContext = buildCodebaseContext(
+        filename,
+        fileTree,
+        extractedFiles,
+        warnings,
+        isRar ? "rar" : "zip"
+      );
+
+      res.json({
+        filename,
+        archiveType: isRar ? "rar" : "zip",
+        totalFiles: fileTree.length,
+        extractedCodeFilesCount: extractedFiles.length,
+        fileTree,
+        files: extractedFiles,
+        formattedContext,
+        warnings,
+        wasTruncated,
+      });
+    } catch (error: any) {
+      console.error("[extract-archive] Error extracting archive:", error);
+      res.status(500).json({ error: error.message || "Failed to extract archive" });
+    }
+  });
+
   app.post("/api/council", async (req, res) => {
     if (isRateLimited(req)) {
       return res.status(429).json({ error: "Too many requests. Please slow down." });
@@ -156,10 +376,25 @@ async function startServer() {
       enableWebGrounding,
       enableSearchGrounding,
       query: rawQuery,
+      disableFallback,
+      apiKey: clientApiKey,
     } = req.body;
 
-    const openrouterKey = process.env.OPENROUTER_API_KEY?.trim() || "";
-    const geminiKey = process.env.GEMINI_API_KEY?.trim() || "";
+    const rawOpenRouterKey =
+      (req.headers.authorization?.replace(/^Bearer\s+/i, "") || "").trim() ||
+      (typeof clientApiKey === "string" ? clientApiKey.trim() : "") ||
+      process.env.OPENROUTER_API_KEY?.trim() ||
+      "";
+    const openrouterKey = rawOpenRouterKey.replace(/^["']|["']$/g, "").trim();
+
+    const rawGeminiKey = process.env.GEMINI_API_KEY?.trim() || "";
+    const geminiKey = rawGeminiKey.replace(/^["']|["']$/g, "").trim();
+
+    const isNoFallback = Boolean(
+      disableFallback ||
+      req.headers["x-disable-fallback"] === "true" ||
+      budget === "free"
+    );
 
     const userQueryText =
       rawQuery ||
@@ -197,10 +432,10 @@ async function startServer() {
         });
       }
 
-      if (!openrouterKey || !openrouterKey.startsWith("sk-or-")) {
+      if (!openrouterKey || openrouterKey.length < 6) {
         return res.status(503).json({
           error:
-            "WEB_GROUNDING_UNAVAILABLE: Web grounding requires an OpenRouter API key (OPENROUTER_API_KEY) configured on the server.",
+            "WEB_GROUNDING_UNAVAILABLE: Web grounding requires an OpenRouter API key (OPENROUTER_API_KEY) configured in the server environment or passed in settings.",
         });
       }
 
@@ -293,9 +528,9 @@ async function startServer() {
 
     // Free budget constraint: require OpenRouter key and do not silently fall back to Gemini
     if (budget === "free") {
-      if (!openrouterKey || !openrouterKey.startsWith("sk-or-")) {
+      if (!openrouterKey || openrouterKey.length < 6) {
         return res.status(503).json({
-          error: "Free mode requires an OpenRouter key with access to free models.",
+          error: "Free mode requires an OpenRouter key configured in environment or settings.",
         });
       }
     }
@@ -440,7 +675,7 @@ async function startServer() {
     let response: any = null;
 
     // 2. OpenRouter request using server-side OPENROUTER_API_KEY
-    if (openrouterKey && openrouterKey.startsWith("sk-or-")) {
+    if (openrouterKey && openrouterKey.length >= 6) {
       try {
         const body: any = { model: actualModelUsed, messages, stream };
         if (temperature !== undefined) body.temperature = temperature;
@@ -458,18 +693,18 @@ async function startServer() {
         });
 
         if (!response.ok) {
-          if (budget === "free") {
+          if (isNoFallback) {
             const errorText = await response.text();
-            return res.status(response.status).json({ error: errorText });
+            return res.status(response.status).json({ error: `OpenRouter API Error (${response.status}): ${errorText}` });
           }
           if (response.status === 401 || response.status === 403 || response.status === 402) {
             console.warn(`[API Proxy] OpenRouter returned HTTP ${response.status}. Falling back to Gemini API...`);
             response = null;
           }
         }
-      } catch (err) {
-        if (budget === "free") {
-          return res.status(502).json({ error: "OpenRouter connection failed for free request." });
+      } catch (err: any) {
+        if (isNoFallback) {
+          return res.status(502).json({ error: `OpenRouter connection failed: ${err.message || "Unknown network error"}` });
         }
         console.warn("[API Proxy] OpenRouter request failed, falling back to Gemini API:", err);
         response = null;
@@ -478,9 +713,9 @@ async function startServer() {
 
     // 3. Fallback to Google Gemini API using server-side GEMINI_API_KEY (for quality/paid budget only)
     if (!response) {
-      if (budget === "free") {
+      if (isNoFallback) {
         return res.status(503).json({
-          error: "Free mode requires an OpenRouter key with access to free models.",
+          error: "No fallback allowed: Primary model failed or no valid OpenRouter key configured.",
         });
       }
 

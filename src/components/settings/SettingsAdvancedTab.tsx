@@ -35,6 +35,10 @@ interface SettingsAdvancedTabProps {
   setArchivistRecentRounds?: (val: number) => void;
   proCompareModelId?: string;
   setProCompareModelId?: (modelId: string) => void;
+  disableFallback?: boolean;
+  setDisableFallback?: (val: boolean) => void;
+  disableLoadingOverlay?: boolean;
+  setDisableLoadingOverlay?: (val: boolean) => void;
   availableModels?: { id: string; name: string }[];
   onExportSessions?: () => void;
   onImportSessions?: (file: File) => void;
@@ -73,6 +77,10 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
   setArchivistRecentRounds,
   proCompareModelId = 'anthropic/claude-3.7-sonnet',
   setProCompareModelId,
+  disableFallback = false,
+  setDisableFallback,
+  disableLoadingOverlay = false,
+  setDisableLoadingOverlay,
   availableModels = [],
   onExportSessions,
   onImportSessions,
@@ -411,6 +419,36 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
             </label>
             <p className="text-[11px] text-slate-500">
               For quick panel requests, uses 1 single primary model instead of full multi-panel deliberation.
+            </p>
+          </div>
+
+          <div className="pt-2 space-y-2 border-t border-slate-200/60 dark:border-slate-800/60">
+            <label className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
+              <span>Strict No-Fallback Mode</span>
+              <input
+                type="checkbox"
+                checked={disableFallback}
+                onChange={(e) => setDisableFallback?.(e.target.checked)}
+                className="rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+              />
+            </label>
+            <p className="text-[11px] text-slate-500">
+              Disables silent fallback to alternative or free models. If your chosen model fails or errors, the raw error will be reported directly so you can diagnose and fix it.
+            </p>
+          </div>
+
+          <div className="pt-2 space-y-2 border-t border-slate-200/60 dark:border-slate-800/60">
+            <label className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
+              <span>Show Deliberation Screen Overlay</span>
+              <input
+                type="checkbox"
+                checked={!disableLoadingOverlay}
+                onChange={(e) => setDisableLoadingOverlay?.(!e.target.checked)}
+                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+              />
+            </label>
+            <p className="text-[11px] text-slate-500">
+              When turned off, disables the full-screen "Council Deliberating" overlay so you can observe live model streaming and persona interactions directly in the feed without interruption.
             </p>
           </div>
 

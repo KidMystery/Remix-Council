@@ -8,6 +8,7 @@ import { ThinkingIndicator } from './ThinkingIndicator';
 import { SynthesisCard } from './SynthesisCard';
 import { SwipeDeck } from './SwipeDeck';
 import { RoundRatingCard } from './RoundRatingCard';
+import { CapabilityRefusalBanner } from './CapabilityRefusalBanner';
 
 interface CouncilRoundViewProps {
   round: CouncilRound;
@@ -29,6 +30,9 @@ interface CouncilRoundViewProps {
   onReRunRound: (id: string) => void;
   onEditPrompt: (id: string) => void;
   onResumeRound?: (id: string) => void;
+  onUpgradeAndReRun?: (roundId: string) => void;
+  onSwitchToGeminiFlash?: (roundId: string) => void;
+  onOpenSettings?: () => void;
   incompleteStage?: { isIncomplete: boolean; stage: 1 | 2 | 3; description: string };
   onSaveRating?: (roundId: string, rating: RoundRating) => void;
 }
@@ -39,7 +43,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
   round, index, personas, synthesizer, isDeliberating, basicMode,
   speakingId, copiedId, settings, onDeleteRound, onRegeneratePersona,
   onResynthesize, onSpeak, onCopy, isCollapsed, onToggleCollapse,
-  onReRunRound, onEditPrompt, onResumeRound, incompleteStage, onSaveRating,
+  onReRunRound, onEditPrompt, onResumeRound, onUpgradeAndReRun, onSwitchToGeminiFlash, onOpenSettings, incompleteStage, onSaveRating,
 }) {
   const activePersonas = personas.filter((p) => p.enabled !== false);
   const hasStage2 = Object.keys(round.deliberation?.stage2 || {}).length > 0 &&
@@ -56,11 +60,123 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
     (r: PersonaResponse | any) => r?.status === 'completed' || r?.content
   ).length;
 
-  // Consensus view: only show synthesis
+  const [showBasicStages, setShowBasicStages] = React.useState(false);
+
+  // Consensus view: defaults to synthesis, with optional expandable stages
   if (basicMode) {
     return (
       <article aria-labelledby={`round-heading-${round.id}`} className="space-y-4 pb-6 border-b border-slate-200 dark:border-slate-800">
         <RoundHeader round={round} index={index} isCollapsed={false} onToggleCollapse={onToggleCollapse} />
+        
+        {round.capabilityFailure && (
+          <CapabilityRefusalBanner
+            failure={round.capabilityFailure}
+            roundId={round.id}
+            isDeliberating={isDeliberating}
+            onUpgradeAndReRun={onUpgradeAndReRun || onReRunRound}
+            onSwitchToGeminiFlash={onSwitchToGeminiFlash || onReRunRound}
+            onOpenSettings={onOpenSettings || (() => {})}
+          />
+        )}
+
+        {/* Toggle to view full 3-stage deliberation even in Basic Mode */}
+        {(completedStage1 > 0 || completedStage2 > 0) && (
+          <div className="flex items-center justify-between px-1">
+            <button
+              type="button"
+              onClick={() => setShowBasicStages(!showBasicStages)}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-cyan-600 dark:text-cyan-400 hover:text-cyan-500 transition-colors py-1 px-2.5 rounded-lg bg-cyan-50 dark:bg-cyan-950/40 border border-cyan-200 dark:border-cyan-800/50"
+            >
+              {showBasicStages ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              {showBasicStages ? 'Hide Member Deliberation Stages' : `View All 3 Deliberation Stages (Stage 1: ${completedStage1}/${activePersonas.length}, Stage 2: ${completedStage2}/${activePersonas.length})`}
+            </button>
+          </div>
+        )}
+
+        {showBasicStages && (
+          <div className="space-y-4 pt-1">
+            {/* Stage 1 in Basic View */}
+            <div className="space-y-2">
+              <h4 className="text-xs font-mono uppercase tracking-wider text-cyan-600 dark:text-cyan-400 flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                Stage 1: Council Member Statements
+              </h4>
+              <SwipeDeck ariaLabel="Stage 1 responses">
+                {activePersonas.map((persona) => {
+                  const resp = round.deliberation?.stage1?.[persona.id];
+                  const copyKey = `${round.id}-stage1-${persona.id}`;
+                  return (
+                    <div key={persona.id} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full`}>
+                      <div className="flex items-center justify-between gap-2 min-w-0">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-xl shrink-0">{persona.avatar}</span>
+                          <div className="min-w-0">
+                            <h4 className="font-bold text-sm text-slate-800 dark:text-white whitespace-normal break-words" title={persona.name}>{persona.name}</h4>
+                            <p className="text-[10px] text-slate-500 dark:text-slate-400 whitespace-normal break-words" title={persona.role}>{persona.role}</p>
+                          </div>
+                        </div>
+                      </div>
+                      {resp?.status === 'error' ? (
+                        <div className="text-xs text-red-400 bg-red-950/50 p-3 rounded-lg border border-red-800/50 break-words">
+                          Error: {resp.error}
+                        </div>
+                      ) : resp?.content ? (
+                        <div className={textWrap}>
+                          <MessageMarkdown content={resp.content} />
+                          <GroundingSourcesCard grounding={resp.grounding} />
+                        </div>
+                      ) : (
+                        <ThinkingIndicator stageLabel="Stage 1 Response" personaName={persona.name} role={persona.role}
+                          model={persona.model || settings.defaultModels[persona.id]} accentColor="cyan" />
+                      )}
+                    </div>
+                  );
+                })}
+              </SwipeDeck>
+            </div>
+
+            {/* Stage 2 in Basic View */}
+            {hasStage2 && (
+              <div className="space-y-2">
+                <h4 className="text-xs font-mono uppercase tracking-wider text-purple-500 dark:text-purple-400 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+                  Stage 2: Peer Review & Cross-Examination
+                </h4>
+                <SwipeDeck ariaLabel="Stage 2 peer reviews">
+                  {activePersonas.map((persona) => {
+                    const resp = round.deliberation?.stage2?.[persona.id];
+                    if (!resp) return null;
+                    return (
+                      <div key={`s2-${persona.id}`} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full`}>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-xl shrink-0">{persona.avatar}</span>
+                          <div className="min-w-0">
+                            <h4 className="font-bold text-sm text-slate-800 dark:text-white whitespace-normal break-words" title={persona.name}>{persona.name}</h4>
+                            <p className="text-[10px] text-slate-500 dark:text-slate-400 whitespace-normal break-words" title={persona.role}>{persona.role}</p>
+                          </div>
+                        </div>
+                        {resp?.status === 'error' ? (
+                          <div className="text-xs text-red-400 bg-red-950/50 p-3 rounded-lg border border-red-800/50 break-words">
+                            Error: {resp.error}
+                          </div>
+                        ) : resp?.content ? (
+                          <div className={textWrap}>
+                            <MessageMarkdown content={resp.content} />
+                            <GroundingSourcesCard grounding={resp.grounding} />
+                          </div>
+                        ) : (
+                          <ThinkingIndicator stageLabel="Stage 2 Peer Review" personaName={persona.name} role={persona.role}
+                            model={persona.model || settings.defaultModels[persona.id]} accentColor="purple" />
+                        )}
+                      </div>
+                    );
+                  })}
+                </SwipeDeck>
+              </div>
+            )}
+          </div>
+        )}
+
         {hasSynthesis ? (
           <>
             <SynthesisCard
@@ -119,6 +235,17 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
         incompleteStage={incompleteStage}
         isDeliberating={isDeliberating}
       />
+
+      {round.capabilityFailure && (
+        <CapabilityRefusalBanner
+          failure={round.capabilityFailure}
+          roundId={round.id}
+          isDeliberating={isDeliberating}
+          onUpgradeAndReRun={onUpgradeAndReRun || onReRunRound}
+          onSwitchToGeminiFlash={onSwitchToGeminiFlash || onReRunRound}
+          onOpenSettings={onOpenSettings || (() => {})}
+        />
+      )}
 
       {!isCollapsed && (
         <>

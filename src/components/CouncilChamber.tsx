@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Persona, CouncilRound, Settings, PersonaResponse, NotificationPreferences, RoundRating, ToastMessage, ToastType } from '../types';
+import { Persona, CouncilRound, Settings, PersonaResponse, NotificationPreferences, RoundRating, ToastMessage, ToastType, CapabilityFailure } from '../types';
 import { INITIAL_PERSONAS, CHAIRMAN_PROMPT, defaultSynthesizer, PRO_MODEL_SYSTEM_PROMPT } from '../data';
 import { playNotificationChime, sendDesktopNotification } from '../lib/notifications';
 import { MessageMarkdown } from './MessageMarkdown';
@@ -8,6 +8,7 @@ import { useSessionManager } from '../hooks/useSessionManager';
 import { useCouncilReducer } from '../hooks/useCouncilReducer';
 import { usePersonaStream } from '../hooks/usePersonaStream';
 import { useModelRecommendations } from '../hooks/useModelRecommendations';
+import { detectCodeCapabilityRefusal, upgradeToHighCapabilityCodingCouncil } from '../lib/capabilityGuard';
 import {
   countTotalSessionTokens,
   countTotalSessionCost,
@@ -201,6 +202,9 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       const savedArchivistRecentRounds = localStorage.getItem('council_archivist_recent_rounds');
       const savedProCompareModelId = localStorage.getItem('council_pro_compare_model_id');
 
+      const savedDisableFallback = localStorage.getItem('council_disable_fallback');
+      const savedDisableLoadingOverlay = localStorage.getItem('council_disable_loading_overlay');
+
       const defaultModels = savedModels
         ? JSON.parse(savedModels)
         : {
@@ -223,6 +227,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         useSingleModelForSimple: savedSingleModelSimple === 'true',
         archivistRecentRounds: savedArchivistRecentRounds ? parseInt(savedArchivistRecentRounds, 10) : 2,
         proCompareModelId: savedProCompareModelId || 'anthropic/claude-3.7-sonnet',
+        disableFallback: savedDisableFallback === 'true',
+        disableLoadingOverlay: savedDisableLoadingOverlay === 'true',
         webMode: (localStorage.getItem('council_web_mode') as WebMode) || 'auto',
       };
     } catch {
@@ -245,6 +251,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         useSingleModelForSimple: false,
         archivistRecentRounds: 2,
         proCompareModelId: 'anthropic/claude-3.7-sonnet',
+        disableFallback: false,
+        disableLoadingOverlay: false,
         webMode: 'auto',
       };
     }
@@ -329,6 +337,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     clearAllSessions,
     addRoundToActiveSession,
     updateRoundInActiveSession,
+    updateActiveSessionConfig,
+    updateActiveSessionFiles,
     deleteRoundFromActiveSession,
     exportSessionsJSON,
     importSessionsJSON,
@@ -347,6 +357,19 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       setCollapsedRoundIds(new Set(newRounds.slice(0, -1).map(r => r.id)));
     } else {
       setCollapsedRoundIds(new Set());
+    }
+
+    // Restore per-session council configuration if available
+    if (activeSession) {
+      if (activeSession.presetId) {
+        setActivePresetId(activeSession.presetId);
+      }
+      if (activeSession.personas && activeSession.personas.length > 0) {
+        setPersonas(activeSession.personas);
+      }
+      if (activeSession.synthesizer) {
+        setSynthesizer(activeSession.synthesizer);
+      }
     }
   }, [activeSessionId, activeSession?.rounds?.length, setRounds]);
 
@@ -422,10 +445,16 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   }, []);
 
   const showToast = useCallback((
-    msgOrToast: string | Omit<ToastMessage, 'id'>,
+    msgOrToast: any,
     typeOrDuration?: ToastType | number,
     maybeDuration?: number
   ) => {
+    // If called directly as an event handler (e.g. onClick={showToast}), ignore synthetic events
+    if (msgOrToast && typeof msgOrToast === 'object' && ('nativeEvent' in msgOrToast || '_reactName' in msgOrToast || 'bubbles' in msgOrToast)) {
+      return '';
+    }
+    if (!msgOrToast) return '';
+
     const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     let finalType: ToastType = 'info';
     let finalDuration = 4500;
@@ -442,16 +471,26 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     let newToast: ToastMessage;
     if (typeof msgOrToast === 'string') {
       newToast = { id, message: msgOrToast, type: finalType, duration: finalDuration };
-    } else {
+    } else if (typeof msgOrToast === 'object') {
+      let rawMessage = msgOrToast.message;
+      if (typeof rawMessage !== 'string') {
+        rawMessage = rawMessage ? (rawMessage.message || JSON.stringify(rawMessage)) : String(msgOrToast);
+      }
+      let rawDetails = msgOrToast.details;
+      if (rawDetails && typeof rawDetails !== 'string') {
+        rawDetails = typeof rawDetails === 'object' ? JSON.stringify(rawDetails, null, 2) : String(rawDetails);
+      }
       newToast = {
         id,
-        message: msgOrToast.message,
-        title: msgOrToast.title,
+        message: rawMessage || 'Notification',
+        title: typeof msgOrToast.title === 'string' ? msgOrToast.title : undefined,
         type: msgOrToast.type || finalType,
         duration: msgOrToast.duration ?? finalDuration,
-        details: msgOrToast.details,
+        details: rawDetails,
         action: msgOrToast.action,
       };
+    } else {
+      newToast = { id, message: String(msgOrToast), type: finalType, duration: finalDuration };
     }
 
     setToasts((prev) => [...prev.slice(-4), newToast]);
@@ -571,6 +610,22 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     if (onUpdateSettings) onUpdateSettings(updated);
   };
 
+  const updateDisableFallback = (val: boolean) => {
+    localStorage.setItem('council_disable_fallback', val.toString());
+    const updated = { ...settings, disableFallback: val };
+    setInternalSettings(updated);
+    if (onUpdateSettings) onUpdateSettings(updated);
+    showToast(val ? '🛡️ Strict No-Fallback Mode active (errors will be shown directly)' : '🔄 Model Fallbacks enabled', 2500);
+  };
+
+  const updateDisableLoadingOverlay = (val: boolean) => {
+    localStorage.setItem('council_disable_loading_overlay', val.toString());
+    const updated = { ...settings, disableLoadingOverlay: val };
+    setInternalSettings(updated);
+    if (onUpdateSettings) onUpdateSettings(updated);
+    showToast(val ? '🚫 Deliberation overlay hidden (live feed view)' : '📺 Deliberation overlay enabled', 2500);
+  };
+
   const updateWebMode = (val: WebMode) => {
     localStorage.setItem('council_web_mode', val);
     const updated = { ...settings, webMode: val };
@@ -676,6 +731,42 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     removeAttachedFile,
     clearAttachedFiles,
   } = useFileAttachment({ showToast });
+
+  // Sync attached files with the active thread / session
+  useEffect(() => {
+    if (activeSession?.attachedFiles && activeSession.attachedFiles.length > 0) {
+      setAttachedFiles(
+        activeSession.attachedFiles.map((f) => ({
+          name: f.name,
+          type: f.type || 'text/plain',
+          size: f.size,
+          content: f.content,
+        }))
+      );
+    } else {
+      setAttachedFiles([]);
+    }
+  }, [activeSessionId]);
+
+  const handleRemoveAttachedFile = useCallback((idx: number) => {
+    removeAttachedFile(idx);
+    const updated = attachedFiles.filter((_, i) => i !== idx);
+    updateActiveSessionFiles(
+      updated.map((f) => ({
+        name: f.name,
+        type: f.type || 'text/plain',
+        size: f.size,
+        content: f.content,
+        summary: f.unzippedResult
+          ? `${f.unzippedResult.extractedCodeFilesCount} code files extracted (${Math.round(f.size / 1024)} KB)`
+          : `${Math.round(f.content.length / 1000)}k chars (${Math.round(f.size / 1024)} KB)`,
+      }))
+    );
+  }, [attachedFiles, removeAttachedFile, updateActiveSessionFiles]);
+
+  const handleProcessAndSyncFiles = useCallback(async (files: FileList | File[]) => {
+    await processFiles(files);
+  }, [processFiles]);
 
   // Theme Preference State Hook
   const { theme, setTheme } = useTheme();
@@ -910,7 +1001,15 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       localStorage.setItem('council_default_models', modelsString);
       setInternalSettings(prev => ({ ...prev, defaultModels: models }));
     }
-  }, [personas, synthesizer]);
+
+    if (activeSessionId) {
+      updateActiveSessionConfig({
+        presetId: activePresetId,
+        personas,
+        synthesizer,
+      });
+    }
+  }, [personas, synthesizer, activePresetId, activeSessionId, updateActiveSessionConfig]);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -1093,6 +1192,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || synthesizer.enableSearchGrounding)),
         query: queryText,
         signal,
+        disableFallback: Boolean(settings.disableFallback),
         onGrounding: (gData) => { streamGroundingData = gData; },
         onToken: (chunk) => {
           if (!fullSynthesis) {
@@ -1100,6 +1200,32 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           }
           fullSynthesis += chunk;
           dispatch({ type: 'UPDATE_SYNTHESIS_TOKEN', payload: { roundId: targetRoundId, chunk } });
+
+          const hasCodeArchive = Boolean(
+            queryText.includes('[CODEBASE FILE CONTENTS]') ||
+            queryText.includes('[CODEBASE FILE TREE]') ||
+            queryText.includes('--- Attached File:') ||
+            (attachedImages && attachedImages.length > 0)
+          );
+          if (hasCodeArchive) {
+            const refusalCheck = detectCodeCapabilityRefusal(fullSynthesis, true);
+            if (refusalCheck.isRefusal) {
+              console.warn(`[CapabilityGuard] Synthesizer refused code reading:`, refusalCheck.snippet);
+              const failure: CapabilityFailure = {
+                personaId: 'synthesizer',
+                personaName: synthesizer.name || 'Chairman',
+                model: targetSynthModel,
+                stage: 3,
+                reason: 'Chairman stated it cannot read code archive or inspect source files.',
+                detectedSnippet: refusalCheck.snippet,
+              };
+              updateRoundInActiveSession(targetRoundId, (r) => ({
+                ...r,
+                capabilityFailure: failure,
+              }));
+              showToast(`Deliberation halted: Chairman (${targetSynthModel}) reported inability to read the codebase.`, 6000);
+            }
+          }
         },
       });
 
@@ -1388,6 +1514,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
           query: round.userQuery,
           signal: abortController.signal,
+          disableFallback: Boolean(settings.disableFallback),
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
@@ -1481,6 +1608,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
           query: round.userQuery,
           signal: abortController.signal,
+          disableFallback: Boolean(settings.disableFallback),
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
@@ -1658,6 +1786,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
               enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
               query: round.userQuery,
               signal: abortController.signal,
+              disableFallback: Boolean(settings.disableFallback),
               activePersonas,
               synthesizer,
               rawModels: rawModelsCatalog,
@@ -1766,6 +1895,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
                 enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
                 query: round.userQuery,
                 signal: abortController.signal,
+                disableFallback: Boolean(settings.disableFallback),
                 activePersonas,
                 synthesizer,
                 rawModels: rawModelsCatalog,
@@ -1899,10 +2029,21 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       }
 
       const previousRoundsToPass = isIsolated ? [] : rounds.filter((r) => r.id !== roundId);
+      const sessionFiles = activeSession?.attachedFiles || (attachedFiles.length > 0 ? attachedFiles.map((f) => ({
+        name: f.name,
+        type: f.type || 'text/plain',
+        size: f.size,
+        content: f.content,
+        summary: f.unzippedResult
+          ? `${f.unzippedResult.extractedCodeFilesCount} code files extracted (${Math.round(f.size / 1024)} KB)`
+          : `${Math.round(f.content.length / 1000)}k chars (${Math.round(f.size / 1024)} KB)`,
+      })) : undefined);
+
       const messages = await buildArchivistContext({
         systemPrompt: persona.systemPrompt,
         userQuery: queryText,
         attachedImages,
+        sessionFiles,
         rounds: previousRoundsToPass,
         apiKey: settings.apiKey,
         recentRoundsWindow: settings.archivistRecentRounds ?? 2,
@@ -1930,6 +2071,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
           query: queryText,
           signal: perCallSignal,
+          disableFallback: Boolean(settings.disableFallback),
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
@@ -1942,6 +2084,34 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
               type: 'UPDATE_STAGE1_TOKEN',
               payload: { roundId, personaId: persona.id, chunk },
             });
+
+            const hasCodeArchive = Boolean(
+              (attachedFiles && attachedFiles.some((f) => f.unzippedResult || f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.rar') || f.content?.includes('[CODEBASE FILE CONTENTS]'))) ||
+              (activeSession?.attachedFiles && activeSession.attachedFiles.some((f) => f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.rar') || f.content?.includes('[CODEBASE FILE CONTENTS]'))) ||
+              queryText.includes('[CODEBASE FILE CONTENTS]') ||
+              queryText.includes('[CODEBASE FILE TREE]')
+            );
+            if (hasCodeArchive) {
+              const refusalCheck = detectCodeCapabilityRefusal(content, true);
+              if (refusalCheck.isRefusal) {
+                console.warn(`[CapabilityGuard] Stage 1 Persona ${persona.name} refused code reading:`, refusalCheck.snippet);
+                const executedModel = persona.model || settings.defaultModels[persona.id] || 'Unknown';
+                const failure: CapabilityFailure = {
+                  personaId: persona.id,
+                  personaName: persona.name,
+                  model: executedModel,
+                  stage: 1,
+                  reason: 'Model reported inability to read code archive or inspect source files.',
+                  detectedSnippet: refusalCheck.snippet,
+                };
+                abortController.abort();
+                updateRoundInActiveSession(roundId, (r) => ({
+                  ...r,
+                  capabilityFailure: failure,
+                }));
+                showToast(`Deliberation halted: ${persona.name} (${executedModel}) reported inability to read the codebase.`, 6000);
+              }
+            }
           },
         });
 
@@ -2161,6 +2331,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
           query: queryText,
           signal: abortController.signal,
+          disableFallback: Boolean(settings.disableFallback),
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
@@ -2173,6 +2344,34 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
               type: 'UPDATE_STAGE2_TOKEN',
               payload: { roundId, personaId: persona.id, chunk },
             });
+
+            const hasCodeArchive = Boolean(
+              (attachedFiles && attachedFiles.some((f) => f.unzippedResult || f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.rar') || f.content?.includes('[CODEBASE FILE CONTENTS]'))) ||
+              (activeSession?.attachedFiles && activeSession.attachedFiles.some((f) => f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.rar') || f.content?.includes('[CODEBASE FILE CONTENTS]'))) ||
+              queryText.includes('[CODEBASE FILE CONTENTS]') ||
+              queryText.includes('[CODEBASE FILE TREE]')
+            );
+            if (hasCodeArchive) {
+              const refusalCheck = detectCodeCapabilityRefusal(content, true);
+              if (refusalCheck.isRefusal) {
+                console.warn(`[CapabilityGuard] Stage 2 Persona ${persona.name} refused code reading:`, refusalCheck.snippet);
+                const executedModel2 = persona.model || settings.defaultModels[persona.id] || 'Unknown';
+                const failure: CapabilityFailure = {
+                  personaId: persona.id,
+                  personaName: persona.name,
+                  model: executedModel2,
+                  stage: 2,
+                  reason: 'Model reported inability to read code archive or inspect source files.',
+                  detectedSnippet: refusalCheck.snippet,
+                };
+                abortController.abort();
+                updateRoundInActiveSession(roundId, (r) => ({
+                  ...r,
+                  capabilityFailure: failure,
+                }));
+                showToast(`Deliberation halted: ${persona.name} (${executedModel2}) reported inability to read the codebase.`, 6000);
+              }
+            }
           },
         });
 
@@ -2313,6 +2512,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         temperature: 0.5,
         maxTokens: settings.synthesisMaxTokens || executionPolicy.maxOutputTokens || 500,
         signal: abortController.signal,
+        disableFallback: Boolean(settings.disableFallback),
         activePersonas: personas.filter((p) => p.enabled !== false),
         synthesizer,
         rawModels: rawModelsCatalog,
@@ -2352,8 +2552,51 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     const round = rounds.find((r) => r.id === roundId);
     if (!round) return;
 
+    // Clear any previous capability failure on re-run
+    updateRoundInActiveSession(roundId, (r) => ({
+      ...r,
+      capabilityFailure: undefined,
+    }));
+
     const mode = round.resolvedMode || resolveExecutionMode(settings.executionMode || 'auto', round.userQuery);
     await runRoundExecution(round.id, round.userQuery, round.attachedImages, mode);
+  };
+
+  const handleUpgradeToCodingModels = async (roundId: string) => {
+    if (isDeliberating) return;
+    const { updatedPersonas, updatedSynthesizer } = upgradeToHighCapabilityCodingCouncil(personas, synthesizer);
+    setPersonas(updatedPersonas);
+    setSynthesizer(updatedSynthesizer);
+
+    updateRoundInActiveSession(roundId, (r) => ({
+      ...r,
+      capabilityFailure: undefined,
+    }));
+
+    showToast('Upgraded council to Claude 3.7 Sonnet, DeepSeek V3 & Gemini Flash. Restarting deliberation...', 4000);
+    await reRunRoundDeliberation(roundId);
+  };
+
+  const handleSwitchToGeminiFlash = async (roundId: string) => {
+    if (isDeliberating) return;
+    const updatedPersonas = personas.map((p) => ({
+      ...p,
+      model: 'google/gemini-3.7-flash',
+    }));
+    const updatedSynthesizer = {
+      ...synthesizer,
+      model: 'google/gemini-3.7-flash',
+    };
+    setPersonas(updatedPersonas);
+    setSynthesizer(updatedSynthesizer);
+
+    updateRoundInActiveSession(roundId, (r) => ({
+      ...r,
+      capabilityFailure: undefined,
+    }));
+
+    showToast('Switched all personas to Gemini 3.7 Flash (1M+ context). Restarting deliberation...', 4000);
+    await reRunRoundDeliberation(roundId);
   };
 
   const handleDeliberate = async (e?: React.FormEvent) => {
@@ -2370,7 +2613,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     }
 
     if (attachedFiles.length > 0) {
-      const allowedExtensions = ['.txt', '.md', '.csv', '.json', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.heic', '.svg', '.zip'];
+      const allowedExtensions = ['.txt', '.md', '.csv', '.json', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.heic', '.svg', '.zip', '.rar', '.tar', '.gz', '.tgz', '.7z'];
       const unsupportedFiles = attachedFiles.filter(f => !allowedExtensions.some(ext => f.name.toLowerCase().endsWith(ext)) && !f.type?.startsWith('image/'));
       
       if (unsupportedFiles.length > 0) {
@@ -2405,7 +2648,9 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     const displayUserQuery = cleanUserQuery || (textFiles.length > 0 ? `Review attached file context (${textFiles.map(f => f.name).join(', ')})` : 'Untitled Deliberation');
 
     setQuery('');
-    setAttachedFiles([]);
+    if (structuredAttachedTextFiles.length > 0) {
+      updateActiveSessionFiles(structuredAttachedTextFiles);
+    }
     setIsDeliberating(true);
 
     const mode = resolveExecutionMode(settings.executionMode || 'auto', queryTextForLLM, textFiles);
@@ -2603,6 +2848,9 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                 onReRunRound={reRunRoundDeliberation}
                 onEditPrompt={handleEditPrompt}
                 onResumeRound={resumeIncompleteRound}
+                onUpgradeAndReRun={handleUpgradeToCodingModels}
+                onSwitchToGeminiFlash={handleSwitchToGeminiFlash}
+                onOpenSettings={() => setIsSettingsOpen(true)}
                 incompleteStage={(() => {
                   const activePersonas = personas.filter((p) => p.enabled !== false);
                   return getRoundIncompleteStage(round, activePersonas);
@@ -2637,7 +2885,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         isDeliberating={isDeliberating}
         handleDeliberate={handleDeliberate}
         handleStop={handleStop}
-        removeAttachedFile={removeAttachedFile}
+        removeAttachedFile={handleRemoveAttachedFile}
         fileInputRef={fileInputRef}
         handleFileUpload={handleFileUpload}
         handleDrop={handleDrop}
@@ -2733,6 +2981,10 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         setArchivistRecentRounds={updateArchivistRecentRounds}
         proCompareModelId={settings.proCompareModelId || 'anthropic/claude-3.7-sonnet'}
         setProCompareModelId={updateProCompareModelId}
+        disableFallback={settings.disableFallback}
+        setDisableFallback={updateDisableFallback}
+        disableLoadingOverlay={settings.disableLoadingOverlay}
+        setDisableLoadingOverlay={updateDisableLoadingOverlay}
         notificationPreferences={settings.notificationPreferences}
         onUpdateNotifications={updateNotificationPreferences}
         onExportSessions={exportSessionsJSON}
@@ -2764,12 +3016,35 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       {/* Unified Accessible Toast Notifications */}
       <UnifiedToast toasts={toasts} onDismiss={dismissToast} />
 
-      {/* Global Busy Overlay (Full screen, non-interactive) */}
-      {isDeliberating && (
+      {/* Global Busy Overlay (Optional, user can dismiss or permanently opt out) */}
+      {isDeliberating && !settings.disableLoadingOverlay && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/40 backdrop-blur-xs pointer-events-auto">
-          <div className="flex items-center gap-3 p-4 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl text-slate-200 text-sm font-semibold animate-pulse">
-            <Loader2 size={20} className="animate-spin text-cyan-400" />
-            <span>Council Deliberating...</span>
+          <div className="flex flex-col items-center gap-3 p-5 rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl text-slate-200 text-sm font-semibold max-w-xs text-center">
+            <div className="flex items-center gap-2.5 text-cyan-400">
+              <Loader2 size={20} className="animate-spin text-cyan-400" />
+              <span>Council Deliberating...</span>
+            </div>
+            <p className="text-xs text-slate-400 font-normal">
+              Stage execution in progress. You can watch live in feed or dismiss this overlay.
+            </p>
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => updateDisableLoadingOverlay(true)}
+                className="text-xs text-slate-400 hover:text-slate-200 underline cursor-pointer"
+                title="Never show this loading overlay again (can re-enable in Settings > Advanced)"
+              >
+                Don't show again
+              </button>
+              <span className="text-slate-600">•</span>
+              <button
+                type="button"
+                onClick={() => updateDisableLoadingOverlay(true)}
+                className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 border border-slate-700 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
         </div>
       )}

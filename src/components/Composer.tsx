@@ -43,6 +43,8 @@ export interface ComposerProps {
   onToggleSearchGrounding?: () => void;
   webMode?: WebMode;
   onUpdateWebMode?: (mode: WebMode) => void;
+  setActiveZipResult?: (result: ZipArchiveResult | null) => void;
+  setIsZipModalOpen?: (isOpen: boolean) => void;
   [key: string]: any;
 }
 
@@ -75,6 +77,8 @@ export const Composer: React.FC<ComposerProps> = ({
   onToggleSearchGrounding,
   webMode = 'auto',
   onUpdateWebMode,
+  setActiveZipResult,
+  setIsZipModalOpen,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [showCostDetails, setShowCostDetails] = useState(false);
@@ -108,25 +112,57 @@ export const Composer: React.FC<ComposerProps> = ({
 
         {/* Attachments list */}
         {attachedFiles.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2">
-            {attachedFiles.map((file, idx) => (
-              <div
-                key={idx}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800 max-w-full shadow-xs"
-              >
-                <Paperclip size={12} className="text-cyan-500 shrink-0" />
-                <span className="font-mono text-[11px] whitespace-normal break-words max-w-full text-slate-700 dark:text-slate-300" title={file.name}>
-                  {file.name}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => removeAttachedFile(idx)}
-                  className="text-slate-400 hover:text-red-500 shrink-0 cursor-pointer p-0.5"
+          <div className="flex flex-wrap items-center gap-2 pt-0.5">
+            <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 dark:text-slate-500 mr-1 select-none">
+              Thread Files:
+            </span>
+            {attachedFiles.map((file, idx) => {
+              const isArchive =
+                file.name.toLowerCase().endsWith('.zip') ||
+                file.name.toLowerCase().endsWith('.rar') ||
+                file.name.toLowerCase().endsWith('.tar') ||
+                file.name.toLowerCase().endsWith('.7z') ||
+                !!file.unzippedResult;
+              return (
+                <div
+                  key={`${file.name}-${idx}`}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800 max-w-full shadow-2xs group transition-colors hover:border-slate-300 dark:hover:border-slate-700"
                 >
-                  <X size={12} />
-                </button>
-              </div>
-            ))}
+                  <Paperclip size={12} className="text-cyan-500 shrink-0" />
+                  {isArchive && file.unzippedResult ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveZipResult?.(file.unzippedResult || null);
+                        setIsZipModalOpen?.(true);
+                      }}
+                      className="font-mono text-[11px] whitespace-normal break-words max-w-full text-cyan-600 dark:text-cyan-400 hover:underline cursor-pointer text-left"
+                      title="Click to inspect archive files"
+                    >
+                      {file.name}
+                    </button>
+                  ) : (
+                    <span className="font-mono text-[11px] whitespace-normal break-words max-w-full text-slate-700 dark:text-slate-300" title={file.name}>
+                      {file.name}
+                    </span>
+                  )}
+                  <span className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">
+                    {file.unzippedResult
+                      ? `${file.unzippedResult.extractedCodeFilesCount} files`
+                      : `${Math.round(file.size / 1024) || 1}KB`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachedFile(idx)}
+                    className="text-slate-400 hover:text-red-500 dark:hover:text-red-400 shrink-0 cursor-pointer p-0.5 ml-0.5 rounded transition-colors"
+                    title="Delete file from thread context"
+                    aria-label={`Delete ${file.name} from thread context`}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -189,7 +225,7 @@ export const Composer: React.FC<ComposerProps> = ({
             onChange={handleFileUpload}
             multiple
             className="hidden"
-            accept=".txt,.md,.csv,.json,.js,.ts,.jsx,.tsx,.html,.css,.pdf,.zip,text/*,application/json,application/pdf,application/zip,image/*"
+            accept=".txt,.md,.csv,.json,.js,.ts,.jsx,.tsx,.html,.css,.pdf,.png,.jpg,.jpeg,.webp,.gif,.heic,.svg,.zip,.rar,.tar,.gz,.tgz,.7z,text/*,application/json,application/pdf,application/zip,application/x-rar,application/x-zip-compressed,image/*"
           />
 
           {/* Attach file button */}
@@ -198,7 +234,7 @@ export const Composer: React.FC<ComposerProps> = ({
             disabled={isDeliberating}
             onClick={() => fileInputRef.current?.click()}
             className="min-h-[44px] min-w-[44px] sm:h-[48px] sm:w-[48px] rounded-xl bg-white dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-800/80 border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-cyan-500 transition-colors shrink-0 disabled:opacity-40 cursor-pointer flex items-center justify-center shadow-xs"
-            title="Upload context documents, data files, or code"
+            title="Upload context documents, data files, or codebase zip/rar archives"
           >
             <Paperclip size={18} />
           </button>

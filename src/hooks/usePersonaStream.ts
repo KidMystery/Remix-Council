@@ -15,6 +15,7 @@ export interface PersonaStreamOptions {
   enableWebGrounding?: boolean;
   query?: string;
   signal?: AbortSignal;
+  disableFallback?: boolean;
   onToken?: (chunk: string) => void;
   onGrounding?: (grounding: GroundingData) => void;
 }
@@ -32,6 +33,7 @@ export function usePersonaStream() {
       enableWebGrounding: options.enableWebGrounding,
       query: options.query,
       signal: options.signal,
+      disableFallback: options.disableFallback,
       onToken: options.onToken,
       onGrounding: options.onGrounding,
     });

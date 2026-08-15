@@ -1,4 +1,5 @@
 import { WebMode } from './shared/webGrounding';
+import type { PresetId } from './lib/presets';
 
 export type PersonaId = string;
 
@@ -71,6 +72,15 @@ export interface NotificationPreferences {
   notifyOnCostThreshold?: boolean;
 }
 
+export interface CapabilityFailure {
+  personaId: string;
+  personaName: string;
+  model: string;
+  stage: 1 | 2 | 3;
+  reason: string;
+  detectedSnippet: string;
+}
+
 export interface CouncilRound {
   id: string;
   userQuery: string;
@@ -91,6 +101,7 @@ export interface CouncilRound {
   };
   attachedImages?: { name: string; url: string; type: string }[];
   attachedTextFiles?: AttachedTextFile[];
+  capabilityFailure?: CapabilityFailure;
   auditLogId?: string;
   archivistSummary?: string;
   rating?: RoundRating;
@@ -113,6 +124,12 @@ export interface Session {
   createdAt: number;
   updatedAt: number;
   userId?: string;
+  presetId?: PresetId;
+  personas?: Persona[];
+  synthesizer?: Persona;
+  customModels?: Record<string, string>;
+  synthesizerModel?: string;
+  attachedFiles?: AttachedTextFile[];
 }
 
 export interface Settings {
@@ -126,6 +143,8 @@ export interface Settings {
   panelTimeoutSeconds?: number;
   enableSearchGrounding?: boolean;
   webMode?: WebMode;
+  disableFallback?: boolean;
+  disableLoadingOverlay?: boolean;
   maxRoundCostCeiling?: number;
   stopAfterStage1?: boolean;
   useSingleModelForSimple?: boolean;

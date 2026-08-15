@@ -1,5 +1,15 @@
 import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, getDoc, collection, query, getDocs, deleteDoc, Firestore } from 'firebase/firestore';
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  getDoc,
+  collection,
+  query,
+  getDocs,
+  deleteDoc,
+  Firestore,
+} from 'firebase/firestore';
 import {
   getAuth,
   signInWithPopup,
@@ -12,7 +22,56 @@ import {
   signOut,
 } from 'firebase/auth';
 import config from '../../firebase-applet-config.json';
-import { Session, Settings, Persona } from '../types';
+import { Session, Settings, Persona, AttachedTextFile } from '../types';
+
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const currentAuth = getFirebaseAuth();
+  const currentUser = currentAuth?.currentUser;
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: currentUser?.uid,
+      email: currentUser?.email,
+      emailVerified: currentUser?.emailVerified,
+      isAnonymous: currentUser?.isAnonymous,
+      tenantId: currentUser?.tenantId,
+      providerInfo: currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 export interface PersistedSession {
   id: string;
@@ -23,6 +82,12 @@ export interface PersistedSession {
   createdAt: number;
   updatedAt: number;
   shareToken?: string;
+  presetId?: any;
+  personas?: Persona[];
+  synthesizer?: Persona;
+  customModels?: Record<string, string>;
+  synthesizerModel?: string;
+  attachedFiles?: AttachedTextFile[];
 }
 
 export interface UserCloudData {
@@ -51,6 +116,20 @@ let app: FirebaseApp | null = null;
 let db: Firestore | null = null;
 let auth: Auth | null = null;
 let persistenceInitialized = false;
+
+function isOfflineOrUnavailableError(error: unknown): boolean {
+  if (!error) return false;
+  const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  const code = (error as any)?.code;
+  return (
+    code === 'unavailable' ||
+    code === 'failed-precondition' ||
+    msg.includes('offline') ||
+    msg.includes('unavailable') ||
+    msg.includes('client is offline') ||
+    msg.includes('network error')
+  );
+}
 
 export function initPersistence(): boolean {
   if (getApps().length === 0) {
@@ -106,23 +185,27 @@ export function getFirebaseDb(): Firestore | null {
 
 export async function syncCouncilSession(session: PersistedSession): Promise<string> {
   if (!db) initPersistence();
+  const path = `users/${session.userId}/sessions/${session.id}`;
+
+  try {
+    localStorage.setItem('council_local_backup_' + session.id, JSON.stringify(session));
+  } catch (e) {
+    console.warn('Failed to store local backup session:', e);
+  }
+
   if (!db || !session.userId) {
-    try {
-      localStorage.setItem('council_local_backup_' + session.id, JSON.stringify(session));
-    } catch (e) {
-      console.warn('Failed to store local backup session:', e);
-    }
     return session.shareToken || session.id;
   }
 
   try {
     await setDoc(doc(db, 'users', session.userId, 'sessions', session.id), session, { merge: true });
     return session.shareToken || session.id;
-  } catch (e) {
-    console.warn('Firestore setDoc failed, attempting localStorage fallback:', e);
-    try {
-      localStorage.setItem('council_local_backup_' + session.id, JSON.stringify(session));
-    } catch {}
+  } catch (e: any) {
+    if (isOfflineOrUnavailableError(e)) {
+      console.warn('Firestore offline: session stored in local backup.', session.id);
+      return session.shareToken || session.id;
+    }
+    console.warn('Firestore setDoc failed, retained in local storage:', e);
     return session.shareToken || session.id;
   }
 }
@@ -130,6 +213,8 @@ export async function syncCouncilSession(session: PersistedSession): Promise<str
 export async function loadUserSessions(userId: string): Promise<PersistedSession[]> {
   if (!db) initPersistence();
   if (!db || !userId) return [];
+
+  const path = `users/${userId}/sessions`;
   try {
     const sessionsRef = collection(db, 'users', userId, 'sessions');
     const q = query(sessionsRef);
@@ -139,8 +224,12 @@ export async function loadUserSessions(userId: string): Promise<PersistedSession
       sessions.push(doc.data() as PersistedSession);
     });
     return sessions;
-  } catch (e) {
-    console.error('Failed to load user sessions from Firestore:', e);
+  } catch (e: any) {
+    if (isOfflineOrUnavailableError(e)) {
+      console.warn('Firestore offline: using local sessions cache.');
+      return [];
+    }
+    console.warn('Could not load user sessions from Firestore:', e);
     return [];
   }
 }
@@ -148,10 +237,15 @@ export async function loadUserSessions(userId: string): Promise<PersistedSession
 export async function deleteCloudSession(userId: string, sessionId: string): Promise<void> {
   if (!db) initPersistence();
   if (!db || !userId || !sessionId) return;
+  const path = `users/${userId}/sessions/${sessionId}`;
   try {
     await deleteDoc(doc(db, 'users', userId, 'sessions', sessionId));
-  } catch (e) {
-    console.error('Failed to delete cloud session:', e);
+  } catch (e: any) {
+    if (isOfflineOrUnavailableError(e)) {
+      console.warn('Firestore offline: session deletion deferred.');
+      return;
+    }
+    console.warn('Failed to delete cloud session:', e);
   }
 }
 
@@ -162,7 +256,7 @@ export async function syncUserSettings(
   synthesizer?: Persona
 ): Promise<void> {
   if (!db) initPersistence();
-  if (!db || !userId) return;
+  if (!userId) return;
 
   const payload: UserCloudData = {
     updatedAt: Date.now(),
@@ -171,25 +265,58 @@ export async function syncUserSettings(
   if (personas) payload.personas = personas;
   if (synthesizer) payload.synthesizer = synthesizer;
 
+  // Always mirror to local storage
+  try {
+    localStorage.setItem(`council_user_settings_${userId}`, JSON.stringify(payload));
+  } catch {}
+
+  if (!db) return;
+
+  const path = `users/${userId}/settings/global_preferences`;
   try {
     await setDoc(doc(db, 'users', userId, 'settings', 'global_preferences'), payload, { merge: true });
-  } catch (e) {
-    console.error('Failed to sync user settings to Firestore:', e);
+  } catch (e: any) {
+    if (isOfflineOrUnavailableError(e)) {
+      console.warn('Firestore offline: user settings saved to local storage.');
+      return;
+    }
+    console.warn('Failed to sync user settings to Firestore (saved locally):', e);
   }
 }
 
 export async function loadUserSettings(userId: string): Promise<UserCloudData | null> {
   if (!db) initPersistence();
-  if (!db || !userId) return null;
+
+  // Check local cache first as instantaneous fallback
+  let localData: UserCloudData | null = null;
+  try {
+    const raw = localStorage.getItem(`council_user_settings_${userId}`);
+    if (raw) {
+      localData = JSON.parse(raw);
+    }
+  } catch {}
+
+  if (!db || !userId) return localData;
+
+  const path = `users/${userId}/settings/global_preferences`;
   try {
     const snap = await getDoc(doc(db, 'users', userId, 'settings', 'global_preferences'));
     if (snap.exists()) {
-      return snap.data() as UserCloudData;
+      const data = snap.data() as UserCloudData;
+      // Update local mirror
+      try {
+        localStorage.setItem(`council_user_settings_${userId}`, JSON.stringify(data));
+      } catch {}
+      return data;
     }
-    return null;
-  } catch (e) {
-    console.error('Failed to load user settings from Firestore:', e);
-    return null;
+    return localData;
+  } catch (e: any) {
+    if (isOfflineOrUnavailableError(e)) {
+      console.warn('Firestore offline: loaded user settings from local backup.');
+      return localData;
+    }
+    console.warn('Could not load user settings from Firestore (using local fallback):', e);
+    return localData;
   }
 }
 

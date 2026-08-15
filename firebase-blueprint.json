@@ -1,0 +1,53 @@
+{
+  "entities": {
+    "UserSession": {
+      "title": "UserSession",
+      "description": "Council deliberation session saved by an authenticated user",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique session identifier"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Identifier of the user who owns this session"
+        },
+        "title": {
+          "type": "string",
+          "description": "Human-readable session title"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Session creation timestamp in milliseconds"
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Last updated timestamp in milliseconds"
+        }
+      },
+      "required": ["id", "userId", "title", "createdAt", "updatedAt"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "Global user preferences, custom personas, and synthesizer configurations",
+      "type": "object",
+      "properties": {
+        "updatedAt": {
+          "type": "number",
+          "description": "Last updated timestamp in milliseconds"
+        }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": "UserSession",
+      "description": "User specific council sessions"
+    },
+    "/users/{userId}/settings/{docId}": {
+      "schema": "UserSettings",
+      "description": "User global preferences and custom models"
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Session, CouncilRound } from '../types';
+import { Session, CouncilRound, Persona, AttachedTextFile } from '../types';
+import type { PresetId } from '../lib/presets';
 import { summarizeTitle } from '../lib/titleUtils';
 import {
   isPersistenceEnabled,
@@ -72,6 +73,12 @@ export function useSessionManager(user: User | null = null) {
                   createdAt: cloudSess.createdAt,
                   updatedAt: cloudSess.updatedAt,
                   userId: cloudSess.userId,
+                  presetId: cloudSess.presetId || localSess.presetId,
+                  personas: cloudSess.personas || localSess.personas,
+                  synthesizer: cloudSess.synthesizer || localSess.synthesizer,
+                  customModels: cloudSess.customModels || localSess.customModels,
+                  synthesizerModel: cloudSess.synthesizerModel || localSess.synthesizerModel,
+                  attachedFiles: cloudSess.attachedFiles || localSess.attachedFiles,
                 });
               } else {
                 mergedSessions.push(localSess);
@@ -84,6 +91,12 @@ export function useSessionManager(user: User | null = null) {
                 createdAt: cloudSess.createdAt,
                 updatedAt: cloudSess.updatedAt,
                 userId: cloudSess.userId,
+                presetId: cloudSess.presetId,
+                personas: cloudSess.personas,
+                synthesizer: cloudSess.synthesizer,
+                customModels: cloudSess.customModels,
+                synthesizerModel: cloudSess.synthesizerModel,
+                attachedFiles: cloudSess.attachedFiles,
               });
             }
           });
@@ -135,12 +148,67 @@ export function useSessionManager(user: User | null = null) {
           rounds: session.rounds,
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
+          presetId: session.presetId,
+          personas: session.personas,
+          synthesizer: session.synthesizer,
+          customModels: session.customModels,
+          synthesizerModel: session.synthesizerModel,
         });
       });
     }
   }, [data, isCloudSyncEnabled, userId]);
 
   const activeSession = data.sessions.find((s) => s.id === data.activeSessionId);
+
+  const updateActiveSessionConfig = useCallback((config: {
+    presetId?: PresetId;
+    personas?: Persona[];
+    synthesizer?: Persona;
+    customModels?: Record<string, string>;
+    synthesizerModel?: string;
+  }) => {
+    setData((prev) => {
+      const activeIndex = prev.sessions.findIndex((s) => s.id === prev.activeSessionId);
+      if (activeIndex === -1) return prev;
+
+      const sessions = [...prev.sessions];
+      const targetSession = sessions[activeIndex];
+      sessions[activeIndex] = {
+        ...targetSession,
+        presetId: config.presetId !== undefined ? config.presetId : targetSession.presetId,
+        personas: config.personas !== undefined ? config.personas : targetSession.personas,
+        synthesizer: config.synthesizer !== undefined ? config.synthesizer : targetSession.synthesizer,
+        customModels: config.customModels !== undefined ? config.customModels : targetSession.customModels,
+        synthesizerModel: config.synthesizerModel !== undefined ? config.synthesizerModel : targetSession.synthesizerModel,
+        updatedAt: Date.now(),
+      };
+
+      return {
+        ...prev,
+        sessions,
+      };
+    });
+  }, []);
+
+  const updateActiveSessionFiles = useCallback((files: AttachedTextFile[] | undefined) => {
+    setData((prev) => {
+      const activeIndex = prev.sessions.findIndex((s) => s.id === prev.activeSessionId);
+      if (activeIndex === -1) return prev;
+
+      const sessions = [...prev.sessions];
+      const targetSession = sessions[activeIndex];
+      sessions[activeIndex] = {
+        ...targetSession,
+        attachedFiles: files,
+        updatedAt: Date.now(),
+      };
+
+      return {
+        ...prev,
+        sessions,
+      };
+    });
+  }, []);
 
   const createNewSession = useCallback((initialTitle?: string): Session => {
     const newSession: Session = {
@@ -399,6 +467,8 @@ export function useSessionManager(user: User | null = null) {
     clearAllSessions,
     addRoundToActiveSession,
     updateRoundInActiveSession,
+    updateActiveSessionConfig,
+    updateActiveSessionFiles,
     deleteRoundFromActiveSession,
     exportSessionsJSON,
     importSessionsJSON,

@@ -77,11 +77,15 @@ export const UnifiedToast: React.FC<UnifiedToastProps> = ({ toasts, onDismiss })
                 <div className="min-w-0 flex-1">
                   {toast.title && (
                     <h4 className="text-xs font-bold uppercase tracking-wider font-mono opacity-90">
-                      {toast.title}
+                      {typeof toast.title === 'string' ? toast.title : String(toast.title || '')}
                     </h4>
                   )}
                   <p className="text-sm font-medium leading-relaxed break-words">
-                    {toast.message}
+                    {typeof toast.message === 'string'
+                      ? toast.message
+                      : typeof toast.message === 'object' && toast.message !== null
+                      ? ((toast.message as any).message || JSON.stringify(toast.message))
+                      : String(toast.message || '')}
                   </p>
                 </div>
               </div>
@@ -159,7 +163,11 @@ export const UnifiedToast: React.FC<UnifiedToastProps> = ({ toasts, onDismiss })
                   )}
                 </button>
                 <pre className="whitespace-pre-wrap break-all text-slate-600 dark:text-slate-300 pr-6">
-                  {toast.details}
+                  {typeof toast.details === 'string'
+                    ? toast.details
+                    : typeof toast.details === 'object' && toast.details !== null
+                    ? JSON.stringify(toast.details, null, 2)
+                    : String(toast.details || '')}
                 </pre>
               </div>
             )}

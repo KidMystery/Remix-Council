@@ -16,6 +16,11 @@ export const ZipFilesModal: React.FC<ZipFilesModalProps> = ({ zipResult, isOpen,
 
   if (!isOpen || !zipResult) return null;
 
+  const isRar =
+    zipResult.archiveType === 'rar' ||
+    zipResult.filename.toLowerCase().endsWith('.rar');
+  const archiveLabel = isRar ? 'RAR' : 'ZIP';
+
   const filteredFiles = zipResult.files.filter(
     (f) =>
       f.path.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -48,11 +53,16 @@ export const ZipFilesModal: React.FC<ZipFilesModalProps> = ({ zipResult, isOpen,
               <Archive size={20} />
             </div>
             <div>
-              <h3 className="font-bold text-slate-100 flex items-center gap-2">
-                <span>{zipResult.filename}</span>
+              <h3 className="font-bold text-slate-100 flex items-center gap-2 flex-wrap">
+                <span className="truncate max-w-xs sm:max-w-md">{zipResult.filename}</span>
                 <span className="text-xs px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 font-mono">
-                  {zipResult.extractedCodeFilesCount} Code Files Extracted
+                  {zipResult.extractedCodeFilesCount} {archiveLabel} Code Files
                 </span>
+                {zipResult.wasTruncated && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">
+                    Capped
+                  </span>
+                )}
               </h3>
               <p className="text-xs text-slate-400">
                 Extracted code & text files sent as context to AI Council models
@@ -62,6 +72,7 @@ export const ZipFilesModal: React.FC<ZipFilesModalProps> = ({ zipResult, isOpen,
           <button
             onClick={onClose}
             className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+            aria-label="Close archive modal"
           >
             <X size={18} />
           </button>
@@ -77,7 +88,7 @@ export const ZipFilesModal: React.FC<ZipFilesModalProps> = ({ zipResult, isOpen,
                 <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
                 <input
                   type="text"
-                  placeholder="Filter extracted files..."
+                  placeholder={`Filter ${archiveLabel} files...`}
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   className="w-full bg-slate-900 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-purple-500/50"
@@ -200,7 +211,7 @@ export const ZipFilesModal: React.FC<ZipFilesModalProps> = ({ zipResult, isOpen,
         {/* Footer */}
         <div className="px-6 py-3 border-t border-slate-800 bg-slate-900/90 flex items-center justify-between text-xs text-slate-400">
           <span>
-            Zip Archive Total: <strong className="text-slate-200">{zipResult.totalFiles}</strong> entries,{' '}
+            {archiveLabel} Archive Total: <strong className="text-slate-200">{zipResult.totalFiles}</strong> entries,{' '}
             <strong className="text-purple-300">{zipResult.extractedCodeFilesCount}</strong> code/text files ready for AI evaluation.
           </span>
           <button
@@ -214,3 +225,4 @@ export const ZipFilesModal: React.FC<ZipFilesModalProps> = ({ zipResult, isOpen,
     </div>
   );
 };
+

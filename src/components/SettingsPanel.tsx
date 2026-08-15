@@ -62,6 +62,10 @@ interface SettingsPanelProps {
   setArchivistRecentRounds?: (val: number) => void;
   proCompareModelId?: string;
   setProCompareModelId?: (modelId: string) => void;
+  disableFallback?: boolean;
+  setDisableFallback?: (val: boolean) => void;
+  disableLoadingOverlay?: boolean;
+  setDisableLoadingOverlay?: (val: boolean) => void;
   notificationPreferences?: NotificationPreferences;
   onUpdateNotifications?: (prefs: NotificationPreferences) => void;
   onExportSessions?: () => void;
@@ -117,6 +121,10 @@ export function SettingsPanel({
   setArchivistRecentRounds,
   proCompareModelId = 'anthropic/claude-3.7-sonnet',
   setProCompareModelId,
+  disableFallback = false,
+  setDisableFallback,
+  disableLoadingOverlay = false,
+  setDisableLoadingOverlay,
   notificationPreferences,
   onUpdateNotifications,
   onExportSessions,
@@ -291,6 +299,10 @@ export function SettingsPanel({
               setArchivistRecentRounds={setArchivistRecentRounds}
               proCompareModelId={proCompareModelId}
               setProCompareModelId={setProCompareModelId}
+              disableFallback={disableFallback}
+              setDisableFallback={setDisableFallback}
+              disableLoadingOverlay={disableLoadingOverlay}
+              setDisableLoadingOverlay={setDisableLoadingOverlay}
               availableModels={propAvailableModels}
               onExportSessions={onExportSessions}
               onImportSessions={onImportSessions}

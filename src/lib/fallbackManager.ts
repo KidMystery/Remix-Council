@@ -262,7 +262,7 @@ export interface StreamPersonaWithFallbackOptions {
   personaId: PersonaId;
   personaName: string;
   roundId?: string;
-  apiKey: string;
+  apiKey?: string;
   model: string;
   messages: { role: 'system' | 'user' | 'assistant'; content: any }[];
   temperature?: number;
@@ -272,6 +272,7 @@ export interface StreamPersonaWithFallbackOptions {
   enableWebGrounding?: boolean;
   query?: string;
   signal?: AbortSignal;
+  disableFallback?: boolean;
   onToken?: (chunk: string) => void;
   onGrounding?: (grounding: GroundingData) => void;
   activePersonas: Persona[];
@@ -318,12 +319,13 @@ export async function streamPersonaWithFallback(
     synthesizer,
     rawModels,
     isFreeOnlyPreset = false,
+    disableFallback = false,
     onFallbackTriggered,
   } = options;
 
   let currentModel = options.model;
   const attemptedModels = new Set<string>();
-  const MAX_FALLBACK_ATTEMPTS = 3;
+  const MAX_FALLBACK_ATTEMPTS = disableFallback ? 1 : 3;
 
   let attempts = 0;
   let lastError: any = null;
@@ -347,6 +349,7 @@ export async function streamPersonaWithFallback(
         enableWebGrounding,
         query,
         signal,
+        disableFallback,
         onToken: (chunk) => {
           if (chunk) hasTokenStreamed = true;
           if (onToken) onToken(chunk);
@@ -387,6 +390,29 @@ export async function streamPersonaWithFallback(
       console.warn(
         `[Fallback Triggered] Persona "${personaName}" (${personaId}) with model "${currentModel}" failed attempt ${attempts}: ${triggerReason} - ${err.message}`
       );
+
+      // If fallback is explicitly disabled by user, record event and fail fast
+      if (disableFallback) {
+        const fallbackEvent: FallbackEvent = {
+          id: `fb_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+          timestamp: Date.now(),
+          roundId,
+          personaId,
+          personaName,
+          originalModel: options.model,
+          failedModel: currentModel,
+          triggerReason,
+          errorMessage: err.message || String(err),
+          replacementModel: null,
+          replacementModelName: null,
+          status: 'fallback_failed',
+        };
+        saveFallbackEvent(fallbackEvent);
+        if (onFallbackTriggered) {
+          onFallbackTriggered(fallbackEvent);
+        }
+        throw err;
+      }
 
       // Compute backup list for replacement
       const backups = computeOrderedBackupList({

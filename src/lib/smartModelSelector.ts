@@ -196,19 +196,26 @@ export function detectTaskDomain(query: string, attachedFiles?: FileAttachment[]
     'python', 'html', 'css', 'api', 'component', 'class', 'method', 'variable', 'algorithm',
     'syntax', 'refactor', 'git', 'sql', 'database', 'json', 'pull request', 'stack trace',
     'compiler', 'app', 'developer', 'software', 'backend', 'frontend', 'framework',
+    'zip', 'archive', 'codebase', 'repository', 'repo', 'rar', 'tar', 'unzip', 'files',
   ];
 
-  const hasCodeExtension = attachedFiles?.some(f => {
+  const hasCodeOrArchiveAttachment = attachedFiles?.some(f => {
+    if ((f as any).unzippedResult || (f as any).content?.includes('[CODEBASE FILE CONTENTS]')) {
+      return true;
+    }
     const ext = f.name.toLowerCase();
     return (
-      ext.endsWith('.js') || ext.endsWith('.ts') || ext.endsWith('.tsx') || ext.endsWith('.jsx') ||
-      ext.endsWith('.py') || ext.endsWith('.java') || ext.endsWith('.cpp') || ext.endsWith('.c') ||
-      ext.endsWith('.cs') || ext.endsWith('.go') || ext.endsWith('.rs') || ext.endsWith('.html') ||
-      ext.endsWith('.css') || ext.endsWith('.sql') || ext.endsWith('.json')
+      ext.endsWith('.zip') || ext.endsWith('.rar') || ext.endsWith('.tar') || ext.endsWith('.gz') ||
+      ext.endsWith('.tgz') || ext.endsWith('.7z') || ext.endsWith('.js') || ext.endsWith('.ts') ||
+      ext.endsWith('.tsx') || ext.endsWith('.jsx') || ext.endsWith('.py') || ext.endsWith('.java') ||
+      ext.endsWith('.cpp') || ext.endsWith('.c') || ext.endsWith('.cs') || ext.endsWith('.go') ||
+      ext.endsWith('.rs') || ext.endsWith('.html') || ext.endsWith('.css') || ext.endsWith('.sql') ||
+      ext.endsWith('.json') || ext.endsWith('.vue') || ext.endsWith('.svelte') || ext.endsWith('.php') ||
+      ext.endsWith('.rb') || ext.endsWith('.swift') || ext.endsWith('.kt')
     );
   });
 
-  if (hasCodeExtension || codeKeywords.some(kw => q.includes(kw))) {
+  if (hasCodeOrArchiveAttachment || codeKeywords.some(kw => q.includes(kw))) {
     return 'code';
   }
 
