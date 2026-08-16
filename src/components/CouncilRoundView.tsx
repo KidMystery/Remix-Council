@@ -81,18 +81,30 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
   const [showStage1, setShowStage1] = React.useState(true);
   const [showStage2, setShowStage2] = React.useState(true);
 
+  const stage1CollapsedRef = React.useRef(false);
+  const stage2CollapsedRef = React.useRef(false);
+
+  React.useEffect(() => {
+    stage1CollapsedRef.current = false;
+    stage2CollapsedRef.current = false;
+  }, [round.id]);
+
   React.useEffect(() => {
     if (!isDeliberating) return;
     
-    // Auto-collapse Stage 1 when Stage 2 begins
-    const hasStage2Started = Object.values(round.deliberation?.stage2 || {}).some(r => r?.status === 'streaming' || r?.status === 'completed');
-    if (hasStage2Started) {
+    // Auto-collapse Stage 1 once when Stage 2 first begins
+    const hasStage2Started = Object.values(round.deliberation?.stage2 || {}).some(
+      (r: any) => r?.status === 'streaming' || r?.status === 'completed'
+    );
+    if (hasStage2Started && !stage1CollapsedRef.current) {
+      stage1CollapsedRef.current = true;
       setShowStage1(false);
     }
     
-    // Auto-collapse Stage 2 when Stage 3 (Synthesis) begins
+    // Auto-collapse Stage 2 once when Stage 3 (Synthesis) first begins
     const hasSynthesisStarted = round.synthesis?.status === 'streaming' || round.synthesis?.status === 'completed';
-    if (hasSynthesisStarted) {
+    if (hasSynthesisStarted && !stage2CollapsedRef.current) {
+      stage2CollapsedRef.current = true;
       setShowStage2(false);
     }
   }, [isDeliberating, round.deliberation?.stage2, round.synthesis]);

@@ -298,23 +298,19 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     return () => unsubscribe();
   }, []);
 
-  const handleGoogleLogin = async () => {
-    try {
-      const result = await loginWithGoogle();
-
-      if (result === 'redirecting') {
-        showToast('Google sign-in will continue after redirect...');
-        return;
-      }
-
-      if (result) {
-        setUser(result);
-        showToast(`Signed in as ${result.displayName || result.email}`);
-        return;
-      }
-    } catch (err: any) {
-      showToast(`Google sign-in failed: ${err?.message || String(err)}`, 'error', 6500);
+  const handleGoogleLogin = (user?: User) => {
+    if (user) {
+      setUser(user);
+      showToast(`Signed in as ${user.displayName || user.email}`);
     }
+  };
+
+  const handleGoogleLoginError = (err: Error) => {
+    const msg = err?.message || String(err);
+    if (msg.includes('auth/popup-closed-by-user') || msg.includes('cancelled')) {
+      return; // Silent ignore when user intentionally closes the popup
+    }
+    showToast(`Google sign-in failed: ${msg}`, 'error', 6500);
   };
 
   const handleGoogleLogout = async () => {
@@ -2812,6 +2808,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
           onOpenSettings={() => setIsSettingsOpen(true)}
           user={user}
           onLogin={handleGoogleLogin}
+          onLoginError={handleGoogleLoginError}
           onLogout={handleGoogleLogout}
           onCreateNewSession={createNewSession}
           isDeliberating={isDeliberating}

@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Settings as SettingsIcon, Sun, Moon, ShieldAlert, LogIn, LogOut, User as UserIcon, MoreVertical, Cloud, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { User } from 'firebase/auth';
+import { FirebaseAuthUI } from './FirebaseAuthUI';
 
 interface HeaderActionsProps {
   theme: 'dark' | 'light' | 'system';
@@ -8,7 +9,8 @@ interface HeaderActionsProps {
   onOpenAuditModal?: () => void;
   onOpenSettings: () => void;
   user?: User | null;
-  onLogin?: () => void;
+  onLogin?: (user?: User) => void;
+  onLoginError?: (error: Error) => void;
   onLogout?: () => void;
   isDeliberating?: boolean;
   isSyncing?: boolean;
@@ -23,6 +25,7 @@ export const HeaderActions: React.FC<HeaderActionsProps> = ({
   onOpenSettings,
   user,
   onLogin,
+  onLoginError,
   onLogout,
   isDeliberating,
   isSyncing,
@@ -197,19 +200,18 @@ export const HeaderActions: React.FC<HeaderActionsProps> = ({
                 )}
               </div>
             ) : (
-              onLogin && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onLogin();
-                    setIsOverflowOpen(false);
-                  }}
-                  className="w-full px-3 py-2 rounded-xl text-left text-xs font-medium text-cyan-600 dark:text-cyan-400 hover:bg-cyan-50 dark:hover:bg-cyan-950/40 flex items-center gap-2.5 transition-colors cursor-pointer"
-                >
-                  <LogIn size={15} />
-                  <span>Sign In with Google</span>
-                </button>
-              )
+              <FirebaseAuthUI 
+                onSuccess={(u) => {
+                  onLogin?.(u);
+                  setIsOverflowOpen(false);
+                }}
+                onError={(err) => {
+                  onLoginError?.(err);
+                  setIsOverflowOpen(false);
+                }}
+                isCompact={true}
+                className="text-cyan-600 dark:text-cyan-400 hover:bg-cyan-50 dark:hover:bg-cyan-950/40"
+              />
             )}
           </div>
         )}

@@ -13,6 +13,9 @@
     "models:check": "tsx scripts/validate-models.mjs",
     "test": "vitest run"
   },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/typography": "^0.5.20",
@@ -23,6 +26,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "firebase": "^12.17.1",
+    "firebase-admin": "^14.2.0",
     "jszip": "^3.10.1",
     "lucide-react": "^0.546.0",
     "marked": "^18.0.9",

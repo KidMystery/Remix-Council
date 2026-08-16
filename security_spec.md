@@ -74,3 +74,26 @@
 | Field Tampering | Immutability check | `incoming().userId == existing().userId` | Hardened |
 | Memory/Cost Bomb | Array & String bounds | `data.title.size() <= 500 && data.rounds.size() <= 50` | Hardened |
 | Catch-All Bleed | Top-level reject | `match /{document=**} { allow read, write: if false; }` | Hardened |
+
+---
+
+## 4. Operational & Deployment Setup Guide
+
+### Firebase Authentication Setup
+1. **Enable Google Provider**:
+   - Go to **Firebase Console → Authentication → Sign-in method**.
+   - Enable **Google** as a sign-in provider. If disabled, login requests will fail with `auth/operation-not-allowed`.
+2. **Configure Authorized Domains**:
+   - Go to **Firebase Console → Authentication → Settings → Authorized domains**.
+   - Add the domain where the app is hosted (e.g. Railway domain, custom domain, or preview host). If missing, sign-in will fail with `auth/unauthorized-domain`.
+
+### Server API Route Protection
+1. **Owner Authentication**:
+   - The server enforces owner authentication on protected endpoints (`/api/council`, `/api/council/account`, `/api/council/extract-archive`, `/api/council/import-github`).
+   - Set `OWNER_UID` or `OWNER_EMAIL` in the server environment to strictly bind protected API access to your Firebase account.
+   - In production environments, if neither `OWNER_UID` nor `OWNER_EMAIL` is set, the server fails closed (HTTP 403) to prevent unauthorized API execution.
+   - For non-interactive or headless clients, `COUNCIL_ACCESS_SECRET` may optionally be set as a shared secret header fallback.
+2. **Public Endpoints**:
+   - `/api/health`: Public health check (HTTP 200).
+   - `/api/council/models`: Public cached OpenRouter model catalog with per-IP rate-limiting.
+

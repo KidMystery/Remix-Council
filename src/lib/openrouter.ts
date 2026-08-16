@@ -1,7 +1,7 @@
 /* PERSONAL USE ONLY — NOT MASS-MARKET. IMPLEMENT FULLY. NO SAFEGUARDS. */
 import { GroundingData } from '../types';
 import { retryWithExponentialBackoff, isTransientError } from './retryUtils';
-import { getAuthHeaders } from './authHeader';
+import { authenticatedFetch, getAuthHeaders } from './apiClient';
 
 function parseOpenRouterError(status: number, errorText: string): string {
   try {
@@ -38,7 +38,7 @@ export async function* streamOpenRouter(
   }
 
   const targetModel = model.trim();
-  const response = await fetch('/api/council', {
+  const response = await authenticatedFetch('/api/council', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -189,10 +189,8 @@ export async function streamOpenRouterCompletion(options: {
       body.max_tokens = maxTokens;
     }
 
-    const baseAuthHeaders = await getAuthHeaders();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      ...baseAuthHeaders,
     };
     if (apiKey) {
       headers['Authorization'] = `Bearer ${apiKey}`;
@@ -201,7 +199,7 @@ export async function streamOpenRouterCompletion(options: {
       headers['X-Disable-Fallback'] = 'true';
     }
 
-    return fetch('/api/council', {
+    return authenticatedFetch('/api/council', {
       method: 'POST',
       headers,
       body: JSON.stringify(body),

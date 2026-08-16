@@ -1,3 +1,4 @@
+import { authenticatedFetch } from "./apiClient";
 import JSZip from 'jszip';
 import { ArchiveEntryStatus, ArchiveManifestEntry } from '../types';
 
@@ -400,7 +401,7 @@ async function extractViaServerEndpoint(file: File): Promise<ZipArchiveResult> {
   const arrayBuffer = await file.arrayBuffer();
   const base64Data = arrayBufferToBase64(arrayBuffer);
 
-  const response = await fetch('/api/council/extract-archive', {
+  const response = await authenticatedFetch('/api/council/extract-archive', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

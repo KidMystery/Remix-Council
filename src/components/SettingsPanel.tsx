@@ -1,5 +1,6 @@
 import { X, Cpu, Palette, Bell, User, Zap, BookmarkPlus } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import { authenticatedFetch } from '../lib/apiClient';
 import { Persona, NotificationPreferences } from '../types';
 import { applyPreset, PresetId } from '../lib/presets';
 import { CouncilPreset } from '../lib/councilPresets';
@@ -172,7 +173,7 @@ export function SettingsPanel({
 
   useEffect(() => {
     if (isOpen && activeTab === 'account') {
-      fetch('/api/council/account')
+      authenticatedFetch('/api/council/account')
         .then((r) => r.json())
         .then((d) => {
           if (d.data) {

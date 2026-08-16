@@ -1,3 +1,4 @@
+import { authenticatedFetch } from "./apiClient";
 import { RawOpenRouterModel, updatePresetsFromFetchedModels } from './presets';
 import {
   getCachedModelsWithMetadata,
@@ -77,9 +78,9 @@ export async function refreshModelRecommendations(
       const [newestRes, throughputRes, latencyRes] = await retryWithExponentialBackoff(
         async () => {
           const [nRes, tRes, lRes] = await Promise.all([
-            fetch('/api/council/models?sort=newest', { signal }),
-            fetch('/api/council/models?sort=throughput-high-to-low', { signal }),
-            fetch('/api/council/models?sort=latency-low-to-high', { signal }),
+            authenticatedFetch('/api/council/models?sort=newest', { signal }),
+            authenticatedFetch('/api/council/models?sort=throughput-high-to-low', { signal }),
+            authenticatedFetch('/api/council/models?sort=latency-low-to-high', { signal }),
           ]);
 
           if (!nRes.ok && isTransientError({ status: nRes.status })) {

@@ -241,6 +241,18 @@ export function getFirebaseAuth(): Auth | null {
   return auth;
 }
 
+export async function getFirebaseIdToken(): Promise<string | null> {
+  const currentAuth = getFirebaseAuth();
+  if (currentAuth && currentAuth.currentUser) {
+    try {
+      return await currentAuth.currentUser.getIdToken();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export function getFirebaseDb(): Firestore | null {
   if (!db) initPersistence();
   return db;
@@ -423,55 +435,115 @@ export async function loadUserSettings(userId: string): Promise<UserCloudData | 
 export async function loginWithGoogle(): Promise<User | 'redirecting' | null> {
   if (!auth) initPersistence();
   if (!auth) {
-    throw new Error('Firebase Auth is not initialized. Check Firebase config.');
+    const initErr = new Error('[auth/not-initialized] Firebase Auth is not initialized. Please verify Firebase project configuration.');
+    console.error('[FirebaseAuth] Login failed:', initErr);
+    throw initErr;
   }
+
+  const hostname = typeof window !== 'undefined' ? window.location.hostname : 'unknown';
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'unknown';
+  console.log('[FirebaseAuth] Starting Google sign-in process...', { hostname, origin, authDomain: firebaseConfig.authDomain });
 
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: 'select_account' });
 
   try {
+    console.log('[FirebaseAuth] Attempting signInWithPopup...');
     const result = await signInWithPopup(auth, provider);
-    return result.user || null;
+    console.log('[FirebaseAuth] signInWithPopup succeeded for user:', result?.user?.email || result?.user?.uid);
+    return result?.user || null;
   } catch (error: any) {
     const code = error?.code || '';
+    const rawMessage = error?.message || 'Google sign-in failed.';
+
+    console.warn('[FirebaseAuth] signInWithPopup encountered an error:', {
+      code,
+      message: rawMessage,
+      error,
+      hostname,
+      origin,
+    });
 
     if (code === 'auth/unauthorized-domain') {
-      throw new Error(
-        'Unauthorized domain. Add your domain to Firebase Authentication → Settings → Authorized domains.'
+      const authErr = new Error(
+        `[auth/unauthorized-domain] Unauthorized domain '${hostname}'. Please add '${hostname}' to Firebase Console → Authentication → Settings → Authorized domains.`
       );
+      console.error('[FirebaseAuth]', authErr);
+      throw authErr;
     }
 
+    if (code === 'auth/operation-not-allowed' || code === 'auth/admin-restricted-operation') {
+      const authErr = new Error(
+        `[${code}] Google Sign-In provider is disabled in Firebase. Enable Google under Firebase Console → Authentication → Sign-in method.`
+      );
+      console.error('[FirebaseAuth]', authErr);
+      throw authErr;
+    }
+
+    if (code === 'auth/popup-closed-by-user') {
+      console.info('[FirebaseAuth] User dismissed the Google sign-in popup window.');
+      return null;
+    }
+
+    // Trigger signInWithRedirect as fallback for popup blockers or unsupported iframe environments
     if (
       code === 'auth/popup-blocked' ||
       code === 'auth/operation-not-supported-in-this-environment' ||
       code === 'auth/web-storage-unsupported' ||
-      code === 'auth/cancelled-popup-request'
+      code === 'auth/cancelled-popup-request' ||
+      rawMessage.toLowerCase().includes('popup') ||
+      rawMessage.toLowerCase().includes('iframe')
     ) {
-      await signInWithRedirect(auth, provider);
-      return 'redirecting';
+      console.warn(`[FirebaseAuth] Popup issue detected (${code || rawMessage}). Initiating signInWithRedirect fallback...`);
+      try {
+        await signInWithRedirect(auth, provider);
+        console.log('[FirebaseAuth] signInWithRedirect called successfully, redirecting window...');
+        return 'redirecting';
+      } catch (redirectErr: any) {
+        const redirectCode = redirectErr?.code || 'redirect-failed';
+        const redirectMsg = redirectErr?.message || String(redirectErr);
+        console.error('[FirebaseAuth] Both popup and redirect sign-in failed:', {
+          popupError: error,
+          redirectError: redirectErr,
+        });
+        throw new Error(
+          `[${redirectCode}] Sign-in popup was blocked and redirect failed (${redirectMsg}). Please allow popups or open this app in a new tab.`
+        );
+      }
     }
 
-    if (code === 'auth/popup-closed-by-user') {
-      throw new Error('Google sign-in popup closed before login completed.');
-    }
-
-    throw new Error(error?.message || 'Google sign-in failed.');
+    console.error('[FirebaseAuth] Unhandled authentication error:', error);
+    throw new Error(`[${code || 'auth/unknown'}] ${rawMessage}`);
   }
 }
 
 export async function handleAuthRedirectResult(): Promise<User | null> {
   if (!auth) initPersistence();
-  if (!auth) return null;
+  if (!auth) {
+    console.warn('[FirebaseAuth] Auth not initialized during handleAuthRedirectResult.');
+    return null;
+  }
 
   try {
+    console.log('[FirebaseAuth] Checking for pending redirect authentication result...');
     const result = await getRedirectResult(auth);
-    return result?.user || null;
+    if (result?.user) {
+      console.log('[FirebaseAuth] Successfully recovered user from redirect sign-in:', result.user.email || result.user.uid);
+      return result.user;
+    }
+    console.log('[FirebaseAuth] No pending redirect authentication result found.');
+    return null;
   } catch (error: any) {
     const errMsg = error?.message || String(error);
+    const code = error?.code || '';
     if (errMsg.includes('closing') || errMsg.includes('hidden')) {
-      console.warn('Google redirect sign-in skipped: Database is closing/hidden (iframe context).');
+      console.warn('[FirebaseAuth] Google redirect sign-in skipped: Database is closing/hidden (iframe context).');
     } else {
-      console.error('Failed to complete Google redirect sign-in:', error);
+      console.error('[FirebaseAuth] Error resolving redirect authentication result:', {
+        code,
+        message: errMsg,
+        error,
+      });
     }
     return null;
   }

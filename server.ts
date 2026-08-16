@@ -15,7 +15,7 @@ import {
   MAX_EXTRACTED_FILES,
   MAX_FILE_CHARS,
   MAX_TOTAL_CONTEXT_CHARS,
-} from "./src/lib/zipReader";
+} from "./src/lib/zipUtils";
 import { validateAndParseGitHubUrl } from "./src/lib/githubValidator";
 
 dotenv.config();
@@ -66,7 +66,12 @@ async function startServer() {
   }
 
   const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const PORT = 3000;
+
+  // Public health check
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok" });
+  });
 
   // 50MB limit for codebase archive uploads
   app.use(express.json({ limit: "50mb" }));
@@ -74,9 +79,9 @@ async function startServer() {
 
   const requireOwnerAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     // Railway acceptable alternative: fallback to a high-entropy secret if set
-    const railwaySecret = process.env.COUNCIL_ACCESS_SECRET;
-    const clientSecret = req.headers["x-council-access-secret"];
-    if (railwaySecret && clientSecret === railwaySecret) {
+    const railwaySecret = process.env.COUNCIL_ACCESS_SECRET?.trim();
+    const clientSecret = typeof req.headers["x-council-access-secret"] === "string" ? req.headers["x-council-access-secret"].trim() : "";
+    if (railwaySecret && clientSecret && clientSecret === railwaySecret) {
       return next();
     }
 
@@ -87,14 +92,23 @@ async function startServer() {
 
     try {
       const decodedToken = await getAuth().verifyIdToken(authHeader);
-      const ownerEmail = process.env.OWNER_EMAIL;
-      const ownerUid = process.env.OWNER_UID;
-      
-      if (ownerEmail && decodedToken.email !== ownerEmail) {
-        return res.status(403).json({ error: "Forbidden: Not the configured owner email" });
-      }
-      if (ownerUid && decodedToken.uid !== ownerUid) {
-        return res.status(403).json({ error: "Forbidden: Not the configured owner UID" });
+      const ownerEmail = process.env.OWNER_EMAIL?.trim();
+      const ownerUid = process.env.OWNER_UID?.trim();
+
+      // Fail closed in production if neither owner UID nor owner email is configured
+      if (!ownerEmail && !ownerUid) {
+        if (process.env.NODE_ENV === "production") {
+          return res.status(403).json({
+            error: "Forbidden: Server owner identity is not configured. Please set OWNER_UID or OWNER_EMAIL in the server environment.",
+          });
+        }
+      } else {
+        if (ownerEmail && (!decodedToken.email || decodedToken.email.toLowerCase() !== ownerEmail.toLowerCase())) {
+          return res.status(403).json({ error: "Forbidden: Not the configured owner email" });
+        }
+        if (ownerUid && decodedToken.uid !== ownerUid) {
+          return res.status(403).json({ error: "Forbidden: Not the configured owner UID" });
+        }
       }
       
       (req as any).user = decodedToken;
@@ -751,7 +765,11 @@ async function startServer() {
     }
   });
 
-  app.get("/api/council/models", requireOwnerAuth, async (req, res) => {
+  app.get("/api/council/models", async (req, res) => {
+    if (isRateLimited(req)) {
+      return res.status(429).json({ error: "Too many requests. Please try again in a moment." });
+    }
+
     const sortParam = typeof req.query.sort === "string" ? req.query.sort.trim() : "";
     const cacheKey = sortParam ? `sort_${sortParam}` : "default";
     const now = Date.now();

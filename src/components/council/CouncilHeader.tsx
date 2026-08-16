@@ -23,7 +23,8 @@ interface CouncilHeaderProps {
   onOpenAuditModal: () => void;
   onOpenSettings: () => void;
   user: User | null;
-  onLogin: () => void;
+  onLogin: (user?: User) => void;
+  onLoginError: (error: Error) => void;
   onLogout: () => void;
   onCreateNewSession: () => void;
   isDeliberating?: boolean;
@@ -46,6 +47,7 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
   onOpenSettings,
   user,
   onLogin,
+  onLoginError,
   onLogout,
   onCreateNewSession,
   isDeliberating,
@@ -141,6 +143,7 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
           onOpenSettings={onOpenSettings}
           user={user}
           onLogin={onLogin}
+          onLoginError={onLoginError}
           onLogout={onLogout}
           isDeliberating={isDeliberating}
           isSyncing={isSyncing}
