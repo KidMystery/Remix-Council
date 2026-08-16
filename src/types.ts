@@ -1,4 +1,3 @@
-import { WebMode } from './shared/webGrounding';
 import type { PresetId } from './lib/presets';
 
 export type PersonaId = string;
@@ -22,7 +21,6 @@ export interface Persona {
   systemPrompt: string;
   color: string;
   enabled?: boolean;
-  enableSearchGrounding?: boolean;
 }
 
 export type StreamStatus = 'idle' | 'streaming' | 'completed' | 'error';
@@ -141,8 +139,6 @@ export interface Settings {
   quickPanelMaxTokens?: number;
   synthesisMaxTokens?: number;
   panelTimeoutSeconds?: number;
-  enableSearchGrounding?: boolean;
-  webMode?: WebMode;
   disableFallback?: boolean;
   disableLoadingOverlay?: boolean;
   maxRoundCostCeiling?: number;

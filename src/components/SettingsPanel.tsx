@@ -11,7 +11,6 @@ import { SettingsAdvancedTab } from './settings/SettingsAdvancedTab';
 import { SettingsThemeTab } from './settings/SettingsThemeTab';
 import { SettingsAccountTab } from './settings/SettingsAccountTab';
 import { SettingsNotificationsTab } from './settings/SettingsNotificationsTab';
-import { WebMode } from '../shared/webGrounding';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -35,10 +34,6 @@ interface SettingsPanelProps {
   isProCompareEnabled?: boolean;
   handleToggleProCompare?: () => void;
   setIsAuditModalOpen?: (val: boolean) => void;
-  enableSearchGrounding?: boolean;
-  setEnableSearchGrounding?: (enabled: boolean) => void;
-  webMode?: WebMode;
-  setWebMode?: (mode: WebMode) => void;
   onRefreshModels?: (options?: { force?: boolean; applyToPersonas?: boolean }) => Promise<any>;
   activePresetId?: PresetId;
   setActivePresetId?: (id: PresetId) => void;
@@ -95,10 +90,6 @@ export function SettingsPanel({
   isProCompareEnabled,
   handleToggleProCompare,
   setIsAuditModalOpen,
-  enableSearchGrounding = true,
-  setEnableSearchGrounding,
-  webMode = 'auto',
-  setWebMode,
   onRefreshModels,
   activePresetId: propActivePresetId,
   setActivePresetId: propSetActivePresetId,
@@ -285,10 +276,6 @@ export function SettingsPanel({
               isProCompareEnabled={isProCompareEnabled}
               handleToggleProCompare={handleToggleProCompare}
               setIsAuditModalOpen={setIsAuditModalOpen}
-              enableSearchGrounding={enableSearchGrounding}
-              setEnableSearchGrounding={setEnableSearchGrounding}
-              webMode={webMode}
-              setWebMode={setWebMode}
               maxRoundCostCeiling={maxRoundCostCeiling}
               setMaxRoundCostCeiling={setMaxRoundCostCeiling}
               stopAfterStage1={stopAfterStage1}

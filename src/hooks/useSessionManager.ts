@@ -7,6 +7,7 @@ import {
   syncCouncilSession,
   loadUserSessions,
   deleteCloudSession,
+  PersistedSession,
 } from '../lib/persistence';
 import { User } from 'firebase/auth';
 
@@ -24,9 +25,13 @@ export function useSessionManager(user: User | null = null) {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed.sessions)) {
+          const sanitizedSessions: Session[] = parsed.sessions.map((s: any) => ({
+            ...s,
+            title: typeof s?.title === 'string' && s.title.trim() ? s.title : 'New Deliberation',
+          }));
           return {
-            sessions: parsed.sessions,
-            activeSessionId: parsed.activeSessionId || (parsed.sessions[0]?.id ?? null),
+            sessions: sanitizedSessions,
+            activeSessionId: parsed.activeSessionId || (sanitizedSessions[0]?.id ?? null),
           };
         }
       }
@@ -39,124 +44,180 @@ export function useSessionManager(user: User | null = null) {
     };
   });
 
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+
   const isCloudSyncEnabled = isPersistenceEnabled() && user !== null && !!user.uid;
   const userId = user?.uid || null;
   const loadedUserRef = useRef<string | null>(null);
+  const lastSyncCheckRef = useRef<number>(0);
+  const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Effect for cloud load and merging whenever user logs in
-  useEffect(() => {
-    const loadAndMergeSessions = async () => {
-      if (!userId || !isCloudSyncEnabled) {
-        return;
-      }
+  // Bidirectional merge function between Firestore cloud sessions and local sessions
+  const mergeCloudAndLocalSessions = useCallback(async (currentUserId: string, silent = false) => {
+    if (!currentUserId || !isPersistenceEnabled()) return;
 
-      try {
-        const cloudSessions = await loadUserSessions(userId);
-        if (cloudSessions.length === 0) return;
+    if (!silent) setIsSyncing(true);
 
-        setData((prev) => {
-          const cloudMap = new Map(cloudSessions.map((s) => [s.id, s]));
-          const localMap = new Map(prev.sessions.map((s) => [s.id, s]));
+    try {
+      const cloudSessions = await loadUserSessions(currentUserId);
+      const cloudMap = new Map(cloudSessions.map((s) => [s.id, s]));
 
-          const mergedSessions: Session[] = [];
-          let newActiveSessionId = prev.activeSessionId;
+      setData((prev) => {
+        const localMap = new Map(prev.sessions.map((s) => [s.id, s]));
+        const mergedSessions: Session[] = [];
+        const sessionsToUpload: Session[] = [];
+        let newActiveSessionId = prev.activeSessionId;
 
-          // Add/update sessions from cloud
-          cloudSessions.forEach((cloudSess) => {
-            const localSess = localMap.get(cloudSess.id);
-            if (localSess) {
-              if (cloudSess.updatedAt > localSess.updatedAt) {
-                mergedSessions.push({
-                  id: cloudSess.id,
-                  title: cloudSess.title,
-                  rounds: cloudSess.rounds,
-                  createdAt: cloudSess.createdAt,
-                  updatedAt: cloudSess.updatedAt,
-                  userId: cloudSess.userId,
-                  presetId: cloudSess.presetId || localSess.presetId,
-                  personas: cloudSess.personas || localSess.personas,
-                  synthesizer: cloudSess.synthesizer || localSess.synthesizer,
-                  customModels: cloudSess.customModels || localSess.customModels,
-                  synthesizerModel: cloudSess.synthesizerModel || localSess.synthesizerModel,
-                  attachedFiles: cloudSess.attachedFiles || localSess.attachedFiles,
-                });
-              } else {
-                mergedSessions.push(localSess);
-              }
-            } else {
+        // Process all cloud sessions
+        cloudSessions.forEach((cloudSess) => {
+          const localSess = localMap.get(cloudSess.id);
+          if (localSess) {
+            // Compare timestamps
+            if ((cloudSess.updatedAt || 0) >= (localSess.updatedAt || 0)) {
               mergedSessions.push({
                 id: cloudSess.id,
                 title: cloudSess.title,
-                rounds: cloudSess.rounds,
-                createdAt: cloudSess.createdAt,
-                updatedAt: cloudSess.updatedAt,
-                userId: cloudSess.userId,
-                presetId: cloudSess.presetId,
-                personas: cloudSess.personas,
-                synthesizer: cloudSess.synthesizer,
-                customModels: cloudSess.customModels,
-                synthesizerModel: cloudSess.synthesizerModel,
-                attachedFiles: cloudSess.attachedFiles,
+                rounds: cloudSess.rounds || [],
+                createdAt: cloudSess.createdAt || Date.now(),
+                updatedAt: cloudSess.updatedAt || Date.now(),
+                userId: currentUserId,
+                presetId: cloudSess.presetId || localSess.presetId,
+                personas: cloudSess.personas || localSess.personas,
+                synthesizer: cloudSess.synthesizer || localSess.synthesizer,
+                customModels: cloudSess.customModels || localSess.customModels,
+                synthesizerModel: cloudSess.synthesizerModel || localSess.synthesizerModel,
+                attachedFiles: cloudSess.attachedFiles || localSess.attachedFiles,
               });
+            } else {
+              // Local has newer changes: keep local and queue for upload
+              const updatedLocal = { ...localSess, userId: currentUserId };
+              mergedSessions.push(updatedLocal);
+              sessionsToUpload.push(updatedLocal);
             }
-          });
-
-          // Add local-only sessions
-          prev.sessions.forEach((localSess) => {
-            if (!cloudMap.has(localSess.id)) {
-              mergedSessions.push(localSess);
-            }
-          });
-
-          // Sort by updatedAt descending
-          mergedSessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-
-          if (!newActiveSessionId || !mergedSessions.some((s) => s.id === newActiveSessionId)) {
-            newActiveSessionId = mergedSessions[0]?.id || null;
+          } else {
+            // New cloud session not present locally
+            mergedSessions.push({
+              id: cloudSess.id,
+              title: cloudSess.title,
+              rounds: cloudSess.rounds || [],
+              createdAt: cloudSess.createdAt || Date.now(),
+              updatedAt: cloudSess.updatedAt || Date.now(),
+              userId: currentUserId,
+              presetId: cloudSess.presetId,
+              personas: cloudSess.personas,
+              synthesizer: cloudSess.synthesizer,
+              customModels: cloudSess.customModels,
+              synthesizerModel: cloudSess.synthesizerModel,
+              attachedFiles: cloudSess.attachedFiles,
+            });
           }
-
-          return {
-            sessions: mergedSessions,
-            activeSessionId: newActiveSessionId,
-          };
         });
-      } catch (e) {
+
+        // Process all local sessions that are not yet in cloud
+        prev.sessions.forEach((localSess) => {
+          if (!cloudMap.has(localSess.id)) {
+            const adoptedSession = { ...localSess, userId: currentUserId };
+            mergedSessions.push(adoptedSession);
+            sessionsToUpload.push(adoptedSession);
+          }
+        });
+
+        // Sort all by updatedAt descending
+        mergedSessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+        if (!newActiveSessionId || !mergedSessions.some((s) => s.id === newActiveSessionId)) {
+          newActiveSessionId = mergedSessions[0]?.id || null;
+        }
+
+        // Upload any local sessions that need to be backed up to cloud
+        if (sessionsToUpload.length > 0) {
+          Promise.allSettled(
+            sessionsToUpload.map((s) =>
+              syncCouncilSession({
+                id: s.id,
+                userId: currentUserId,
+                title: s.title,
+                rounds: s.rounds,
+                createdAt: s.createdAt,
+                updatedAt: s.updatedAt,
+                presetId: s.presetId,
+                personas: s.personas,
+                synthesizer: s.synthesizer,
+                customModels: s.customModels,
+                synthesizerModel: s.synthesizerModel,
+                attachedFiles: s.attachedFiles,
+              })
+            )
+          ).catch((err) => console.warn('Background batch sync encountered an issue:', err));
+        }
+
+        return {
+          sessions: mergedSessions,
+          activeSessionId: newActiveSessionId,
+        };
+      });
+
+      setLastSyncedAt(Date.now());
+      lastSyncCheckRef.current = Date.now();
+    } catch (e: any) {
+      const errMsg = e?.message || String(e);
+      if (errMsg.includes('closing') || errMsg.includes('hidden')) {
+        console.warn('Cloud sync skipped: Database is closing/hidden (iframe context).');
+      } else {
         console.error('Failed to load and merge cloud sessions:', e);
+      }
+    } finally {
+      if (!silent) setIsSyncing(false);
+    }
+  }, []);
+
+  // Effect for cloud load and merging whenever user logs in or auth resolves
+  useEffect(() => {
+    if (userId && isCloudSyncEnabled) {
+      if (loadedUserRef.current !== userId) {
+        loadedUserRef.current = userId;
+        mergeCloudAndLocalSessions(userId, false);
+      }
+    } else {
+      loadedUserRef.current = null;
+    }
+  }, [userId, isCloudSyncEnabled, mergeCloudAndLocalSessions]);
+
+  // Window Focus / Visibility Change Listener to automatically refresh sessions when returning on mobile/tab switch
+  useEffect(() => {
+    const handleVisibilityOrFocus = () => {
+      if (!userId || !isCloudSyncEnabled) return;
+      const now = Date.now();
+      // Throttle background refresh to at most once every 10 seconds
+      if (now - lastSyncCheckRef.current > 10000) {
+        lastSyncCheckRef.current = now;
+        mergeCloudAndLocalSessions(userId, true);
       }
     };
 
-    if (userId && loadedUserRef.current !== userId) {
-      loadedUserRef.current = userId;
-      loadAndMergeSessions();
-    }
-  }, [userId, isCloudSyncEnabled]);
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
 
-  // Save to localStorage and cloud whenever data changes
+    return () => {
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [userId, isCloudSyncEnabled, mergeCloudAndLocalSessions]);
+
+  // Save to localStorage immediately whenever data changes
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch (e) {
       console.warn('Failed to save council sessions to localStorage', e);
     }
+  }, [data]);
 
-    if (isCloudSyncEnabled && userId) {
-      data.sessions.forEach(async (session) => {
-        await syncCouncilSession({
-          id: session.id,
-          userId: userId,
-          title: session.title,
-          rounds: session.rounds,
-          createdAt: session.createdAt,
-          updatedAt: session.updatedAt,
-          presetId: session.presetId,
-          personas: session.personas,
-          synthesizer: session.synthesizer,
-          customModels: session.customModels,
-          synthesizerModel: session.synthesizerModel,
-        });
-      });
-    }
-  }, [data, isCloudSyncEnabled, userId]);
+  const syncWithCloud = useCallback(async () => {
+    if (!userId || !isCloudSyncEnabled) return;
+    await mergeCloudAndLocalSessions(userId, false);
+  }, [userId, isCloudSyncEnabled, mergeCloudAndLocalSessions]);
 
   const activeSession = data.sessions.find((s) => s.id === data.activeSessionId);
 
@@ -173,7 +234,7 @@ export function useSessionManager(user: User | null = null) {
 
       const sessions = [...prev.sessions];
       const targetSession = sessions[activeIndex];
-      sessions[activeIndex] = {
+      const updatedSession = {
         ...targetSession,
         presetId: config.presetId !== undefined ? config.presetId : targetSession.presetId,
         personas: config.personas !== undefined ? config.personas : targetSession.personas,
@@ -182,13 +243,31 @@ export function useSessionManager(user: User | null = null) {
         synthesizerModel: config.synthesizerModel !== undefined ? config.synthesizerModel : targetSession.synthesizerModel,
         updatedAt: Date.now(),
       };
+      sessions[activeIndex] = updatedSession;
+
+      if (isCloudSyncEnabled && userId) {
+        syncCouncilSession({
+          id: updatedSession.id,
+          userId,
+          title: updatedSession.title,
+          rounds: updatedSession.rounds,
+          createdAt: updatedSession.createdAt,
+          updatedAt: updatedSession.updatedAt,
+          presetId: updatedSession.presetId,
+          personas: updatedSession.personas,
+          synthesizer: updatedSession.synthesizer,
+          customModels: updatedSession.customModels,
+          synthesizerModel: updatedSession.synthesizerModel,
+          attachedFiles: updatedSession.attachedFiles,
+        });
+      }
 
       return {
         ...prev,
         sessions,
       };
     });
-  }, []);
+  }, [isCloudSyncEnabled, userId]);
 
   const updateActiveSessionFiles = useCallback((files: AttachedTextFile[] | undefined) => {
     setData((prev) => {
@@ -197,23 +276,42 @@ export function useSessionManager(user: User | null = null) {
 
       const sessions = [...prev.sessions];
       const targetSession = sessions[activeIndex];
-      sessions[activeIndex] = {
+      const updatedSession = {
         ...targetSession,
         attachedFiles: files,
         updatedAt: Date.now(),
       };
+      sessions[activeIndex] = updatedSession;
+
+      if (isCloudSyncEnabled && userId) {
+        syncCouncilSession({
+          id: updatedSession.id,
+          userId,
+          title: updatedSession.title,
+          rounds: updatedSession.rounds,
+          createdAt: updatedSession.createdAt,
+          updatedAt: updatedSession.updatedAt,
+          presetId: updatedSession.presetId,
+          personas: updatedSession.personas,
+          synthesizer: updatedSession.synthesizer,
+          customModels: updatedSession.customModels,
+          synthesizerModel: updatedSession.synthesizerModel,
+          attachedFiles: updatedSession.attachedFiles,
+        });
+      }
 
       return {
         ...prev,
         sessions,
       };
     });
-  }, []);
+  }, [isCloudSyncEnabled, userId]);
 
   const createNewSession = useCallback((initialTitle?: string): Session => {
+    const cleanTitle = typeof initialTitle === 'string' && initialTitle.trim() ? initialTitle.trim() : 'New Deliberation';
     const newSession: Session = {
       id: `session-${Date.now()}`,
-      title: initialTitle || 'New Deliberation',
+      title: cleanTitle,
       rounds: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -225,8 +323,19 @@ export function useSessionManager(user: User | null = null) {
       activeSessionId: newSession.id,
     }));
 
+    if (isCloudSyncEnabled && userId) {
+      syncCouncilSession({
+        id: newSession.id,
+        userId,
+        title: newSession.title,
+        rounds: [],
+        createdAt: newSession.createdAt,
+        updatedAt: newSession.updatedAt,
+      });
+    }
+
     return newSession;
-  }, [userId]);
+  }, [isCloudSyncEnabled, userId]);
 
   const selectSession = useCallback((id: string) => {
     setData((prev) => ({
@@ -293,7 +402,7 @@ export function useSessionManager(user: User | null = null) {
   const clearAllSessions = useCallback(async () => {
     if (isCloudSyncEnabled && userId) {
       const allCloudSessions = await loadUserSessions(userId);
-      await Promise.all(allCloudSessions.map((s) => deleteCloudSession(userId, s.id)));
+      await Promise.allSettled(allCloudSessions.map((s) => deleteCloudSession(userId, s.id)));
     }
 
     setData({
@@ -318,6 +427,16 @@ export function useSessionManager(user: User | null = null) {
           updatedAt: Date.now(),
           userId: userId || undefined,
         };
+        if (isCloudSyncEnabled && userId) {
+          syncCouncilSession({
+            id: newSession.id,
+            userId,
+            title: newSession.title,
+            rounds: newSession.rounds,
+            createdAt: newSession.createdAt,
+            updatedAt: newSession.updatedAt,
+          });
+        }
         return {
           sessions: [newSession, ...sessions],
           activeSessionId: newSession.id,
@@ -332,15 +451,32 @@ export function useSessionManager(user: User | null = null) {
             : targetSession.title,
           rounds: [...targetSession.rounds, round],
           updatedAt: Date.now(),
+          userId: userId || targetSession.userId,
         };
         sessions[activeIndex] = updatedSession;
+        if (isCloudSyncEnabled && userId) {
+          syncCouncilSession({
+            id: updatedSession.id,
+            userId,
+            title: updatedSession.title,
+            rounds: updatedSession.rounds,
+            createdAt: updatedSession.createdAt,
+            updatedAt: updatedSession.updatedAt,
+            presetId: updatedSession.presetId,
+            personas: updatedSession.personas,
+            synthesizer: updatedSession.synthesizer,
+            customModels: updatedSession.customModels,
+            synthesizerModel: updatedSession.synthesizerModel,
+            attachedFiles: updatedSession.attachedFiles,
+          });
+        }
         return {
           ...prev,
           sessions,
         };
       }
     });
-  }, [userId]);
+  }, [isCloudSyncEnabled, userId]);
 
   const updateRoundInActiveSession = useCallback((roundId: string, updateFn: (round: CouncilRound) => CouncilRound) => {
     setData((prev) => {
@@ -355,18 +491,20 @@ export function useSessionManager(user: User | null = null) {
       const updatedRounds = [...targetSession.rounds];
       updatedRounds[roundIndex] = updateFn(updatedRounds[roundIndex]);
 
-      sessions[activeIndex] = {
+      const updatedSession: Session = {
         ...targetSession,
         rounds: updatedRounds,
         updatedAt: Date.now(),
+        userId: userId || targetSession.userId,
       };
+      sessions[activeIndex] = updatedSession;
 
       return {
         ...prev,
         sessions,
       };
     });
-  }, []);
+  }, [userId]);
 
   const deleteRoundFromActiveSession = useCallback((roundId: string) => {
     setData((prev) => {
@@ -377,18 +515,36 @@ export function useSessionManager(user: User | null = null) {
       const targetSession = sessions[activeIndex];
       const updatedRounds = targetSession.rounds.filter((r) => r.id !== roundId);
 
-      sessions[activeIndex] = {
+      const updatedSession: Session = {
         ...targetSession,
         rounds: updatedRounds,
         updatedAt: Date.now(),
       };
+      sessions[activeIndex] = updatedSession;
+
+      if (isCloudSyncEnabled && userId) {
+        syncCouncilSession({
+          id: updatedSession.id,
+          userId,
+          title: updatedSession.title,
+          rounds: updatedSession.rounds,
+          createdAt: updatedSession.createdAt,
+          updatedAt: updatedSession.updatedAt,
+          presetId: updatedSession.presetId,
+          personas: updatedSession.personas,
+          synthesizer: updatedSession.synthesizer,
+          customModels: updatedSession.customModels,
+          synthesizerModel: updatedSession.synthesizerModel,
+          attachedFiles: updatedSession.attachedFiles,
+        });
+      }
 
       return {
         ...prev,
         sessions,
       };
     });
-  }, []);
+  }, [isCloudSyncEnabled, userId]);
 
   const exportSessionsJSON = useCallback(() => {
     const bundle = {
@@ -472,6 +628,9 @@ export function useSessionManager(user: User | null = null) {
     deleteRoundFromActiveSession,
     exportSessionsJSON,
     importSessionsJSON,
+    syncWithCloud,
+    isSyncing,
+    lastSyncedAt,
   };
 }
 

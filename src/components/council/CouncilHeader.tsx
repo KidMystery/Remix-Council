@@ -27,6 +27,9 @@ interface CouncilHeaderProps {
   onLogout: () => void;
   onCreateNewSession: () => void;
   isDeliberating?: boolean;
+  isSyncing?: boolean;
+  onSyncWithCloud?: () => Promise<void> | void;
+  lastSyncedAt?: number | null;
 }
 
 export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
@@ -46,6 +49,9 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
   onLogout,
   onCreateNewSession,
   isDeliberating,
+  isSyncing,
+  onSyncWithCloud,
+  lastSyncedAt,
 }) => {
   return (
     <header role="banner" aria-label="Deliberation Chamber Header" className="sticky top-0 z-30 bg-slate-50/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-4 py-2.5 sm:py-3 flex items-center justify-between gap-2 min-w-0 transition-all">
@@ -137,6 +143,9 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
           onLogin={onLogin}
           onLogout={onLogout}
           isDeliberating={isDeliberating}
+          isSyncing={isSyncing}
+          onSyncWithCloud={onSyncWithCloud}
+          lastSyncedAt={lastSyncedAt}
         />
 
         {/* Primary New Thread Action */}

@@ -1,3 +1,4 @@
+import { copyToClipboard } from "../lib/clipboard";
 import React, { useState, useEffect } from 'react';
 import { ToastMessage } from '../types';
 import { CheckCircle2, AlertCircle, AlertTriangle, Info, X, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
@@ -24,7 +25,7 @@ export const UnifiedToast: React.FC<UnifiedToastProps> = ({ toasts, onDismiss })
   if (!toasts || toasts.length === 0) return null;
 
   const handleCopyDetails = (id: string, text: string) => {
-    navigator.clipboard.writeText(text);
+    copyToClipboard(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
   };

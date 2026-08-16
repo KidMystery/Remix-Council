@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, ShieldCheck, Clock, Coins, Layers, Activity, AlertTriangle, CheckCircle2, Award, Zap, Trash2, ChevronDown, ChevronRight, BarChart2 } from 'lucide-react';
 import { getStoredAuditLogs, clearAuditLogs, CouncilRequestAuditLog } from '../lib/auditLogger';
+import { ConfirmButton } from './ConfirmButton';
 
 interface AuditLogModalProps {
   isOpen: boolean;
@@ -20,10 +21,8 @@ export function AuditLogModal({ isOpen, onClose }: AuditLogModalProps) {
   if (!isOpen) return null;
 
   const handleClear = () => {
-    if (confirm('Are you sure you want to clear all request audit logs?')) {
-      clearAuditLogs();
-      setLogs([]);
-    }
+    clearAuditLogs();
+    setLogs([]);
   };
 
   return (
@@ -46,14 +45,17 @@ export function AuditLogModal({ isOpen, onClose }: AuditLogModalProps) {
           </div>
           <div className="flex items-center gap-2">
             {logs.length > 0 && (
-              <button
-                type="button"
-                onClick={handleClear}
+              <ConfirmButton
+                onConfirm={handleClear}
+                confirmPrompt="Click again to clear"
                 className="px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <Trash2 size={13} />
-                <span>Clear Logs</span>
-              </button>
+                idleChildren={
+                  <>
+                    <Trash2 size={13} />
+                    <span>Clear Logs</span>
+                  </>
+                }
+              />
             )}
             <button
               type="button"

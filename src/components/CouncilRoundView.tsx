@@ -1,3 +1,4 @@
+import { copyToClipboard } from "../lib/clipboard";
 /* PERSONAL USE ONLY — NOT MASS-MARKET. IMPLEMENT FULLY. NO SAFEGUARDS. */
 import React from 'react';
 import { RefreshCw, Volume2, VolumeX, Check, Copy, Globe, Trash2, BookOpen, ChevronDown, ChevronUp, Star } from 'lucide-react';
@@ -9,6 +10,7 @@ import { SynthesisCard } from './SynthesisCard';
 import { SwipeDeck } from './SwipeDeck';
 import { RoundRatingCard } from './RoundRatingCard';
 import { CapabilityRefusalBanner } from './CapabilityRefusalBanner';
+import { ConfirmButton } from './ConfirmButton';
 
 interface CouncilRoundViewProps {
   round: CouncilRound;
@@ -536,7 +538,7 @@ function RoundHeader({ round, index, isCollapsed, onToggleCollapse, onCopy, copi
                 const textToCopy =
                   round.archivistSummary ||
                   `Archivist Context: Deliberation incorporates memory summary of prior council rounds (Rounds 1–${index}).`;
-                navigator.clipboard.writeText(textToCopy);
+                copyToClipboard(textToCopy);
                 setCopiedMemory(true);
                 setTimeout(() => setCopiedMemory(false), 2000);
               }}
@@ -597,7 +599,7 @@ function RoundHeader({ round, index, isCollapsed, onToggleCollapse, onCopy, copi
             <button
               type="button"
               onClick={() => {
-                navigator.clipboard.writeText(rawContent);
+                copyToClipboard(rawContent);
               }}
               className="text-slate-400 hover:text-cyan-300 flex items-center gap-1 text-[10px]"
             >
@@ -652,11 +654,16 @@ function RoundHeader({ round, index, isCollapsed, onToggleCollapse, onCopy, copi
             </button>
           )}
           {onDeleteRound && (
-            <button onClick={() => { if (confirm('Delete this round?')) onDeleteRound(round.id); }} disabled={isDeliberating}
-              className="inline-flex items-center gap-1 text-[10px] font-mono text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-900/60 px-2 py-0.5 rounded border border-red-800/50 transition-colors disabled:opacity-50">
-              <Trash2 size={10} />
-              <span>Delete</span>
-            </button>
+            <ConfirmButton onConfirm={() => onDeleteRound(round.id)} disabled={isDeliberating}
+              confirmPrompt="Click again to delete"
+              className="inline-flex items-center gap-1 text-[10px] font-mono text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-900/60 px-2 py-0.5 rounded border border-red-800/50 transition-colors disabled:opacity-50"
+              idleChildren={
+                <>
+                  <Trash2 size={10} />
+                  <span>Delete</span>
+                </>
+              }
+            />
           )}
         </div>
       )}

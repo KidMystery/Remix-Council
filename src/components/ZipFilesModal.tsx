@@ -1,3 +1,4 @@
+import { copyToClipboard } from "../lib/clipboard";
 import React, { useState } from 'react';
 import { Archive, FileCode, Search, X, Copy, Check, FileText } from 'lucide-react';
 import { ExtractedZipFile, ZipArchiveResult } from '../lib/zipReader';
@@ -30,13 +31,13 @@ export const ZipFilesModal: React.FC<ZipFilesModalProps> = ({ zipResult, isOpen,
   const activeFile = selectedFile || filteredFiles[0] || zipResult.files[0];
 
   const handleCopyFileContent = (content: string, filename: string) => {
-    navigator.clipboard.writeText(content);
+    copyToClipboard(content);
     setCopiedFile(filename);
     setTimeout(() => setCopiedFile(null), 2000);
   };
 
   const handleCopyLine = (lineText: string, lineIndex: number) => {
-    navigator.clipboard.writeText(lineText);
+    copyToClipboard(lineText);
     setCopiedLine(lineIndex);
     setTimeout(() => setCopiedLine(null), 1500);
   };

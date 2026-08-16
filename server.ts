@@ -5,9 +5,7 @@ import dotenv from "dotenv";
 import { z } from "zod";
 import JSZip from "jszip";
 import { createExtractorFromData } from "node-unrar-js";
-import { decideWebUse, buildWebGroundingSystemPrompt } from "./src/lib/webPolicy";
 import { resolveOpenRouterCandidate, isLocalOnlyModel, OPENROUTER_MODEL_ALIASES } from "./src/shared/modelCandidates";
-import { parseWebMode, WebMode } from "./src/shared/webGrounding";
 import {
   isIgnoredArchiveEntry,
   isTextContent,
@@ -48,16 +46,12 @@ const llmRequestSchema = z.object({
   max_tokens: z.number().int().positive().min(1).max(32768).optional(),
   stream: z.boolean().optional(),
   budget: z.enum(["free", "cheap", "quality"]).optional(),
-  webMode: z.enum(["off", "auto", "always"]).optional(),
-  enableWebGrounding: z.boolean().optional(),
-  enableSearchGrounding: z.boolean().optional(),
   query: z.string().optional(),
   disableFallback: z.boolean().optional(),
   apiKey: z.string().optional(),
 });
 
-const ALLOWED_MODEL_PATTERN =
-  /^(google\/[a-z0-9.-]+|anthropic\/[a-z0-9.-]+|openai\/[a-z0-9.-]+|deepseek\/[a-z0-9.-]+|meta-llama\/[a-z0-9.-]+|nvidia\/[a-z0-9.-]+|qwen\/[a-z0-9.-]+|mistralai\/[a-z0-9.-]+|poolside\/[a-z0-9.-]+|inclusionai\/[a-z0-9.-]+|[a-z0-9.-]+)(:[a-z0-9._-]+)?$/i;
+const ALLOWED_MODEL_PATTERN = /^([a-z0-9._-]+\/[a-z0-9._-]+|[a-z0-9._-]+)(:[a-z0-9._-]+)?$/i;
 // --- END Input Validation Schemas ---
 
 async function startServer() {
@@ -372,152 +366,31 @@ async function startServer() {
       max_tokens,
       stream,
       budget,
-      webMode,
-      enableWebGrounding,
-      enableSearchGrounding,
       query: rawQuery,
       disableFallback,
       apiKey: clientApiKey,
     } = req.body;
 
-    const rawOpenRouterKey =
-      (req.headers.authorization?.replace(/^Bearer\s+/i, "") || "").trim() ||
-      (typeof clientApiKey === "string" ? clientApiKey.trim() : "") ||
-      process.env.OPENROUTER_API_KEY?.trim() ||
-      "";
-    const openrouterKey = rawOpenRouterKey.replace(/^["']|["']$/g, "").trim();
+    const headerAuth = (req.headers.authorization?.replace(/^Bearer\s+/i, "") || "").trim();
+    const rawClientKey = typeof clientApiKey === "string" ? clientApiKey.trim() : "";
+    const providedKey = (headerAuth || rawClientKey).replace(/^["']|["']$/g, "").trim();
 
-    const rawGeminiKey = process.env.GEMINI_API_KEY?.trim() || "";
-    const geminiKey = rawGeminiKey.replace(/^["']|["']$/g, "").trim();
+    let openrouterKey = process.env.OPENROUTER_API_KEY?.trim() || "";
+    let geminiKey = process.env.GEMINI_API_KEY?.trim() || "";
+
+    if (providedKey) {
+      if (providedKey.startsWith("AIza")) {
+        geminiKey = providedKey;
+      } else {
+        openrouterKey = providedKey;
+      }
+    }
 
     const isNoFallback = Boolean(
       disableFallback ||
       req.headers["x-disable-fallback"] === "true" ||
       budget === "free"
     );
-
-    const userQueryText =
-      rawQuery ||
-      (messages.slice().reverse().find((m: any) => m.role === "user")?.content as string) ||
-      "";
-    const userQueryStr = typeof userQueryText === "string" ? userQueryText : JSON.stringify(userQueryText);
-
-    // Determine Web Grounding Policy
-    const effectiveMode: WebMode = parseWebMode(
-      webMode,
-      enableWebGrounding !== undefined
-        ? enableWebGrounding
-          ? "always"
-          : "off"
-        : enableSearchGrounding
-        ? "always"
-        : "auto"
-    );
-
-    const webDecision = decideWebUse({ mode: effectiveMode, query: userQueryStr });
-    const isWebActive = webDecision.enabled;
-
-    // --- Branch A: OpenRouter Web Grounding Flow ---
-    if (isWebActive) {
-      if (isLocalOnlyModel(rawModel)) {
-        return res.status(400).json({
-          error: "WEB_GROUNDING_UNAVAILABLE: Local-only models cannot access OpenRouter web grounding.",
-        });
-      }
-
-      const openrouterCandidate = resolveOpenRouterCandidate(rawModel) || normalizeModelName(rawModel);
-      if (!openrouterCandidate || isLocalOnlyModel(openrouterCandidate)) {
-        return res.status(400).json({
-          error: `WEB_GROUNDING_UNAVAILABLE: Model '${rawModel}' has no production OpenRouter candidate for web grounding.`,
-        });
-      }
-
-      if (!openrouterKey || openrouterKey.length < 6) {
-        return res.status(503).json({
-          error:
-            "WEB_GROUNDING_UNAVAILABLE: Web grounding requires an OpenRouter API key (OPENROUTER_API_KEY) configured in the server environment or passed in settings.",
-        });
-      }
-
-      // Inject current UTC date, untrusted web data rules, and citation requirements
-      const webInstruction = buildWebGroundingSystemPrompt(webDecision.currentDate, true);
-      const webMessages = messages.map((m: any) => ({ ...m }));
-      const sysIdx = webMessages.findIndex((m: any) => m.role === "system");
-      if (sysIdx >= 0) {
-        const prev = typeof webMessages[sysIdx].content === "string" ? webMessages[sysIdx].content : "";
-        webMessages[sysIdx].content = `${prev}${webInstruction}`;
-      } else {
-        webMessages.unshift({
-          role: "system",
-          content: `You are a thoughtful council deliberator.${webInstruction}`,
-        });
-      }
-
-      const body: any = {
-        model: openrouterCandidate,
-        messages: webMessages,
-        stream,
-        tools: [
-          {
-            type: "openrouter:web_search",
-            parameters: {
-              max_results: 5,
-            },
-          },
-        ],
-      };
-      if (temperature !== undefined) body.temperature = temperature;
-      if (max_tokens !== undefined) body.max_tokens = max_tokens;
-
-      try {
-        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${openrouterKey}`,
-            "HTTP-Referer": "https://ai.studio/build",
-            "X-Title": "AI Council Chamber Web Grounding",
-          },
-          body: JSON.stringify(body),
-        });
-
-        if (!response.ok) {
-          const errText = await response.text();
-          // DO NOT silently fall back to non-web direct APIs
-          return res.status(response.status).json({
-            error: `OpenRouter Web Grounding Error (${response.status}): ${errText}`,
-          });
-        }
-
-        if (stream) {
-          res.setHeader("Content-Type", "text/event-stream");
-          res.setHeader("Cache-Control", "no-cache");
-          res.setHeader("Connection", "keep-alive");
-
-          if (response.body) {
-            const reader = response.body.getReader();
-            try {
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                res.write(value);
-              }
-            } catch (streamErr) {
-              console.error("[API Proxy] Web grounding stream error:", streamErr);
-            }
-          }
-          res.write("data: [DONE]\n\n");
-          return res.end();
-        } else {
-          const data = await response.json();
-          return res.json(data);
-        }
-      } catch (networkErr: any) {
-        return res.status(502).json({
-          error: `OpenRouter Web Grounding Network Error: ${networkErr.message || "Failed to reach OpenRouter"}`,
-        });
-      }
-    }
 
     const actualModelUsed = normalizeModelName(rawModel);
 
@@ -535,149 +408,25 @@ async function startServer() {
       }
     }
 
-    // --- Branch B: Standard Direct Google Search Grounding (if explicitly opted for Google native) ---
-    if (enableSearchGrounding) {
-      if (!geminiKey) {
-        return res.status(401).json({
-          error: "Missing Gemini API Key: Google Search Grounding requires process.env.GEMINI_API_KEY to be configured.",
-        });
-      }
-
-      try {
-        const { GoogleGenAI } = await import("@google/genai");
-        const ai = new GoogleGenAI({
-          apiKey: geminiKey,
-          httpOptions: { headers: { "User-Agent": "aistudio-build" } },
-        });
-
-        let targetModel = "gemini-3.7-flash";
-        if (actualModelUsed && (actualModelUsed.includes("3.7-flash") || actualModelUsed.includes("3.7"))) {
-          targetModel = "gemini-3.7-flash";
-        } else if (actualModelUsed && (actualModelUsed.includes("2.5-flash") || actualModelUsed.includes("2.5"))) {
-          targetModel = "gemini-2.5-flash";
-        } else if (actualModelUsed && (actualModelUsed.startsWith("gemini-") || actualModelUsed.startsWith("google/gemini"))) {
-          targetModel = actualModelUsed.replace("google/", "");
-        }
-
-        const systemMsg = messages?.find((m: any) => m.role === "system")?.content || "";
-        const userMsgs = messages?.filter((m: any) => m.role !== "system") || [];
-        const contentsStr = userMsgs
-          .map((m: any) => {
-            if (typeof m.content === "string") return m.content;
-            if (Array.isArray(m.content)) {
-              return m.content.map((part: any) => part.text || "").filter(Boolean).join("\n");
-            }
-            return JSON.stringify(m.content);
-          })
-          .join("\n\n");
-
-        const config: any = {
-          temperature: temperature !== undefined ? temperature : 0.7,
-          tools: [{ googleSearch: {} }],
-        };
-        if (systemMsg) config.systemInstruction = systemMsg;
-        if (max_tokens) config.maxOutputTokens = Math.min(max_tokens, 8192);
-
-        if (stream) {
-          res.setHeader("Content-Type", "text/event-stream");
-          res.setHeader("Cache-Control", "no-cache");
-          res.setHeader("Connection", "keep-alive");
-
-          const streamResult = await ai.models.generateContentStream({
-            model: targetModel,
-            contents: contentsStr || "Hello",
-            config,
-          });
-
-          let collectedGrounding: any = null;
-
-          for await (const chunk of streamResult) {
-            if (chunk.text) {
-              const sseData = JSON.stringify({
-                choices: [
-                  {
-                    delta: { content: chunk.text },
-                    finish_reason: null,
-                    index: 0,
-                  },
-                ],
-                model: targetModel,
-              });
-              res.write(`data: ${sseData}\n\n`);
-            }
-
-            if (chunk.candidates?.[0]?.groundingMetadata) {
-              const meta = chunk.candidates[0].groundingMetadata;
-              collectedGrounding = {
-                queries: meta.webSearchQueries || [],
-                sources: (meta.groundingChunks || [])
-                  .map((c: any) => ({
-                    title: c.web?.title || "Web Source",
-                    url: c.web?.uri || "",
-                  }))
-                  .filter((s: any) => s.url),
-              };
-            }
-          }
-
-          if (collectedGrounding) {
-            const sseGrounding = JSON.stringify({
-              choices: [
-                {
-                  delta: { content: "", grounding: collectedGrounding },
-                  finish_reason: null,
-                  index: 0,
-                },
-              ],
-              model: targetModel,
-            });
-            res.write(`data: ${sseGrounding}\n\n`);
-          }
-
-          res.write("data: [DONE]\n\n");
-          return res.end();
-        } else {
-          const result = await ai.models.generateContent({
-            model: targetModel,
-            contents: contentsStr || "Hello",
-            config,
-          });
-          const text = result.text || "";
-          const meta = result.candidates?.[0]?.groundingMetadata;
-          const grounding = meta
-            ? {
-                queries: meta.webSearchQueries || [],
-                sources: (meta.groundingChunks || [])
-                  .map((c: any) => ({
-                    title: c.web?.title || "Web Source",
-                    url: c.web?.uri || "",
-                  }))
-                  .filter((s: any) => s.url),
-              }
-            : undefined;
-
-          return res.json({
-            choices: [
-              {
-                message: { role: "assistant", content: text },
-                grounding,
-              },
-            ],
-            model: targetModel,
-          });
-        }
-      } catch (err: any) {
-        console.error("[API Proxy] Search Grounding Error:", err);
-        return res.status(500).json({ error: err.message || "Search Grounding failed." });
-      }
-    }
-
     let response: any = null;
 
     // 2. OpenRouter request using server-side OPENROUTER_API_KEY
     if (openrouterKey && openrouterKey.length >= 6) {
       try {
+        
+        const disableSafety = [
+          { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" }
+        ];
+
         const body: any = { model: actualModelUsed, messages, stream };
+        if (actualModelUsed && (actualModelUsed.includes("gemini") || actualModelUsed.includes("google"))) {
+          body.provider = { require_parameters: true, safety_settings: disableSafety };
+          body.plugins = { google_safety_settings: disableSafety };
+        }
+
         if (temperature !== undefined) body.temperature = temperature;
         if (max_tokens !== undefined) body.max_tokens = max_tokens;
 
@@ -727,11 +476,20 @@ async function startServer() {
 
       try {
         const geminiTargetModel = "gemini-3.7-flash";
+        
+        const disableSafety = [
+          { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" }
+        ];
+
         const body: any = {
           model: geminiTargetModel,
           messages,
-          stream,
+          stream
         };
+
         if (temperature !== undefined) body.temperature = temperature;
         if (max_tokens !== undefined) body.max_tokens = Math.min(max_tokens, 8192);
 
@@ -856,77 +614,6 @@ async function startServer() {
       res.json(data);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Smoke test endpoint verifying real OpenRouter web-plugin connectivity
-  app.all("/api/council/smoke-test-web", async (req, res) => {
-    const openrouterKey = process.env.OPENROUTER_API_KEY?.trim() || "";
-    if (!openrouterKey || !openrouterKey.startsWith("sk-or-")) {
-      return res.status(503).json({
-        success: false,
-        error: "WEB_GROUNDING_UNAVAILABLE: Server OPENROUTER_API_KEY is not configured.",
-      });
-    }
-
-    try {
-      const now = new Date();
-      const currentDate = now.toISOString().slice(0, 10);
-      const testPrompt = buildWebGroundingSystemPrompt(currentDate, true);
-
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${openrouterKey}`,
-          "HTTP-Referer": "https://ai.studio/build",
-          "X-Title": "AI Council Web Grounding Smoke Test",
-        },
-        body: JSON.stringify({
-          model: "google/gemini-2.0-flash-001",
-          messages: [
-            {
-              role: "system",
-              content: `You are a helpful council assistant.${testPrompt}`,
-            },
-            {
-              role: "user",
-              content: "What is today's date in UTC and what is an active major world technology event this week? Search the web and cite sources.",
-            },
-          ],
-          tools: [
-            {
-              type: "openrouter:web_search",
-              parameters: {
-                max_results: 3,
-              },
-            },
-          ],
-          max_tokens: 350,
-        }),
-      });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        return res.status(response.status).json({
-          success: false,
-          error: `OpenRouter returned HTTP ${response.status}: ${errText}`,
-        });
-      }
-
-      const data = await response.json();
-      return res.json({
-        success: true,
-        modelUsed: data.model || "google/gemini-2.0-flash-001",
-        content: data.choices?.[0]?.message?.content,
-        toolsUsed: [{ type: "openrouter:web_search", max_results: 3 }],
-        currentDate,
-      });
-    } catch (err: any) {
-      return res.status(500).json({
-        success: false,
-        error: err.message || "Failed to execute smoke test",
-      });
     }
   });
 

@@ -2,6 +2,7 @@ import React, { useEffect, useState, useId } from 'react';
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { Copy, Check, Hash, Code2 } from 'lucide-react';
+import { copyToClipboard } from '../lib/clipboard';
 
 interface MessageMarkdownProps {
   content: string;
@@ -86,7 +87,7 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
       const rawText = lineBtn.getAttribute('data-copy-text');
       if (rawText) {
         const lineText = decodeURIComponent(rawText);
-        navigator.clipboard.writeText(lineText);
+        copyToClipboard(lineText);
         showToast(`Copied line: "${lineText.slice(0, 30)}${lineText.length > 30 ? '...' : ''}"`);
       }
       return;
@@ -99,7 +100,7 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
       const lineNum = lineRow.getAttribute('data-code-line');
       if (rawText) {
         const lineText = decodeURIComponent(rawText);
-        navigator.clipboard.writeText(lineText);
+        copyToClipboard(lineText);
         showToast(`Copied line #${lineNum}!`);
       }
       return;
@@ -113,7 +114,7 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
       const rawCode = codeBtn.getAttribute('data-copy-code');
       if (rawCode) {
         const fullCode = decodeURIComponent(rawCode);
-        navigator.clipboard.writeText(fullCode);
+        copyToClipboard(fullCode);
         showToast('Copied code block!');
       }
       return;
@@ -121,7 +122,7 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
   };
 
   const handleCopyFullResponse = () => {
-    navigator.clipboard.writeText(content);
+    copyToClipboard(content);
     setCopiedFull(true);
     showToast('Copied entire response!');
     setTimeout(() => setCopiedFull(false), 2000);
@@ -196,7 +197,7 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
               key={`${uniqueId}-line-${idx}`}
               className="group/line flex items-start hover:bg-slate-800/70 rounded px-1.5 py-0.5 transition-colors cursor-pointer"
               onClick={() => {
-                navigator.clipboard.writeText(line);
+                copyToClipboard(line);
                 showToast(`Copied line #${idx + 1}`);
               }}
             >
@@ -210,7 +211,7 @@ export const MessageMarkdown = React.memo(function MessageMarkdown({ content }: 
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  navigator.clipboard.writeText(line);
+                  copyToClipboard(line);
                   showToast(`Copied line #${idx + 1}`);
                 }}
                 className="opacity-0 group-hover/line:opacity-100 ml-2 px-1.5 py-0.5 text-[10px] rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-cyan-300 border border-slate-700/60 transition-opacity shrink-0 flex items-center gap-1 cursor-pointer"

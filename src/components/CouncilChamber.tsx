@@ -8,7 +8,7 @@ import { useSessionManager } from '../hooks/useSessionManager';
 import { useCouncilReducer } from '../hooks/useCouncilReducer';
 import { usePersonaStream } from '../hooks/usePersonaStream';
 import { useModelRecommendations } from '../hooks/useModelRecommendations';
-import { detectCodeCapabilityRefusal, upgradeToHighCapabilityCodingCouncil } from '../lib/capabilityGuard';
+import { detectCodeCapabilityRefusal, upgradeToHighCapabilityCodingCouncil, detectApiSafetyBlock } from '../lib/capabilityGuard';
 import {
   countTotalSessionTokens,
   countTotalSessionCost,
@@ -60,7 +60,6 @@ import {
   handleAuthRedirectResult,
 } from '../lib/persistence';
 import { User } from 'firebase/auth';
-import { WebMode } from '../shared/webGrounding';
 import { useTheme } from '../hooks/useTheme';
 import { useFileAttachment, AttachedFile } from '../hooks/useFileAttachment';
 import { CouncilSidebar } from './council/CouncilSidebar';
@@ -229,7 +228,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         proCompareModelId: savedProCompareModelId || 'anthropic/claude-3.7-sonnet',
         disableFallback: savedDisableFallback === 'true',
         disableLoadingOverlay: savedDisableLoadingOverlay === 'true',
-        webMode: (localStorage.getItem('council_web_mode') as WebMode) || 'auto',
       };
     } catch {
       return {
@@ -253,7 +251,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         proCompareModelId: 'anthropic/claude-3.7-sonnet',
         disableFallback: false,
         disableLoadingOverlay: false,
-        webMode: 'auto',
       };
     }
   });
@@ -342,6 +339,9 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     deleteRoundFromActiveSession,
     exportSessionsJSON,
     importSessionsJSON,
+    syncWithCloud,
+    isSyncing,
+    lastSyncedAt,
   } = useSessionManager(user);
 
   // Council Reducer for decoupled state updates
@@ -568,13 +568,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     if (onUpdateSettings) onUpdateSettings(updated);
   };
 
-  const updateEnableSearchGrounding = (enabled: boolean) => {
-    localStorage.setItem('council_search_grounding', enabled.toString());
-    const updated = { ...settings, enableSearchGrounding: enabled };
-    setInternalSettings(updated);
-    if (onUpdateSettings) onUpdateSettings(updated);
-  };
-
   const updateMaxRoundCostCeiling = (val: number) => {
     localStorage.setItem('council_cost_ceiling', val.toString());
     const updated = { ...settings, maxRoundCostCeiling: val };
@@ -626,14 +619,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     showToast(val ? '🚫 Deliberation overlay hidden (live feed view)' : '📺 Deliberation overlay enabled', 2500);
   };
 
-  const updateWebMode = (val: WebMode) => {
-    localStorage.setItem('council_web_mode', val);
-    const updated = { ...settings, webMode: val };
-    setInternalSettings(updated);
-    if (onUpdateSettings) onUpdateSettings(updated);
-    showToast(`🌐 Web Grounding set to ${val.toUpperCase()}`, 2500);
-  };
-
   const [isIsolatedRound, setIsIsolatedRound] = useState(false);
 
   const updateNotificationPreferences = (prefs: NotificationPreferences) => {
@@ -677,15 +662,16 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
   const filteredSessions = sessions.filter((s) => {
     if (!sessionSearchQuery.trim()) return true;
     const q = sessionSearchQuery.toLowerCase();
+    const sTitle = typeof s?.title === 'string' ? s.title.toLowerCase() : '';
     return (
-      s.title.toLowerCase().includes(q) ||
-      s.rounds.some((r) => {
-        if (r.userQuery.toLowerCase().includes(q)) return true;
-        if (r.synthesis?.content?.toLowerCase().includes(q)) return true;
-        if (Object.values(r.deliberation?.stage1 || {}).some((p: any) => p.content?.toLowerCase().includes(q))) return true;
-        if (Object.values(r.deliberation?.stage2 || {}).some((p: any) => p.content?.toLowerCase().includes(q))) return true;
+      sTitle.includes(q) ||
+      (Array.isArray(s?.rounds) && s.rounds.some((r) => {
+        if (typeof r.userQuery === 'string' && r.userQuery.toLowerCase().includes(q)) return true;
+        if (typeof r.synthesis?.content === 'string' && r.synthesis.content.toLowerCase().includes(q)) return true;
+        if (Object.values(r.deliberation?.stage1 || {}).some((p: any) => typeof p?.content === 'string' && p.content.toLowerCase().includes(q))) return true;
+        if (Object.values(r.deliberation?.stage2 || {}).some((p: any) => typeof p?.content === 'string' && p.content.toLowerCase().includes(q))) return true;
         return false;
-      })
+      }))
     );
   });
 
@@ -1118,6 +1104,33 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     localStorage.setItem('council_max_tokens', val.toString());
   };
 
+  const checkAndHandleApiSafetyBlock = (errorMsg: string, personaId: string, personaName: string, model: string, stage: 1 | 2 | 3, roundId: string, abortController: AbortController | null) => {
+    const safetyBlock = detectApiSafetyBlock(errorMsg);
+    if (safetyBlock.isRefusal) {
+      const failure: CapabilityFailure = {
+        personaId,
+        personaName,
+        model,
+        stage,
+        reason: 'Model API blocked the request due to safety filters or prohibited content.',
+        detectedSnippet: safetyBlock.snippet,
+      };
+      if (abortController) abortController.abort();
+      updateRoundInActiveSession(roundId, (r) => ({
+        ...r,
+        capabilityFailure: failure,
+      }));
+      showToast(`Deliberation halted: ${personaName} (${model}) was blocked by safety filters.`, 'error', 6000);
+      
+      const notifPrefs = settings.notificationPreferences;
+      if (notifPrefs?.enableSoundAlerts !== false && notifPrefs?.notifyOnError !== false) {
+        playNotificationChime('error', notifPrefs?.soundVolume ?? 0.5);
+      }
+      return true;
+    }
+    return false;
+  };
+
   const runSynthesisPhase = async (
     targetRoundId: string,
     queryText: string,
@@ -1172,9 +1185,9 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     }
 
     let fullSynthesis = '';
+    const targetSynthModel = (synthesizer?.model || settings?.defaultModels?.['synthesizer'] || 'google/gemini-3.7-flash').trim() || 'google/gemini-3.7-flash';
 
     try {
-      const targetSynthModel = (synthesizer?.model || settings?.defaultModels?.['synthesizer'] || 'google/gemini-3.7-flash').trim() || 'google/gemini-3.7-flash';
       console.log(`[Synthesis Phase] Initiating stream with model: ${targetSynthModel}`);
       console.log(`[Synthesis Phase] Messages payload length: ${JSON.stringify(chairmanMessages).length} chars`);
       
@@ -1187,9 +1200,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         messages: chairmanMessages,
         temperature: 0.5,
         maxTokens: Math.min(Math.max((settings.maxTokens || 4000) * 2, 8000), 8192),
-        enableSearchGrounding: Boolean(settings.enableSearchGrounding || synthesizer.enableSearchGrounding),
-        webMode: settings.webMode || 'auto',
-        enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || synthesizer.enableSearchGrounding)),
         query: queryText,
         signal,
         disableFallback: Boolean(settings.disableFallback),
@@ -1254,10 +1264,15 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
       return fullSynthesis;
     } catch (err: any) {
-      console.error(`[Synthesis Phase] ERROR encountered during stream for round ${targetRoundId}:`, err);
       if (err.name !== 'AbortError') {
         const errorMsg = err.message || 'Chairman synthesis failed';
+
+        const isSafetyBlock = checkAndHandleApiSafetyBlock(errorMsg, 'synthesizer', synthesizer.name || 'Chairman', targetSynthModel, 3, targetRoundId, null);
+        if (isSafetyBlock) return '';
+
+        console.error(`[Synthesis Phase] ERROR encountered during stream for round ${targetRoundId}:`, err);
         console.error('[Synthesis Phase] Dispatching error state due to:', errorMsg);
+
         dispatch({ type: 'ERROR_SYNTHESIS', payload: { roundId: targetRoundId, error: errorMsg } });
         updateRoundInActiveSession(targetRoundId, (r) => ({
           ...r,
@@ -1509,9 +1524,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens || executionPolicy.maxOutputTokens,
-          enableSearchGrounding: Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding),
-          webMode: settings.webMode || 'auto',
-          enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
           query: round.userQuery,
           signal: abortController.signal,
           disableFallback: Boolean(settings.disableFallback),
@@ -1603,9 +1615,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           messages: stage2Messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens || executionPolicy.maxOutputTokens,
-          enableSearchGrounding: Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding),
-          webMode: settings.webMode || 'auto',
-          enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
           query: round.userQuery,
           signal: abortController.signal,
           disableFallback: Boolean(settings.disableFallback),
@@ -1646,6 +1655,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         const errorMsg = err.message || 'Persona regeneration failed';
+
+        const executedModel = persona.model || settings.defaultModels[personaId] || 'Unknown';
+        const isSafetyBlock = checkAndHandleApiSafetyBlock(errorMsg, personaId, persona.name || personaId, executedModel, stage, roundId, abortControllerRef.current);
+        if (isSafetyBlock) return;
+
         if (stage === 1) {
           dispatch({ type: 'ERROR_STAGE1_PERSONA', payload: { roundId, personaId, error: errorMsg } });
         } else {
@@ -1781,9 +1795,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
               messages,
               temperature: settings.temperature,
               maxTokens: settings.maxTokens || executionPolicy.maxOutputTokens,
-              enableSearchGrounding: Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding),
-              webMode: settings.webMode || 'auto',
-              enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
               query: round.userQuery,
               signal: abortController.signal,
               disableFallback: Boolean(settings.disableFallback),
@@ -1811,6 +1822,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           } catch (err: any) {
             if (err.name === 'AbortError') return;
             const errorMsg = err.message || 'Failed Stage 1 query';
+
+            const executedModel1 = persona.model || settings.defaultModels[persona.id] || 'Unknown';
+            const isSafetyBlock = checkAndHandleApiSafetyBlock(errorMsg, persona.id, persona.name, executedModel1, 1, roundId, abortController);
+            if (isSafetyBlock) return;
+
             stage1Map[persona.id] = { personaId: persona.id, content, status: 'error', error: errorMsg };
             dispatch({ type: 'ERROR_STAGE1_PERSONA', payload: { roundId, personaId: persona.id, error: errorMsg } });
           }
@@ -1890,9 +1906,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
                 messages: stage2Messages,
                 temperature: settings.temperature,
                 maxTokens: settings.maxTokens || executionPolicy.maxOutputTokens,
-                enableSearchGrounding: Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding),
-                webMode: settings.webMode || 'auto',
-                enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
                 query: round.userQuery,
                 signal: abortController.signal,
                 disableFallback: Boolean(settings.disableFallback),
@@ -1920,6 +1933,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             } catch (err: any) {
               if (err.name === 'AbortError') return;
               const errorMsg = err.message || 'Failed Stage 2 peer review';
+
+              const executedModel2 = persona.model || settings.defaultModels[persona.id] || 'Unknown';
+              const isSafetyBlock = checkAndHandleApiSafetyBlock(errorMsg, persona.id, persona.name, executedModel2, 2, roundId, abortController);
+              if (isSafetyBlock) return;
+
               stage2Map[persona.id] = { personaId: persona.id, content, status: 'error', error: errorMsg };
               dispatch({ type: 'ERROR_STAGE2_PERSONA', payload: { roundId, personaId: persona.id, error: errorMsg } });
             }
@@ -1950,7 +1968,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
-    // Apply smart LLM model selection across all personalities based on domain type
+    try {
+      // Apply smart LLM model selection across all personalities based on domain type
     const textFiles = attachedFiles?.filter(f => !f.type?.startsWith('image/')) || [];
     const lastDomain = (activeAppliedDomain || localStorage.getItem('council_last_domain')) as TaskDomain | null;
 
@@ -2066,9 +2085,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           messages,
           temperature: settings.temperature,
           maxTokens: mode === 'quick_panel' ? (settings.quickPanelMaxTokens || 350) : settings.maxTokens,
-          enableSearchGrounding: Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding),
-          webMode: settings.webMode || 'auto',
-          enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
           query: queryText,
           signal: perCallSignal,
           disableFallback: Boolean(settings.disableFallback),
@@ -2145,6 +2161,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         if (err.name === 'AbortError' && abortController.signal.aborted) return;
         const isTimeout = err.name === 'TimeoutError' || err.message?.includes('timeout') || err.name === 'AbortError';
         const errorMsg = isTimeout ? 'Panelist timed out or failed to respond' : (err.message || 'Failed query');
+
+        const executedModel = persona.model || settings.defaultModels[persona.id] || 'Unknown';
+        const isSafetyBlock = checkAndHandleApiSafetyBlock(errorMsg, persona.id, persona.name, executedModel, 1, roundId, abortController);
+        if (isSafetyBlock) return;
+
         stage1Outputs[persona.id] = {
           personaId: persona.id,
           content,
@@ -2192,8 +2213,10 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           settings.apiKey,
           abortController.signal
         );
-      } catch (err) {
-        console.error('Error executing quick panel synthesis:', err);
+      } catch (err: any) {
+        if (err?.name !== 'AbortError') {
+          console.error('Error executing quick panel synthesis:', err);
+        }
       } finally {
         setIsDeliberating(false);
         abortControllerRef.current = null;
@@ -2326,9 +2349,6 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           messages: stage2Messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens,
-          enableSearchGrounding: Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding),
-          webMode: settings.webMode || 'auto',
-          enableWebGrounding: settings.webMode === 'always' || (settings.webMode !== 'off' && Boolean(settings.enableSearchGrounding || persona.enableSearchGrounding)),
           query: queryText,
           signal: abortController.signal,
           disableFallback: Boolean(settings.disableFallback),
@@ -2404,6 +2424,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       } catch (err: any) {
         if (err.name === 'AbortError') return;
         const errorMsg = err.message || 'Failed Stage 2 peer review';
+
+        const executedModel2 = persona.model || settings.defaultModels[persona.id] || 'Unknown';
+        const isSafetyBlock = checkAndHandleApiSafetyBlock(errorMsg, persona.id, persona.name, executedModel2, 2, roundId, abortController);
+        if (isSafetyBlock) return;
+
         stage2Outputs[persona.id] = {
           personaId: persona.id,
           content,
@@ -2431,29 +2456,33 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
     if (abortController.signal.aborted) return;
 
-    try {
-      const fullSynthText = await runSynthesisPhase(roundId, queryText, attachedImages, stage1Outputs, stage2Outputs, abortController.signal);
-      const roundWallClockMs = Date.now() - roundStartMs;
-      await buildAndSaveAuditLog(
-        roundId,
-        queryText,
-        activePresetId,
-        mode,
-        activePersonas,
-        synthesizer,
-        stage1Outputs,
-        stage2Outputs,
-        { content: fullSynthText || '', model: synthesizer.model || settings.defaultModels['synthesizer'] },
-        roundWallClockMs,
-        fallbackLogs,
-        isProCompareEnabled,
-        settings.apiKey,
-        abortController.signal
-      );
-    } finally {
-      releaseDeliberationLock();
-      abortControllerRef.current = null;
+    const fullSynthText = await runSynthesisPhase(roundId, queryText, attachedImages, stage1Outputs, stage2Outputs, abortController.signal);
+    const roundWallClockMs = Date.now() - roundStartMs;
+    await buildAndSaveAuditLog(
+      roundId,
+      queryText,
+      activePresetId,
+      mode,
+      activePersonas,
+      synthesizer,
+      stage1Outputs,
+      stage2Outputs,
+      { content: fullSynthText || '', model: synthesizer.model || settings.defaultModels['synthesizer'] },
+      roundWallClockMs,
+      fallbackLogs,
+      isProCompareEnabled,
+      settings.apiKey,
+      abortController.signal
+    );
+  } catch (err: any) {
+    if (err?.name !== 'AbortError') {
+      console.error('Error during round execution:', err);
     }
+  } finally {
+    releaseDeliberationLock();
+    abortControllerRef.current = null;
+    syncWithCloud().catch(() => {});
+  }
   };
 
   const runQuickPanelSynthesis = async (roundId: string) => {
@@ -2534,6 +2563,11 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     } catch (err: any) {
       if (err.name === 'AbortError') return;
       const errorMsg = err.message || 'Quick Panel Synthesis failed';
+
+      const executedSynthModel = synthesizer.model || settings.defaultModels['synthesizer'] || 'Unknown';
+      const isSafetyBlock = checkAndHandleApiSafetyBlock(errorMsg, 'synthesizer', synthesizer.name || 'Chairman', executedSynthModel, 3, roundId, abortController);
+      if (isSafetyBlock) return;
+
       dispatch({ type: 'ERROR_SYNTHESIS', payload: { roundId, error: errorMsg } });
       updateRoundInActiveSession(roundId, (r) => ({
         ...r,
@@ -2542,10 +2576,9 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     } finally {
       releaseDeliberationLock();
       abortControllerRef.current = null;
+      syncWithCloud().catch(() => {});
     }
   };
-
-  ;
 
   const reRunRoundDeliberation = async (roundId: string) => {
     if (deliberationLockRef.current || isDeliberating) return;
@@ -2717,12 +2750,15 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         activeSession={activeSession}
         sessionSearchQuery={sessionSearchQuery}
         setSessionSearchQuery={setSessionSearchQuery}
-        onCreateNewSession={createNewSession}
+        onCreateNewSession={() => createNewSession()}
         onSelectSession={selectSession}
         onDeleteSession={deleteSession}
         onClearAllSessions={clearAllSessions}
         onClearActiveHistory={handleClearActiveHistory}
         isDeliberating={isDeliberating}
+        isSyncing={isSyncing}
+        onSyncWithCloud={syncWithCloud}
+        lastSyncedAt={lastSyncedAt}
       />
 
       {/* Main Workspace Area */}
@@ -2745,6 +2781,9 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
           onLogout={handleGoogleLogout}
           onCreateNewSession={createNewSession}
           isDeliberating={isDeliberating}
+          isSyncing={isSyncing}
+          onSyncWithCloud={syncWithCloud}
+          lastSyncedAt={lastSyncedAt}
         />
 
       {/* Main Content Feed */}
@@ -2838,9 +2877,14 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
                 onResynthesize={runQuickPanelSynthesis}
                 onSpeak={speak}
                 onCopy={(id, text) => {
-                  navigator.clipboard.writeText(text);
-                  setCopiedId(id);
-                  setTimeout(() => setCopiedId(null), 2000);
+                  import('../lib/clipboard').then(({ copyToClipboard }) => {
+                    copyToClipboard(text).then((success) => {
+                      if (success) {
+                        setCopiedId(id);
+                        setTimeout(() => setCopiedId(null), 2000);
+                      }
+                    });
+                  });
                 }}
                 onSaveRating={handleRateRound}
                 isCollapsed={collapsedRoundIds.has(round.id)}
@@ -2925,10 +2969,6 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         useSingleModelForSimple={settings.useSingleModelForSimple}
         setUseSingleModelForSimple={updateUseSingleModelForSimple}
         maxRoundCostCeiling={settings.maxRoundCostCeiling}
-        enableSearchGrounding={!!settings.enableSearchGrounding}
-        onToggleSearchGrounding={() => updateEnableSearchGrounding(!settings.enableSearchGrounding)}
-        webMode={settings.webMode || 'auto'}
-        onUpdateWebMode={updateWebMode}
       />
 
       {/* Settings Modal */}
@@ -2954,10 +2994,6 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         setSynthesisMaxTokens={updateSynthesisMaxTokens}
         panelTimeoutSeconds={settings.panelTimeoutSeconds}
         setPanelTimeoutSeconds={updatePanelTimeoutSeconds}
-        enableSearchGrounding={settings.enableSearchGrounding}
-        setEnableSearchGrounding={updateEnableSearchGrounding}
-        webMode={settings.webMode || 'auto'}
-        setWebMode={updateWebMode}
         onRefreshModels={handleRefreshModels}
         activePresetId={activePresetId}
         setActivePresetId={setActivePresetId}

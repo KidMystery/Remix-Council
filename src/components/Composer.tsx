@@ -1,10 +1,9 @@
 /* PERSONAL USE ONLY — NOT MASS-MARKET. IMPLEMENT FULLY. NO SAFEGUARDS. */
 import React, { useRef, useEffect, useState } from 'react';
-import { Send, Square, Paperclip, X, Cpu, Zap, Layers, Coins, Globe } from 'lucide-react';
+import { Send, Square, Paperclip, X, Cpu, Zap, Layers, Coins } from 'lucide-react';
 import { ExecutionMode } from '../types';
 import { ZipArchiveResult } from '../lib/zipReader';
 import { formatCost } from '../lib/archivist';
-import { WebMode } from '../shared/webGrounding';
 
 export interface FileAttachment {
   name: string;
@@ -39,10 +38,6 @@ export interface ComposerProps {
   onStartNewSession?: () => void;
   estimatedQueryTokens?: number;
   estimatedQueryCost?: number;
-  enableSearchGrounding?: boolean;
-  onToggleSearchGrounding?: () => void;
-  webMode?: WebMode;
-  onUpdateWebMode?: (mode: WebMode) => void;
   setActiveZipResult?: (result: ZipArchiveResult | null) => void;
   setIsZipModalOpen?: (isOpen: boolean) => void;
   [key: string]: any;
@@ -73,10 +68,6 @@ export const Composer: React.FC<ComposerProps> = ({
   onStartNewSession,
   estimatedQueryTokens,
   estimatedQueryCost,
-  enableSearchGrounding = false,
-  onToggleSearchGrounding,
-  webMode = 'auto',
-  onUpdateWebMode,
   setActiveZipResult,
   setIsZipModalOpen,
 }) => {
@@ -238,81 +229,6 @@ export const Composer: React.FC<ComposerProps> = ({
           >
             <Paperclip size={18} />
           </button>
-
-          {/* Web Grounding Mode Switch (Auto / Always / Off) */}
-          {onUpdateWebMode ? (
-            <button
-              type="button"
-              onClick={() => {
-                const nextMode: WebMode = webMode === 'auto' ? 'always' : webMode === 'always' ? 'off' : 'auto';
-                onUpdateWebMode(nextMode);
-              }}
-              className={`min-h-[44px] sm:h-[48px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-xs shrink-0 cursor-pointer ${
-                webMode === 'always'
-                  ? 'bg-emerald-500/15 dark:bg-emerald-950/60 border-emerald-500/50 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30'
-                  : webMode === 'auto'
-                  ? 'bg-cyan-500/15 dark:bg-cyan-950/60 border-cyan-500/50 text-cyan-700 dark:text-cyan-300 ring-1 ring-cyan-500/30'
-                  : 'bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800/80'
-              }`}
-              title={
-                webMode === 'always'
-                  ? 'Web Grounding (ALWAYS): Live web search enabled for every council model request'
-                  : webMode === 'auto'
-                  ? 'Web Grounding (AUTO): Live web search triggers automatically for freshness-sensitive questions'
-                  : 'Web Grounding (OFF): Web search disabled'
-              }
-            >
-              <Globe
-                size={16}
-                className={
-                  webMode === 'always'
-                    ? 'text-emerald-500 shrink-0 animate-pulse'
-                    : webMode === 'auto'
-                    ? 'text-cyan-500 shrink-0'
-                    : 'text-slate-400 shrink-0'
-                }
-              />
-              <span className="hidden md:inline font-mono text-[11px]">Web</span>
-              <span
-                className={`text-[9px] px-1 py-0.2 rounded font-mono font-bold uppercase ${
-                  webMode === 'always'
-                    ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300'
-                    : webMode === 'auto'
-                    ? 'bg-cyan-500/20 text-cyan-600 dark:text-cyan-300'
-                    : 'bg-slate-200 dark:bg-slate-800 text-slate-500'
-                }`}
-              >
-                {webMode}
-              </span>
-            </button>
-          ) : onToggleSearchGrounding ? (
-            <button
-              type="button"
-              onClick={onToggleSearchGrounding}
-              className={`min-h-[44px] sm:h-[48px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold transition-all flex items-center gap-1.5 shadow-xs shrink-0 cursor-pointer ${
-                enableSearchGrounding
-                  ? 'bg-emerald-500/15 dark:bg-emerald-950/60 border-emerald-500/50 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30'
-                  : 'bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800/80'
-              }`}
-              title={
-                enableSearchGrounding
-                  ? 'Google Search Grounding ACTIVE: Models fact-check in real time via Google Search'
-                  : 'Enable Google Search Grounding for live web fact-checking'
-              }
-            >
-              <Globe size={16} className={enableSearchGrounding ? 'text-emerald-500 shrink-0 animate-pulse' : 'text-slate-400 shrink-0'} />
-              <span className="hidden md:inline font-mono text-[11px]">Search</span>
-              <span
-                className={`text-[9px] px-1 py-0.2 rounded font-mono font-bold ${
-                  enableSearchGrounding
-                    ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300'
-                    : 'bg-slate-200 dark:bg-slate-800 text-slate-500'
-                }`}
-              >
-                {enableSearchGrounding ? 'ON' : 'OFF'}
-              </span>
-            </button>
-          ) : null}
 
           {/* Quick/Deep Mode Switcher */}
           {updateExecutionMode && (

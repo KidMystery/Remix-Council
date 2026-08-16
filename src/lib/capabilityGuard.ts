@@ -12,14 +12,19 @@ export interface CapabilityFailure {
 
 const CAPABILITY_REFUSAL_PATTERNS: RegExp[] = [
   /(?:cannot|can't|unable to|not able to|don't have the ability to|am unable to)\s+(?:read|open|extract|view|inspect|access|parse|decompress|execute|see|examine)\s+(?:the\s+)?(?:zip|rar|tar|7z|archive|compressed file|lines of code|source code|codebase|uploaded file|attached file|code files)/i,
-  /(?:cannot|can't|unable to|not able to)\s+(?:read|view|see|inspect)\s+(?:the\s+)?(?:lines of code|code in the (?:zip|archive|file))/i,
+  /(?:cannot|can't|unable to|not able to)\s+(?:read|view|see|inspect|process)\s+(?:the\s+)?(?:lines of code|code in the (?:zip|archive|file))/i,
   /(?:i\s+(?:do not|don't)\s+have\s+access\s+to\s+(?:the\s+)?(?:contents of (?:the\s+)?(?:zip|archive|file)|files inside (?:the\s+)?(?:zip|archive)|local filesystem))/i,
   /(?:please\s+(?:upload|provide|paste|share)\s+(?:the\s+)?(?:code|text|files|source)\s+(?:directly|as plain text|in the chat|instead of (?:a\s+)?zip))/i,
-  /(?:as an ai(?: language model)?,?\s+(?:i\s+)?(?:cannot|can't|am unable to)\s+(?:read|open|access|extract|inspect)\s+(?:zip|archive|binary|uploaded)\s+files)/i,
+  /(?:as an ai(?: language model)?,?\s+(?:i\s+)?(?:cannot|can't|am unable to)\s+(?:read|open|access|extract|inspect|process)\s+(?:zip|archive|binary|uploaded)\s+files)/i,
   /(?:i\s+(?:cannot|can't)\s+interact with\s+(?:or read\s+)?(?:zip|rar|tar|archive)\s+files)/i,
   /(?:not within (?:my|the model's)\s+capabilities\s+to\s+(?:read|process|open|view|inspect)\s+(?:zip|rar|archive|compressed|code))/i,
   /(?:i am an ai(?: language model)? and (?:cannot|can't) (?:view|read|inspect|browse) (?:files|zip|archives))/i,
-  /(?:i cannot directly (?:view|browse|open|unzip) (?:the |your )?(?:code|files|repository|archive))/i,
+  /(?:i cannot directly (?:view|browse|open|unzip|process) (?:the |your )?(?:code|files|repository|archive))/i,
+  /(?:i don't have the capability to open or read files)/i,
+  /(?:i cannot read the files you attached)/i,
+  /(?:unable to read the attached code)/i,
+  /(?:i am a text-based ai and cannot open attachments)/i,
+  /(?:i cannot execute or run the code)/i,
 ];
 
 /**
@@ -55,6 +60,18 @@ export function detectCodeCapabilityRefusal(
     }
   }
 
+  return { isRefusal: false, snippet: '' };
+}
+
+/**
+ * Checks if the API returned an error indicating safety filters or prohibited content blocked the request.
+ */
+export function detectApiSafetyBlock(errorMsg: string): { isRefusal: boolean; snippet: string } {
+  if (!errorMsg) return { isRefusal: false, snippet: '' };
+  const lower = errorMsg.toLowerCase();
+  if (lower.includes('prohibited_content') || lower.includes('blocked the request') || lower.includes('safety') || lower.includes('input validation failed')) {
+    return { isRefusal: true, snippet: errorMsg };
+  }
   return { isRefusal: false, snippet: '' };
 }
 

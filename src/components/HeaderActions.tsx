@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Settings as SettingsIcon, Sun, Moon, ShieldAlert, LogIn, LogOut, User as UserIcon, MoreVertical } from 'lucide-react';
+import { Settings as SettingsIcon, Sun, Moon, ShieldAlert, LogIn, LogOut, User as UserIcon, MoreVertical, Cloud, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { User } from 'firebase/auth';
 
 interface HeaderActionsProps {
@@ -11,6 +11,9 @@ interface HeaderActionsProps {
   onLogin?: () => void;
   onLogout?: () => void;
   isDeliberating?: boolean;
+  isSyncing?: boolean;
+  onSyncWithCloud?: () => Promise<void> | void;
+  lastSyncedAt?: number | null;
 }
 
 export const HeaderActions: React.FC<HeaderActionsProps> = ({
@@ -22,6 +25,9 @@ export const HeaderActions: React.FC<HeaderActionsProps> = ({
   onLogin,
   onLogout,
   isDeliberating,
+  isSyncing,
+  onSyncWithCloud,
+  lastSyncedAt,
 }) => {
   const [isOverflowOpen, setIsOverflowOpen] = useState(false);
   const overflowRef = useRef<HTMLDivElement>(null);
@@ -43,6 +49,35 @@ export const HeaderActions: React.FC<HeaderActionsProps> = ({
 
   return (
     <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+      {/* Cloud Sync Status Indicator for Authenticated Users */}
+      {user && onSyncWithCloud && (
+        <button
+          type="button"
+          onClick={() => onSyncWithCloud()}
+          disabled={isSyncing || isDeliberating}
+          className={`min-w-[36px] min-h-[36px] sm:min-w-[38px] sm:min-h-[38px] px-2.5 rounded-xl border text-xs font-mono transition-all flex items-center gap-1.5 cursor-pointer shadow-xs ${
+            isSyncing
+              ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-600 dark:text-cyan-400'
+              : 'bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
+          }`}
+          title={
+            isSyncing
+              ? 'Syncing sessions to Firebase cloud...'
+              : `Cloud Sync Active (Click to sync now)${lastSyncedAt ? ` • Last synced ${new Date(lastSyncedAt).toLocaleTimeString()}` : ''}`
+          }
+          aria-label="Synchronize threads with Firebase"
+        >
+          {isSyncing ? (
+            <RefreshCw size={14} className="animate-spin text-cyan-500" />
+          ) : (
+            <Cloud size={14} className="text-cyan-500" />
+          )}
+          <span className="hidden lg:inline text-[11px]">
+            {isSyncing ? 'Syncing...' : 'Cloud'}
+          </span>
+        </button>
+      )}
+
       {/* Settings Modal Trigger */}
       <button
         type="button"
@@ -127,6 +162,26 @@ export const HeaderActions: React.FC<HeaderActionsProps> = ({
                     <p className="text-[10px] text-slate-400 truncate">{user.email}</p>
                   </div>
                 </div>
+
+                {onSyncWithCloud && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSyncWithCloud();
+                      setIsOverflowOpen(false);
+                    }}
+                    className="w-full py-1.5 px-2 rounded-lg text-left text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:bg-cyan-50 dark:hover:bg-cyan-950/40 flex items-center justify-between transition-colors cursor-pointer"
+                  >
+                    <div className="flex items-center gap-2">
+                      <RefreshCw size={13} className={isSyncing ? "animate-spin text-cyan-500" : "text-cyan-500"} />
+                      <span>{isSyncing ? 'Syncing...' : 'Sync Cloud Threads'}</span>
+                    </div>
+                    {lastSyncedAt && !isSyncing && (
+                      <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />
+                    )}
+                  </button>
+                )}
+
                 {onLogout && (
                   <button
                     type="button"

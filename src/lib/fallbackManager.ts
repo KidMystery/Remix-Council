@@ -2,7 +2,6 @@ import { Persona, PersonaId, GroundingData } from '../types';
 import { RawOpenRouterModel, cleanModelName } from './presets';
 import { isFreeModel, getAuthorOrganization, getFamily, getCanonicalTarget } from './modelMapper';
 import { streamOpenRouterCompletion } from './openrouter';
-import { WebMode } from '../shared/webGrounding';
 
 export type TriggerReason = 
   | 'HTTP 429 (Rate Limit)'
@@ -262,14 +261,11 @@ export interface StreamPersonaWithFallbackOptions {
   personaId: PersonaId;
   personaName: string;
   roundId?: string;
-  apiKey?: string;
+  apiKey: string;
   model: string;
   messages: { role: 'system' | 'user' | 'assistant'; content: any }[];
   temperature?: number;
   maxTokens?: number;
-  enableSearchGrounding?: boolean;
-  webMode?: WebMode;
-  enableWebGrounding?: boolean;
   query?: string;
   signal?: AbortSignal;
   disableFallback?: boolean;
@@ -308,9 +304,6 @@ export async function streamPersonaWithFallback(
     messages,
     temperature,
     maxTokens,
-    enableSearchGrounding,
-    webMode,
-    enableWebGrounding,
     query,
     signal,
     onToken,
@@ -344,9 +337,6 @@ export async function streamPersonaWithFallback(
         messages,
         temperature,
         maxTokens,
-        enableSearchGrounding,
-        webMode,
-        enableWebGrounding,
         query,
         signal,
         disableFallback,

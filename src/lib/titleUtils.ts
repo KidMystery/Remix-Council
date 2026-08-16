@@ -1,5 +1,5 @@
-export function summarizeTitle(text: string): string {
-  if (!text) return 'New Deliberation';
+export function summarizeTitle(text: unknown): string {
+  if (typeof text !== 'string' || !text.trim()) return 'New Deliberation';
 
   // Strip attached file markers
   let clean = text.replace(/\[Attached File:[^\]]+\]/g, '').trim();

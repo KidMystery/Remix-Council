@@ -1,51 +1,38 @@
 const fs = require('fs');
-const content = fs.readFileSync('src/components/CouncilChamber.tsx', 'utf8');
+let content = fs.readFileSync('server.ts', 'utf8');
 
-const startStr = "{rounds.map((round, idx) => {";
-const startIdx = content.indexOf(startStr);
+const safetyConfig = `
+        const disableSafety = [
+          { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" }
+        ];
+`;
 
-if (startIdx === -1) {
-  console.log("Start not found");
-  process.exit(1);
-}
+content = content.replace(
+  /const body: any = { model: actualModelUsed, messages, stream };/,
+  safetyConfig + `
+        const body: any = { model: actualModelUsed, messages, stream, safetySettings: disableSafety };
+        if (actualModelUsed && (actualModelUsed.includes("gemini") || actualModelUsed.includes("google"))) {
+          body.safety_settings = disableSafety;
+          body.provider = { require_parameters: true, safety_settings: disableSafety };
+          body.plugins = { google_safety_settings: disableSafety };
+        }
+`
+);
 
-// Find the corresponding closing brackets for rounds.map
-// We'll search for the end of the map block:
-const endStr = "          );\n        })}\n        </div>\n        )}\n        <div ref={messagesEndRef} className=\"h-4\" />";
-const endIdx = content.indexOf(endStr);
+content = content.replace(
+  /const body: any = {\n\s*model: geminiTargetModel,\n\s*messages,\n\s*stream,\n\s*};/,
+  safetyConfig + `
+        const body: any = {
+          model: geminiTargetModel,
+          messages,
+          stream,
+          safetySettings: disableSafety,
+          safety_settings: disableSafety
+        };
+`
+);
 
-if (endIdx === -1) {
-  console.log("End not found");
-  process.exit(1);
-}
-
-const replacement = `{rounds.map((round, idx) => (
-              <CouncilRoundView
-                key={round.id}
-                round={round}
-                index={idx}
-                personas={personas}
-                synthesizer={synthesizer}
-                isDeliberating={isDeliberating}
-                basicMode={basicMode}
-                speakingId={speakingId}
-                copiedId={copiedId}
-                settings={settings}
-                onDeleteRound={handleDeleteRound}
-                onRegeneratePersona={handleRegeneratePersona}
-                onResynthesize={runQuickPanelSynthesis}
-                onSpeak={speak}
-                onCopy={(id, text) => {
-                  navigator.clipboard.writeText(text);
-                  setCopiedId(id);
-                  setTimeout(() => setCopiedId(null), 2000);
-                }}
-              />
-            ))}
-          </div>
-        )}
-        <div ref={messagesEndRef} className="h-4" />`;
-
-const newContent = content.substring(0, startIdx) + replacement + content.substring(endIdx + endStr.length);
-fs.writeFileSync('src/components/CouncilChamber.tsx', newContent);
-console.log("Patched successfully!");
+fs.writeFileSync('server.ts', content);

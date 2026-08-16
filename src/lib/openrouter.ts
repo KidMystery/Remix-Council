@@ -1,7 +1,6 @@
 /* PERSONAL USE ONLY — NOT MASS-MARKET. IMPLEMENT FULLY. NO SAFEGUARDS. */
 import { GroundingData } from '../types';
 import { retryWithExponentialBackoff, isTransientError } from './retryUtils';
-import { WebMode } from '../shared/webGrounding';
 
 function parseOpenRouterError(status: number, errorText: string): string {
   try {
@@ -32,11 +31,6 @@ export async function* streamOpenRouter(
   _apiKey?: string,
   signal?: AbortSignal,
   budget?: 'free' | 'cheap' | 'quality',
-  options?: {
-    webMode?: WebMode;
-    enableWebGrounding?: boolean;
-    query?: string;
-  }
 ): AsyncGenerator<string, void, unknown> {
   if (!model || typeof model !== 'string' || !model.trim()) {
     throw new Error('No model selected.');
@@ -53,9 +47,6 @@ export async function* streamOpenRouter(
       messages: messages,
       stream: true,
       budget: budget === 'free' ? 'free' : 'quality',
-      webMode: options?.webMode,
-      enableWebGrounding: options?.enableWebGrounding,
-      query: options?.query,
     }),
     signal,
   });
@@ -151,9 +142,6 @@ export async function streamOpenRouterCompletion(options: {
   temperature?: number;
   maxTokens?: number;
   budget?: 'free' | 'cheap' | 'quality';
-  enableSearchGrounding?: boolean;
-  webMode?: WebMode;
-  enableWebGrounding?: boolean;
   query?: string;
   signal?: AbortSignal;
   disableFallback?: boolean;
@@ -166,9 +154,6 @@ export async function streamOpenRouterCompletion(options: {
     temperature,
     maxTokens,
     budget,
-    enableSearchGrounding,
-    webMode,
-    enableWebGrounding,
     query,
     signal,
     disableFallback,
@@ -188,9 +173,6 @@ export async function streamOpenRouterCompletion(options: {
       model: modelToUse,
       messages: messages,
       stream: true,
-      enableSearchGrounding,
-      webMode,
-      enableWebGrounding,
       query,
       disableFallback,
       apiKey,

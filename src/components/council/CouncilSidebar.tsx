@@ -1,6 +1,7 @@
 import React from 'react';
-import { MessageSquare, PanelLeftClose, Plus, Search, X, Clock, Trash2, Eraser } from 'lucide-react';
+import { MessageSquare, PanelLeftClose, Plus, Search, X, Clock, Trash2, Eraser, RefreshCw, Cloud } from 'lucide-react';
 import { Session } from '../../types';
+import { ConfirmButton } from '../ConfirmButton';
 
 interface CouncilSidebarProps {
   isOpen: boolean;
@@ -17,6 +18,9 @@ interface CouncilSidebarProps {
   onClearAllSessions: () => void;
   onClearActiveHistory?: () => void;
   isDeliberating?: boolean;
+  isSyncing?: boolean;
+  onSyncWithCloud?: () => Promise<void> | void;
+  lastSyncedAt?: number | null;
 }
 
 export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
@@ -34,6 +38,9 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
   onClearAllSessions,
   onClearActiveHistory,
   isDeliberating,
+  isSyncing,
+  onSyncWithCloud,
+  lastSyncedAt,
 }) => {
   const currentSession = activeSession || sessions.find((s) => s.id === activeSessionId);
   const activeHasRounds = Boolean(currentSession && currentSession.rounds && currentSession.rounds.length > 0);
@@ -67,21 +74,39 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
               Deliberation Threads
             </h2>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close deliberation threads sidebar"
-            className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0 cursor-pointer min-w-[36px] min-h-[36px] flex items-center justify-center focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-indigo-500 dark:focus-visible:ring-cyan-400"
-          >
-            <PanelLeftClose size={16} aria-hidden="true" />
-          </button>
+          <div className="flex items-center gap-1">
+            {onSyncWithCloud && (
+              <button
+                type="button"
+                onClick={() => onSyncWithCloud()}
+                disabled={isSyncing || isDeliberating}
+                aria-label="Refresh and sync threads from Firebase"
+                title={
+                  isSyncing
+                    ? 'Syncing with Cloud...'
+                    : `Sync threads with cloud${lastSyncedAt ? ` • Last synced ${new Date(lastSyncedAt).toLocaleTimeString()}` : ''}`
+                }
+                className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0 cursor-pointer min-w-[32px] min-h-[32px] flex items-center justify-center focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-cyan-500"
+              >
+                <RefreshCw size={14} className={isSyncing ? "animate-spin text-cyan-500" : ""} aria-hidden="true" />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close deliberation threads sidebar"
+              className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0 cursor-pointer min-w-[32px] min-h-[32px] flex items-center justify-center focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-indigo-500 dark:focus-visible:ring-cyan-400"
+            >
+              <PanelLeftClose size={16} aria-hidden="true" />
+            </button>
+          </div>
         </div>
 
         {/* Sidebar Action & Search */}
         <div className="p-3 border-b border-slate-200 dark:border-slate-800 space-y-2.5">
           <button
             type="button"
-            onClick={onCreateNewSession}
+            onClick={() => onCreateNewSession()}
             disabled={isDeliberating}
             aria-label="Start new deliberation thread"
             className="w-full py-2.5 px-3.5 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-md shadow-cyan-950/30 transition-all cursor-pointer min-h-[42px] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-indigo-500 dark:focus-visible:ring-cyan-400"
@@ -113,20 +138,19 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
 
           {/* Active Thread Fast Actions (Clear Current Thread) */}
           {activeHasRounds && onClearActiveHistory && (
-            <button
-              type="button"
-              onClick={() => {
-                if (confirm(`Clear chat history for "${currentSession?.title || 'current thread'}"? All deliberation messages in this thread will be wiped.`)) {
-                  onClearActiveHistory();
-                }
-              }}
+            <ConfirmButton
+              onConfirm={onClearActiveHistory}
               disabled={isDeliberating}
               aria-label="Clear all messages from the active thread"
+              confirmPrompt="Click again to clear"
               className="w-full py-1.5 px-2.5 rounded-lg bg-red-500/10 hover:bg-red-500/15 dark:bg-red-950/40 dark:hover:bg-red-900/50 border border-red-500/30 text-red-600 dark:text-red-400 disabled:opacity-40 text-[11px] font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-500"
-            >
-              <Eraser size={13} aria-hidden="true" />
-              <span>Clear History in Current Thread</span>
-            </button>
+              idleChildren={
+                <>
+                  <Eraser size={13} aria-hidden="true" />
+                  <span>Clear History in Current Thread</span>
+                </>
+              }
+            />
           )}
         </div>
 
@@ -140,13 +164,14 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
             <ul className="space-y-1.5 list-none p-0 m-0">
               {filteredSessions.map((s) => {
                 const isActive = s.id === activeSessionId;
+                const sessionTitle = typeof s.title === 'string' && s.title.trim() ? s.title.trim() : 'Untitled Session';
                 return (
                   <li key={s.id}>
                     <div
                       role="button"
                       tabIndex={0}
                       aria-current={isActive ? 'true' : undefined}
-                      aria-label={`Thread: ${s.title || 'Untitled Session'}, ${s.rounds?.length || 0} rounds`}
+                      aria-label={`Thread: ${sessionTitle}, ${s.rounds?.length || 0} rounds`}
                       onClick={() => onSelectSession(s.id)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
@@ -161,8 +186,8 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
                       }`}
                     >
                       <div className="min-w-0 flex-1 space-y-1">
-                        <div className="font-semibold text-xs leading-snug line-clamp-2 break-words" title={s.title || 'Untitled Session'}>
-                          {s.title || 'Untitled Session'}
+                        <div className="font-semibold text-xs leading-snug line-clamp-2 break-words" title={sessionTitle}>
+                          {sessionTitle}
                         </div>
                         <div className="flex items-center gap-2 text-[10px] text-slate-400 dark:text-slate-500 font-mono flex-wrap">
                           <span className="flex items-center gap-1">
@@ -174,20 +199,14 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
                         </div>
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (confirm(`Delete thread "${s.title || 'Untitled Session'}" and its entire history?`)) {
-                            onDeleteSession(s.id);
-                          }
-                        }}
-                        aria-label={`Delete thread ${s.title || 'Untitled Session'}`}
+                      <ConfirmButton
+                        onConfirm={() => onDeleteSession(s.id)}
+                        aria-label={`Delete thread ${sessionTitle}`}
                         className="text-slate-400 hover:text-red-500 hover:bg-red-500/10 dark:hover:bg-red-950/40 p-1.5 rounded-lg transition-all shrink-0 cursor-pointer min-w-[28px] min-h-[28px] flex items-center justify-center focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-500"
                         title="Delete thread"
-                      >
-                        <Trash2 size={13} aria-hidden="true" />
-                      </button>
+                        confirmPrompt={<Trash2 size={13} className="text-white" />}
+                        idleChildren={<Trash2 size={13} aria-hidden="true" />}
+                      />
                     </div>
                   </li>
                 );
@@ -199,18 +218,17 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
         {/* Sidebar Footer */}
         {sessions.length > 0 && (
           <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/60 flex flex-col gap-1.5">
-            <button
-              type="button"
+            <ConfirmButton
               disabled={isDeliberating}
-              onClick={() => {
-                if (confirm(`Delete all ${sessions.length} deliberation thread(s)? This cannot be undone.`)) {
-                  onClearAllSessions();
-                }
-              }}
+              onConfirm={onClearAllSessions}
               className="w-full text-center text-xs text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 py-2 px-3 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors flex items-center justify-center gap-1.5 font-medium cursor-pointer disabled:opacity-40"
-            >
-              <Trash2 size={13} /> Clear All Threads ({sessions.length})
-            </button>
+              confirmPrompt="Click again to delete all"
+              idleChildren={
+                <>
+                  <Trash2 size={13} /> Clear All Threads ({sessions.length})
+                </>
+              }
+            />
           </div>
         )}
       </aside>

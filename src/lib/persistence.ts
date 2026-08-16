@@ -1,6 +1,7 @@
 import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
 import {
   getFirestore,
+  initializeFirestore,
   doc,
   setDoc,
   getDoc,
@@ -20,6 +21,8 @@ import {
   Auth,
   onAuthStateChanged,
   signOut,
+  setPersistence,
+  browserLocalPersistence,
 } from 'firebase/auth';
 import config from '../../firebase-applet-config.json';
 import { Session, Settings, Persona, AttachedTextFile } from '../types';
@@ -71,6 +74,31 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   };
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
+}
+
+/**
+ * Deep sanitization function that recursively strips undefined keys and converts non-serializables
+ * so Firestore `setDoc` will NEVER fail with "Unsupported field value: undefined".
+ */
+export function sanitizeForFirestore<T>(data: T): T {
+  if (data === undefined || data === null) {
+    return null as unknown as T;
+  }
+  if (typeof data !== 'object') {
+    return data;
+  }
+  if (Array.isArray(data)) {
+    return data
+      .filter((item) => item !== undefined)
+      .map((item) => sanitizeForFirestore(item)) as unknown as T;
+  }
+  const clean: Record<string, any> = {};
+  for (const [key, value] of Object.entries(data as Record<string, any>)) {
+    if (value !== undefined) {
+      clean[key] = sanitizeForFirestore(value);
+    }
+  }
+  return clean as T;
 }
 
 export interface PersistedSession {
@@ -140,8 +168,19 @@ export function initPersistence(): boolean {
         return false;
       }
       app = initializeApp(firebaseConfig);
-      db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
+      try {
+        db = initializeFirestore(app, {
+          ignoreUndefinedProperties: true,
+        }, config.firestoreDatabaseId || undefined);
+      } catch {
+        db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
+      }
+
       auth = getAuth(app);
+      try {
+        setPersistence(auth, browserLocalPersistence).catch(() => {});
+      } catch {}
+
       persistenceInitialized = true;
       console.log('Firebase persistence initialized successfully.');
       console.log('Firebase active project:', firebaseConfig.projectId);
@@ -155,8 +194,21 @@ export function initPersistence(): boolean {
 
   try {
     app = getApps()[0];
-    db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
-    auth = getAuth(app);
+    if (!db) {
+      try {
+        db = initializeFirestore(app, {
+          ignoreUndefinedProperties: true,
+        }, config.firestoreDatabaseId || undefined);
+      } catch {
+        db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
+      }
+    }
+    if (!auth) {
+      auth = getAuth(app);
+      try {
+        setPersistence(auth, browserLocalPersistence).catch(() => {});
+      } catch {}
+    }
     persistenceInitialized = true;
     return true;
   } catch (e) {
@@ -185,10 +237,10 @@ export function getFirebaseDb(): Firestore | null {
 
 export async function syncCouncilSession(session: PersistedSession): Promise<string> {
   if (!db) initPersistence();
-  const path = `users/${session.userId}/sessions/${session.id}`;
+  const sanitized = sanitizeForFirestore(session);
 
   try {
-    localStorage.setItem('council_local_backup_' + session.id, JSON.stringify(session));
+    localStorage.setItem('council_local_backup_' + session.id, JSON.stringify(sanitized));
   } catch (e) {
     console.warn('Failed to store local backup session:', e);
   }
@@ -198,7 +250,7 @@ export async function syncCouncilSession(session: PersistedSession): Promise<str
   }
 
   try {
-    await setDoc(doc(db, 'users', session.userId, 'sessions', session.id), session, { merge: true });
+    await setDoc(doc(db, 'users', session.userId, 'sessions', session.id), sanitized, { merge: true });
     return session.shareToken || session.id;
   } catch (e: any) {
     if (isOfflineOrUnavailableError(e)) {
@@ -214,15 +266,19 @@ export async function loadUserSessions(userId: string): Promise<PersistedSession
   if (!db) initPersistence();
   if (!db || !userId) return [];
 
-  const path = `users/${userId}/sessions`;
   try {
     const sessionsRef = collection(db, 'users', userId, 'sessions');
     const q = query(sessionsRef);
     const querySnapshot = await getDocs(q);
     const sessions: PersistedSession[] = [];
     querySnapshot.forEach((doc) => {
-      sessions.push(doc.data() as PersistedSession);
+      const data = doc.data() as PersistedSession;
+      if (data && data.id) {
+        sessions.push(data);
+      }
     });
+    // Sort by updatedAt descending
+    sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     return sessions;
   } catch (e: any) {
     if (isOfflineOrUnavailableError(e)) {
@@ -237,7 +293,6 @@ export async function loadUserSessions(userId: string): Promise<PersistedSession
 export async function deleteCloudSession(userId: string, sessionId: string): Promise<void> {
   if (!db) initPersistence();
   if (!db || !userId || !sessionId) return;
-  const path = `users/${userId}/sessions/${sessionId}`;
   try {
     await deleteDoc(doc(db, 'users', userId, 'sessions', sessionId));
   } catch (e: any) {
@@ -265,16 +320,17 @@ export async function syncUserSettings(
   if (personas) payload.personas = personas;
   if (synthesizer) payload.synthesizer = synthesizer;
 
+  const sanitized = sanitizeForFirestore(payload);
+
   // Always mirror to local storage
   try {
-    localStorage.setItem(`council_user_settings_${userId}`, JSON.stringify(payload));
+    localStorage.setItem(`council_user_settings_${userId}`, JSON.stringify(sanitized));
   } catch {}
 
   if (!db) return;
 
-  const path = `users/${userId}/settings/global_preferences`;
   try {
-    await setDoc(doc(db, 'users', userId, 'settings', 'global_preferences'), payload, { merge: true });
+    await setDoc(doc(db, 'users', userId, 'settings', 'global_preferences'), sanitized, { merge: true });
   } catch (e: any) {
     if (isOfflineOrUnavailableError(e)) {
       console.warn('Firestore offline: user settings saved to local storage.');
@@ -298,7 +354,6 @@ export async function loadUserSettings(userId: string): Promise<UserCloudData | 
 
   if (!db || !userId) return localData;
 
-  const path = `users/${userId}/settings/global_preferences`;
   try {
     const snap = await getDoc(doc(db, 'users', userId, 'settings', 'global_preferences'));
     if (snap.exists()) {
@@ -337,7 +392,7 @@ export async function loginWithGoogle(): Promise<User | 'redirecting' | null> {
 
     if (code === 'auth/unauthorized-domain') {
       throw new Error(
-        'Unauthorized domain. Add your Railway URL to Firebase Authentication → Settings → Authorized domains.'
+        'Unauthorized domain. Add your domain to Firebase Authentication → Settings → Authorized domains.'
       );
     }
 
@@ -367,7 +422,12 @@ export async function handleAuthRedirectResult(): Promise<User | null> {
     const result = await getRedirectResult(auth);
     return result?.user || null;
   } catch (error: any) {
-    console.error('Failed to complete Google redirect sign-in:', error);
+    const errMsg = error?.message || String(error);
+    if (errMsg.includes('closing') || errMsg.includes('hidden')) {
+      console.warn('Google redirect sign-in skipped: Database is closing/hidden (iframe context).');
+    } else {
+      console.error('Failed to complete Google redirect sign-in:', error);
+    }
     return null;
   }
 }
