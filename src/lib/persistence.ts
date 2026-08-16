@@ -5,6 +5,7 @@ import {
   doc,
   setDoc,
   getDoc,
+  getDocFromServer,
   collection,
   query,
   getDocs,
@@ -25,7 +26,7 @@ import {
   browserLocalPersistence,
 } from 'firebase/auth';
 import config from '../../firebase-applet-config.json';
-import { Session, Settings, Persona, AttachedTextFile } from '../types';
+import { Session, Settings, Persona, AttachedTextFile, CouncilRound } from '../types';
 
 export enum OperationType {
   CREATE = 'create',
@@ -184,6 +185,16 @@ export function initPersistence(): boolean {
       persistenceInitialized = true;
       console.log('Firebase persistence initialized successfully.');
       console.log('Firebase active project:', firebaseConfig.projectId);
+
+      // Validate connection to Firestore as per skill guideline
+      if (db) {
+        getDocFromServer(doc(db, 'test', 'connection')).catch((err) => {
+          if (err instanceof Error && err.message.includes('the client is offline')) {
+            console.warn('Please check your Firebase configuration (client offline).');
+          }
+        });
+      }
+
       return true;
     } catch (e) {
       console.error("Failed to initialize Firebase:", e);
@@ -233,6 +244,40 @@ export function getFirebaseAuth(): Auth | null {
 export function getFirebaseDb(): Firestore | null {
   if (!db) initPersistence();
   return db;
+}
+
+export function migrateLocalSession(raw: any): Session {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: `session_${Date.now()}`,
+      title: 'New Session',
+      rounds: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+  }
+
+  const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id : `session_${Date.now()}`;
+  const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title : 'Untitled Deliberation';
+  const createdAt = typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now();
+  const updatedAt = typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : createdAt;
+  const rounds: CouncilRound[] = Array.isArray(raw.rounds) ? raw.rounds : [];
+
+  return {
+    id,
+    title,
+    rounds,
+    createdAt,
+    updatedAt,
+    userId: typeof raw.userId === 'string' ? raw.userId : undefined,
+    presetId: raw.presetId,
+    budgetPolicy: raw.budgetPolicy,
+    personas: Array.isArray(raw.personas) ? raw.personas : undefined,
+    synthesizer: raw.synthesizer,
+    customModels: raw.customModels && typeof raw.customModels === 'object' ? raw.customModels : undefined,
+    synthesizerModel: typeof raw.synthesizerModel === 'string' ? raw.synthesizerModel : undefined,
+    attachedFiles: Array.isArray(raw.attachedFiles) ? raw.attachedFiles : undefined,
+  };
 }
 
 export async function syncCouncilSession(session: PersistedSession): Promise<string> {

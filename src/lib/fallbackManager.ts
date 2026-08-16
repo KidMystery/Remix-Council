@@ -266,9 +266,11 @@ export interface StreamPersonaWithFallbackOptions {
   messages: { role: 'system' | 'user' | 'assistant'; content: any }[];
   temperature?: number;
   maxTokens?: number;
+  budget?: 'free' | 'cheap' | 'quality';
   query?: string;
   signal?: AbortSignal;
   disableFallback?: boolean;
+  webSearch?: boolean;
   onToken?: (chunk: string) => void;
   onGrounding?: (grounding: GroundingData) => void;
   activePersonas: Persona[];
@@ -295,6 +297,7 @@ export async function streamPersonaWithFallback(
   fallbackOccurred: boolean;
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
   grounding?: GroundingData;
+  finishReason?: string;
 }> {
   const {
     personaId,
@@ -304,6 +307,7 @@ export async function streamPersonaWithFallback(
     messages,
     temperature,
     maxTokens,
+    budget,
     query,
     signal,
     onToken,
@@ -327,7 +331,7 @@ export async function streamPersonaWithFallback(
     attempts++;
     attemptedModels.add(currentModel);
 
-    let streamResult: { content: string; actualModel?: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }; grounding?: GroundingData } = { content: '' };
+    let streamResult: { content: string; actualModel?: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }; grounding?: GroundingData; finishReason?: string } = { content: '' };
     let hasTokenStreamed = false;
 
     try {
@@ -337,6 +341,7 @@ export async function streamPersonaWithFallback(
         messages,
         temperature,
         maxTokens,
+        budget,
         query,
         signal,
         disableFallback,
@@ -363,6 +368,7 @@ export async function streamPersonaWithFallback(
         fallbackOccurred: attempts > 1,
         usage: streamResult.usage,
         grounding: streamResult.grounding,
+        finishReason: streamResult.finishReason,
       };
     } catch (err: any) {
       lastError = err;

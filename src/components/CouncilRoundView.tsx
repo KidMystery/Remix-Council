@@ -1,7 +1,7 @@
 import { copyToClipboard } from "../lib/clipboard";
 /* PERSONAL USE ONLY — NOT MASS-MARKET. IMPLEMENT FULLY. NO SAFEGUARDS. */
-import React from 'react';
-import { RefreshCw, Volume2, VolumeX, Check, Copy, Globe, Trash2, BookOpen, ChevronDown, ChevronUp, Star } from 'lucide-react';
+import React, { useState } from 'react';
+import { RefreshCw, Volume2, VolumeX, Check, Copy, Globe, Trash2, BookOpen, ChevronDown, ChevronUp, Star, Maximize2, Minimize2, AlertTriangle } from 'lucide-react';
 import { CouncilRound, Persona, PersonaResponse, Settings, RoundRating } from '../types';
 import { MessageMarkdown } from './MessageMarkdown';
 import { GroundingSourcesCard } from './GroundingSourcesCard';
@@ -41,6 +41,18 @@ interface CouncilRoundViewProps {
 
 const textWrap = 'min-w-0 max-w-full break-words [overflow-wrap:anywhere] whitespace-pre-wrap';
 
+function TruncatedWarning({ finishReason }: { finishReason?: string }) {
+  if (finishReason === 'length' || finishReason === 'MAX_TOKENS') {
+    return (
+      <div className="mt-2 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 p-2 rounded border border-amber-200 dark:border-amber-900 flex items-center gap-1.5">
+        <AlertTriangle size={12} />
+        Response was truncated due to output length limits.
+      </div>
+    );
+  }
+  return null;
+}
+
 export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(function CouncilRoundView({
   round, index, personas, synthesizer, isDeliberating, basicMode,
   speakingId, copiedId, settings, onDeleteRound, onRegeneratePersona,
@@ -63,6 +75,35 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
   ).length;
 
   const [showBasicStages, setShowBasicStages] = React.useState(false);
+  const [expandedStage1PersonaId, setExpandedStage1PersonaId] = React.useState<string | null>(null);
+  const [expandedStage2PersonaId, setExpandedStage2PersonaId] = React.useState<string | null>(null);
+
+  const [showStage1, setShowStage1] = React.useState(true);
+  const [showStage2, setShowStage2] = React.useState(true);
+
+  React.useEffect(() => {
+    if (!isDeliberating) return;
+    
+    // Auto-collapse Stage 1 when Stage 2 begins
+    const hasStage2Started = Object.values(round.deliberation?.stage2 || {}).some(r => r?.status === 'streaming' || r?.status === 'completed');
+    if (hasStage2Started) {
+      setShowStage1(false);
+    }
+    
+    // Auto-collapse Stage 2 when Stage 3 (Synthesis) begins
+    const hasSynthesisStarted = round.synthesis?.status === 'streaming' || round.synthesis?.status === 'completed';
+    if (hasSynthesisStarted) {
+      setShowStage2(false);
+    }
+  }, [isDeliberating, round.deliberation?.stage2, round.synthesis]);
+
+  const toggleExpandStage1 = (personaId: string) => {
+    setExpandedStage1PersonaId(prev => prev === personaId ? null : personaId);
+  };
+
+  const toggleExpandStage2 = (personaId: string) => {
+    setExpandedStage2PersonaId(prev => prev === personaId ? null : personaId);
+  };
 
   // Consensus view: defaults to synthesis, with optional expandable stages
   if (basicMode) {
@@ -99,16 +140,29 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
           <div className="space-y-4 pt-1">
             {/* Stage 1 in Basic View */}
             <div className="space-y-2">
-              <h4 className="text-xs font-mono uppercase tracking-wider text-cyan-600 dark:text-cyan-400 flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-                Stage 1: Council Member Statements
-              </h4>
-              <SwipeDeck ariaLabel="Stage 1 responses">
-                {activePersonas.map((persona) => {
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-mono uppercase tracking-wider text-cyan-600 dark:text-cyan-400 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                  Stage 1: Council Member Statements
+                </h4>
+                {expandedStage1PersonaId && (
+                  <button
+                    type="button"
+                    onClick={() => setExpandedStage1PersonaId(null)}
+                    className="text-[11px] font-mono text-cyan-600 dark:text-cyan-400 hover:underline flex items-center gap-1"
+                  >
+                    <Minimize2 size={12} />
+                    Collapse View
+                  </button>
+                )}
+              </div>
+              <SwipeDeck ariaLabel="Stage 1 responses" hasExpandedChild={Boolean(expandedStage1PersonaId)}>
+                {(expandedStage1PersonaId ? activePersonas.filter(p => p.id === expandedStage1PersonaId) : activePersonas).map((persona) => {
                   const resp = round.deliberation?.stage1?.[persona.id];
                   const copyKey = `${round.id}-stage1-${persona.id}`;
+                  const isExpanded = expandedStage1PersonaId === persona.id;
                   return (
-                    <div key={persona.id} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full`}>
+                    <div key={persona.id} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full ${isExpanded ? 'w-full shadow-lg ring-1 ring-cyan-500/30' : ''}`}>
                       <div className="flex items-center justify-between gap-2 min-w-0">
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="text-xl shrink-0">{persona.avatar}</span>
@@ -117,6 +171,14 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
                             <p className="text-[10px] text-slate-500 dark:text-slate-400 whitespace-normal break-words" title={persona.role}>{persona.role}</p>
                           </div>
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => toggleExpandStage1(persona.id)}
+                          aria-label={isExpanded ? "Collapse card" : "Expand card to full width"}
+                          className={`p-1.5 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors ${isExpanded ? 'bg-cyan-100 dark:bg-cyan-950 text-cyan-600 dark:text-cyan-400' : ''}`}
+                        >
+                          {isExpanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+                        </button>
                       </div>
                       {resp?.status === 'error' ? (
                         <div className="text-xs text-red-400 bg-red-950/50 p-3 rounded-lg border border-red-800/50 break-words">
@@ -140,22 +202,45 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
             {/* Stage 2 in Basic View */}
             {hasStage2 && (
               <div className="space-y-2">
-                <h4 className="text-xs font-mono uppercase tracking-wider text-purple-500 dark:text-purple-400 flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
-                  Stage 2: Peer Review & Cross-Examination
-                </h4>
-                <SwipeDeck ariaLabel="Stage 2 peer reviews">
-                  {activePersonas.map((persona) => {
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-mono uppercase tracking-wider text-purple-500 dark:text-purple-400 flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+                    Stage 2: Peer Review & Cross-Examination
+                  </h4>
+                  {expandedStage2PersonaId && (
+                    <button
+                      type="button"
+                      onClick={() => setExpandedStage2PersonaId(null)}
+                      className="text-[11px] font-mono text-purple-600 dark:text-purple-400 hover:underline flex items-center gap-1"
+                    >
+                      <Minimize2 size={12} />
+                      Collapse View
+                    </button>
+                  )}
+                </div>
+                <SwipeDeck ariaLabel="Stage 2 peer reviews" hasExpandedChild={Boolean(expandedStage2PersonaId)}>
+                  {(expandedStage2PersonaId ? activePersonas.filter(p => p.id === expandedStage2PersonaId) : activePersonas).map((persona) => {
                     const resp = round.deliberation?.stage2?.[persona.id];
                     if (!resp) return null;
+                    const isExpanded = expandedStage2PersonaId === persona.id;
                     return (
-                      <div key={`s2-${persona.id}`} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full`}>
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="text-xl shrink-0">{persona.avatar}</span>
-                          <div className="min-w-0">
-                            <h4 className="font-bold text-sm text-slate-800 dark:text-white whitespace-normal break-words" title={persona.name}>{persona.name}</h4>
-                            <p className="text-[10px] text-slate-500 dark:text-slate-400 whitespace-normal break-words" title={persona.role}>{persona.role}</p>
+                      <div key={`s2-${persona.id}`} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full ${isExpanded ? 'w-full shadow-lg ring-1 ring-purple-500/30' : ''}`}>
+                        <div className="flex items-center justify-between gap-2 min-w-0">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-xl shrink-0">{persona.avatar}</span>
+                            <div className="min-w-0">
+                              <h4 className="font-bold text-sm text-slate-800 dark:text-white whitespace-normal break-words" title={persona.name}>{persona.name}</h4>
+                              <p className="text-[10px] text-slate-500 dark:text-slate-400 whitespace-normal break-words" title={persona.role}>{persona.role}</p>
+                            </div>
                           </div>
+                          <button
+                            type="button"
+                            onClick={() => toggleExpandStage2(persona.id)}
+                            aria-label={isExpanded ? "Collapse card" : "Expand card to full width"}
+                            className={`p-1.5 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors ${isExpanded ? 'bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-400' : ''}`}
+                          >
+                            {isExpanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+                          </button>
                         </div>
                         {resp?.status === 'error' ? (
                           <div className="text-xs text-red-400 bg-red-950/50 p-3 rounded-lg border border-red-800/50 break-words">
@@ -253,16 +338,31 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
         <>
           {/* Stage 1: Persona Responses */}
           <div className="space-y-3">
-            <h3 className="text-xs font-mono uppercase tracking-wider text-cyan-600 dark:text-cyan-400 flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-              Stage 1: Council Member Statements
-            </h3>
-            <SwipeDeck ariaLabel="Stage 1 responses">
-              {activePersonas.map((persona) => {
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-mono uppercase tracking-wider text-cyan-600 dark:text-cyan-400 flex items-center gap-1.5 cursor-pointer select-none hover:opacity-80" onClick={() => setShowStage1(!showStage1)}>
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                Stage 1: Council Member Statements
+                {showStage1 ? <ChevronUp size={14} className="ml-1" /> : <ChevronDown size={14} className="ml-1" />}
+              </h3>
+              {expandedStage1PersonaId && showStage1 && (
+                <button
+                  type="button"
+                  onClick={() => setExpandedStage1PersonaId(null)}
+                  className="text-[11px] font-mono text-cyan-600 dark:text-cyan-400 hover:underline flex items-center gap-1"
+                >
+                  <Minimize2 size={12} />
+                  Collapse View
+                </button>
+              )}
+            </div>
+            {showStage1 && (
+            <SwipeDeck ariaLabel="Stage 1 responses" hasExpandedChild={Boolean(expandedStage1PersonaId)}>
+              {(expandedStage1PersonaId ? activePersonas.filter(p => p.id === expandedStage1PersonaId) : activePersonas).map((persona) => {
                 const resp = round.deliberation?.stage1?.[persona.id];
                 const copyKey = `${round.id}-stage1-${persona.id}`;
+                const isExpanded = expandedStage1PersonaId === persona.id;
                 return (
-                  <div key={persona.id} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full`}>
+                  <div key={persona.id} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full ${isExpanded ? 'w-full shadow-lg ring-1 ring-cyan-500/30' : ''}`}>
                     <div className="flex items-center justify-between gap-2 min-w-0">
                       <div className="flex items-center gap-2 min-w-0">
                         <span className="text-xl shrink-0">{persona.avatar}</span>
@@ -272,6 +372,15 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
                         </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => toggleExpandStage1(persona.id)}
+                          aria-label={isExpanded ? "Collapse card" : "Expand card to full width"}
+                          className={`p-1.5 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors ${isExpanded ? 'bg-cyan-100 dark:bg-cyan-950 text-cyan-600 dark:text-cyan-400' : ''}`}
+                          title={isExpanded ? "Collapse" : "Expand to full width"}
+                        >
+                          {isExpanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+                        </button>
                         <button type="button" disabled={isDeliberating} onClick={() => onRegeneratePersona(round.id, persona.id, 1)}
                           className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30" title="Regenerate">
                           <RefreshCw size={13} className={resp?.status === 'streaming' ? 'animate-spin text-cyan-500' : ''} />
@@ -306,22 +415,38 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
                 );
               })}
             </SwipeDeck>
+            )}
           </div>
 
           {/* Stage 2: Peer Review */}
           {hasStage2 && (
             <div className="space-y-3">
-              <h3 className="text-xs font-mono uppercase tracking-wider text-purple-500 dark:text-purple-400 flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
-                Stage 2: Peer Review & Cross-Examination
-              </h3>
-              <SwipeDeck ariaLabel="Stage 2 peer reviews">
-                {activePersonas.map((persona) => {
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-mono uppercase tracking-wider text-purple-500 dark:text-purple-400 flex items-center gap-1.5 cursor-pointer select-none hover:opacity-80" onClick={() => setShowStage2(!showStage2)}>
+                  <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+                  Stage 2: Peer Review & Cross-Examination
+                  {showStage2 ? <ChevronUp size={14} className="ml-1" /> : <ChevronDown size={14} className="ml-1" />}
+                </h3>
+                {expandedStage2PersonaId && showStage2 && (
+                  <button
+                    type="button"
+                    onClick={() => setExpandedStage2PersonaId(null)}
+                    className="text-[11px] font-mono text-purple-600 dark:text-purple-400 hover:underline flex items-center gap-1"
+                  >
+                    <Minimize2 size={12} />
+                    Collapse View
+                  </button>
+                )}
+              </div>
+              {showStage2 && (
+              <SwipeDeck ariaLabel="Stage 2 peer reviews" hasExpandedChild={Boolean(expandedStage2PersonaId)}>
+                {(expandedStage2PersonaId ? activePersonas.filter(p => p.id === expandedStage2PersonaId) : activePersonas).map((persona) => {
                   const resp = round.deliberation?.stage2?.[persona.id];
                   if (!resp) return null;
                   const copyKey = `${round.id}-stage2-${persona.id}`;
+                  const isExpanded = expandedStage2PersonaId === persona.id;
                   return (
-                    <div key={`s2-${persona.id}`} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full`}>
+                    <div key={`s2-${persona.id}`} className={`p-4 rounded-xl bg-white dark:bg-slate-900 border ${persona.color} flex flex-col gap-3 min-w-0 overflow-hidden h-full ${isExpanded ? 'w-full shadow-lg ring-1 ring-purple-500/30' : ''}`}>
                       <div className="flex items-center justify-between gap-2 min-w-0">
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="text-xl shrink-0">{persona.avatar}</span>
@@ -331,6 +456,15 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
                           </div>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => toggleExpandStage2(persona.id)}
+                            aria-label={isExpanded ? "Collapse card" : "Expand card to full width"}
+                            className={`p-1.5 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors ${isExpanded ? 'bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-400' : ''}`}
+                            title={isExpanded ? "Collapse" : "Expand to full width"}
+                          >
+                            {isExpanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+                          </button>
                           <button type="button" disabled={isDeliberating} onClick={() => onRegeneratePersona(round.id, persona.id, 2)}
                             className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30">
                             <RefreshCw size={13} className={resp?.status === 'streaming' ? 'animate-spin text-purple-400' : ''} />
@@ -364,6 +498,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
                   );
                 })}
               </SwipeDeck>
+            )}
             </div>
           )}
 

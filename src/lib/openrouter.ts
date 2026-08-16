@@ -1,6 +1,7 @@
 /* PERSONAL USE ONLY — NOT MASS-MARKET. IMPLEMENT FULLY. NO SAFEGUARDS. */
 import { GroundingData } from '../types';
 import { retryWithExponentialBackoff, isTransientError } from './retryUtils';
+import { getAuthHeaders } from './authHeader';
 
 function parseOpenRouterError(status: number, errorText: string): string {
   try {
@@ -133,6 +134,7 @@ export interface OpenRouterCompletionResult {
     totalTokens?: number;
   };
   grounding?: GroundingData;
+  finishReason?: string;
 }
 
 export async function streamOpenRouterCompletion(options: {
@@ -145,6 +147,7 @@ export async function streamOpenRouterCompletion(options: {
   query?: string;
   signal?: AbortSignal;
   disableFallback?: boolean;
+  webSearch?: boolean;
   onToken?: (chunk: string) => void;
   onGrounding?: (grounding: GroundingData) => void;
 }): Promise<OpenRouterCompletionResult> {
@@ -157,6 +160,7 @@ export async function streamOpenRouterCompletion(options: {
     query,
     signal,
     disableFallback,
+    webSearch,
     onToken,
     onGrounding,
   } = options;
@@ -175,6 +179,7 @@ export async function streamOpenRouterCompletion(options: {
       stream: true,
       query,
       disableFallback,
+      webSearch,
       apiKey,
       budget: budget === 'free' ? 'free' : 'quality',
       stream_options: { include_usage: true },
@@ -184,8 +189,10 @@ export async function streamOpenRouterCompletion(options: {
       body.max_tokens = maxTokens;
     }
 
+    const baseAuthHeaders = await getAuthHeaders();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      ...baseAuthHeaders,
     };
     if (apiKey) {
       headers['Authorization'] = `Bearer ${apiKey}`;
@@ -243,6 +250,7 @@ export async function streamOpenRouterCompletion(options: {
   let fullText = '';
   let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | undefined = undefined;
   let groundingData: GroundingData | undefined = undefined;
+  let finishReason: string | undefined = undefined;
 
   try {
     while (true) {
@@ -276,16 +284,21 @@ export async function streamOpenRouterCompletion(options: {
                 totalTokens: data.usage.total_tokens,
               };
             }
-            if (data.choices && data.choices[0] && data.choices[0].delta) {
-              const delta = data.choices[0].delta;
-              if (delta.grounding) {
-                groundingData = delta.grounding;
-                if (onGrounding) onGrounding(delta.grounding);
+            if (data.choices && data.choices[0]) {
+              if (data.choices[0].finish_reason) {
+                finishReason = data.choices[0].finish_reason;
               }
-              if (delta.content) {
-                const chunk = delta.content;
-                fullText += chunk;
-                if (onToken) onToken(chunk);
+              const delta = data.choices[0].delta;
+              if (delta) {
+                if (delta.grounding) {
+                  groundingData = delta.grounding;
+                  if (onGrounding) onGrounding(delta.grounding);
+                }
+                if (delta.content) {
+                  const chunk = delta.content;
+                  fullText += chunk;
+                  if (onToken) onToken(chunk);
+                }
               }
             }
           } catch (e: any) {
@@ -301,5 +314,5 @@ export async function streamOpenRouterCompletion(options: {
     reader.releaseLock();
   }
 
-  return { content: fullText, actualModel, usage, grounding: groundingData };
+  return { content: fullText, actualModel, usage, grounding: groundingData, finishReason };
 }

@@ -11,6 +11,8 @@ interface SettingsAdvancedTabProps {
   setMaxTokens?: (val: number) => void;
   executionMode: 'auto' | 'quick_panel' | 'deep_council';
   setExecutionMode?: (mode: 'auto' | 'quick_panel' | 'deep_council') => void;
+  webMode?: 'off' | 'auto' | 'always';
+  setWebMode?: (mode: 'off' | 'auto' | 'always') => void;
   quickPanelMaxTokens: number;
   setQuickPanelMaxTokens?: (val: number) => void;
   synthesisMaxTokens: number;
@@ -49,6 +51,8 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
   setMaxTokens,
   executionMode,
   setExecutionMode,
+  webMode = 'auto',
+  setWebMode,
   quickPanelMaxTokens,
   setQuickPanelMaxTokens,
   synthesisMaxTokens,

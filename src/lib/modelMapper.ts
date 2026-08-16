@@ -53,26 +53,44 @@ export function estimatedCost(model: RawOpenRouterModel): number {
        + completionPrice * EXPECTED_OUTPUT_TOKENS;
 }
 
-export function isFreeModel(model: RawOpenRouterModel): boolean {
-  if (!model?.id || !model.pricing) return false;
+export function isFreeModel(model: RawOpenRouterModel | null | undefined): boolean {
+  if (!model || typeof model !== 'object' || !model.id || !model.pricing) return false;
 
-  const id = model.id.toLowerCase();
-  if (id === 'openrouter/free' || id === 'openrouter/auto' || id.includes('openrouter/free')) {
+  const id = model.id.toLowerCase().trim();
+  if (
+    id === 'openrouter/free' ||
+    id === 'openrouter/auto' ||
+    id === 'openrouter/auto-beta' ||
+    id.startsWith('openrouter/free') ||
+    id.startsWith('openrouter/auto')
+  ) {
     return false;
   }
 
-  const request = safeParseFloat(model.pricing.request);
-  const prompt = safeParseFloat(model.pricing.prompt);
-  const completion = safeParseFloat(model.pricing.completion);
+  const reqVal = model.pricing.request;
+  const promptVal = model.pricing.prompt;
+  const compVal = model.pricing.completion;
 
-  const FREE_EPSILON = 0.000001; // OpenRouter sometimes returns 0.0000001
+  if (reqVal === undefined || reqVal === null ||
+      promptVal === undefined || promptVal === null ||
+      compVal === undefined || compVal === null) {
+    return false;
+  }
 
-  return (
-    request <= FREE_EPSILON &&
-    prompt <= FREE_EPSILON &&
-    completion <= FREE_EPSILON &&
-    (model.context_length ?? 4096) >= 2048
-  );
+  const request = typeof reqVal === 'number' ? reqVal : parseFloat(String(reqVal));
+  const prompt = typeof promptVal === 'number' ? promptVal : parseFloat(String(promptVal));
+  const completion = typeof compVal === 'number' ? compVal : parseFloat(String(compVal));
+
+  if (!Number.isFinite(request) || !Number.isFinite(prompt) || !Number.isFinite(completion)) {
+    return false;
+  }
+
+  // Exact zero check: no positive, no negative, no epsilon
+  if (request !== 0 || prompt !== 0 || completion !== 0) {
+    return false;
+  }
+
+  return (model.context_length ?? 4096) >= 2048;
 }
 
 /**

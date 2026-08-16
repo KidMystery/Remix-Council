@@ -210,7 +210,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             skeptic: 'deepseek/deepseek-chat',
             visionary: 'anthropic/claude-3.5-haiku',
             pragmatist: 'openai/gpt-4o-mini',
-            synthesizer: 'google/gemini-3.7-flash',
+            synthesizer: LATEST_GEMINI_FLASH,
           };
       return {
         apiKey: '',
@@ -236,7 +236,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           skeptic: 'deepseek/deepseek-chat',
           visionary: 'anthropic/claude-3.5-haiku',
           pragmatist: 'openai/gpt-4o-mini',
-          synthesizer: 'google/gemini-3.7-flash',
+          synthesizer: LATEST_GEMINI_FLASH,
         },
         temperature: 0.7,
         maxTokens: 4000,
@@ -611,6 +611,13 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     showToast(val ? '🛡️ Strict No-Fallback Mode active (errors will be shown directly)' : '🔄 Model Fallbacks enabled', 2500);
   };
 
+  const updateWebMode = (val: 'off' | 'auto' | 'always') => {
+    localStorage.setItem('council_web_mode', val);
+    const updated = { ...settings, webMode: val };
+    setInternalSettings(updated);
+    if (onUpdateSettings) onUpdateSettings(updated);
+  };
+
   const updateDisableLoadingOverlay = (val: boolean) => {
     localStorage.setItem('council_disable_loading_overlay', val.toString());
     const updated = { ...settings, disableLoadingOverlay: val };
@@ -626,6 +633,25 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     const updated = { ...settings, notificationPreferences: prefs };
     setInternalSettings(updated);
     if (onUpdateSettings) onUpdateSettings(updated);
+  };
+
+  const trackUsage = (roundId: string, usage: { promptTokens?: number, completionTokens?: number } | undefined, modelId: string) => {
+    if (!usage || (!usage.promptTokens && !usage.completionTokens)) return;
+    const pTokens = usage.promptTokens || 0;
+    const cTokens = usage.completionTokens || 0;
+    const cost = calculateCallCost(pTokens, cTokens, modelId);
+    updateRoundInActiveSession(roundId, (r) => {
+      const acc = r.accumulatedUsage || { promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0 };
+      return {
+        ...r,
+        accumulatedUsage: {
+          promptTokens: acc.promptTokens + pTokens,
+          completionTokens: acc.completionTokens + cTokens,
+          totalTokens: acc.totalTokens + pTokens + cTokens,
+          cost: acc.cost + cost,
+        }
+      };
+    });
   };
 
   const handleRateRound = (roundId: string, rating: RoundRating) => {
@@ -974,7 +1000,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
   useEffect(() => {
     const models: Record<string, string> = {
-      synthesizer: synthesizer.model || 'google/gemini-3.7-flash'
+      synthesizer: synthesizer.model || LATEST_GEMINI_FLASH
     };
     personas.forEach(p => {
       if (p.model) {
@@ -1185,7 +1211,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     }
 
     let fullSynthesis = '';
-    const targetSynthModel = (synthesizer?.model || settings?.defaultModels?.['synthesizer'] || 'google/gemini-3.7-flash').trim() || 'google/gemini-3.7-flash';
+    const targetSynthModel = (synthesizer?.model || settings?.defaultModels?.['synthesizer'] || LATEST_GEMINI_FLASH).trim() || LATEST_GEMINI_FLASH;
 
     try {
       console.log(`[Synthesis Phase] Initiating stream with model: ${targetSynthModel}`);
@@ -1203,6 +1229,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         query: queryText,
         signal,
         disableFallback: Boolean(settings.disableFallback),
+          webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
         onGrounding: (gData) => { streamGroundingData = gData; },
         onToken: (chunk) => {
           if (!fullSynthesis) {
@@ -1246,10 +1273,10 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       const finalSynthGrounding = synthRes?.grounding || streamGroundingData;
       const executedSynthModel = synthRes?.finalModel || targetSynthModel;
 
-      dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId: targetRoundId, grounding: finalSynthGrounding, model: executedSynthModel } });
+      dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId: targetRoundId, grounding: finalSynthGrounding, model: executedSynthModel, finishReason: synthRes?.finishReason } });
       updateRoundInActiveSession(targetRoundId, (r) => ({
         ...r,
-        synthesis: { ...r.synthesis, content: fullSynthesis, status: 'completed', grounding: finalSynthGrounding, model: executedSynthModel },
+        synthesis: { ...r.synthesis, content: fullSynthesis, status: 'completed', grounding: finalSynthGrounding, model: executedSynthModel, finishReason: synthRes?.finishReason },
       }));
       console.log(`[Synthesis Phase] Finished successfully for round ${targetRoundId}`);
 
@@ -1319,7 +1346,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
     // Stage 1 & 2 Persona Audits
     activePersonas.forEach((p) => {
-      const selectedModelId = p.model || settings?.defaultModels?.[p.id] || 'google/gemini-3.7-flash';
+      const selectedModelId = p.model || settings?.defaultModels?.[p.id] || LATEST_GEMINI_FLASH;
       const s1Resp = stage1Outputs[p.id];
       const resolvedModelId = s1Resp?.model || selectedModelId;
       const authorOrg = getAuthorOrganization(resolvedModelId);
@@ -1348,7 +1375,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     });
 
     // Synthesizer Audit
-    const synthSelectedModel = synthesizer?.model || settings?.defaultModels?.['synthesizer'] || 'google/gemini-3.7-flash';
+    const synthSelectedModel = synthesizer?.model || settings?.defaultModels?.['synthesizer'] || LATEST_GEMINI_FLASH;
     const synthResolvedModel = synthesisResponse.model || synthSelectedModel;
     const synthPromptTokens = estimateTokens(userQuery);
     const synthCompletionTokens = estimateTokens(synthesisResponse.content || '');
@@ -1527,6 +1554,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           query: round.userQuery,
           signal: abortController.signal,
           disableFallback: Boolean(settings.disableFallback),
+          webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
@@ -1547,7 +1575,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
         dispatch({
           type: 'FINISH_STAGE1_PERSONA',
-          payload: { roundId, personaId, content: fullContent, grounding: finalGrounding1, model: executedModel1 },
+          payload: { roundId, personaId, content: fullContent, grounding: finalGrounding1, model: executedModel1, finishReason: res1?.finishReason },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -1556,7 +1584,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage1: {
               ...r.deliberation?.stage1,
-              [personaId]: { personaId, content: fullContent, status: 'completed', grounding: finalGrounding1, model: executedModel1 },
+              [personaId]: { personaId, content: fullContent, status: 'completed', grounding: finalGrounding1, model: executedModel1, finishReason: res1?.finishReason },
             },
           },
         }));
@@ -1618,6 +1646,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           query: round.userQuery,
           signal: abortController.signal,
           disableFallback: Boolean(settings.disableFallback),
+          webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
@@ -1638,7 +1667,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
         dispatch({
           type: 'FINISH_STAGE2_PERSONA',
-          payload: { roundId, personaId, content: fullContent, grounding: finalGrounding2, model: executedModel2 },
+          payload: { roundId, personaId, content: fullContent, grounding: finalGrounding2, model: executedModel2, finishReason: res2?.finishReason },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -1647,7 +1676,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage2: {
               ...r.deliberation?.stage2,
-              [personaId]: { personaId, content: fullContent, status: 'completed', grounding: finalGrounding2, model: executedModel2 },
+              [personaId]: { personaId, content: fullContent, status: 'completed', grounding: finalGrounding2, model: executedModel2, finishReason: res2?.finishReason },
             },
           },
         }));
@@ -1798,6 +1827,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
               query: round.userQuery,
               signal: abortController.signal,
               disableFallback: Boolean(settings.disableFallback),
+          webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
               activePersonas,
               synthesizer,
               rawModels: rawModelsCatalog,
@@ -1909,6 +1939,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
                 query: round.userQuery,
                 signal: abortController.signal,
                 disableFallback: Boolean(settings.disableFallback),
+          webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
                 activePersonas,
                 synthesizer,
                 rawModels: rawModelsCatalog,
@@ -2088,6 +2119,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           query: queryText,
           signal: perCallSignal,
           disableFallback: Boolean(settings.disableFallback),
+          webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
@@ -2144,7 +2176,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
         dispatch({
           type: 'FINISH_STAGE1_PERSONA',
-          payload: { roundId, personaId: persona.id, content: res.content || content, grounding: finalGrounding, model: executedModel },
+          payload: { roundId, personaId: persona.id, content: res.content || content, grounding: finalGrounding, model: executedModel, finishReason: res?.finishReason },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -2153,7 +2185,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage1: {
               ...r.deliberation?.stage1,
-              [persona.id]: { personaId: persona.id, content: res.content || content, status: 'completed', grounding: finalGrounding, model: executedModel },
+              [persona.id]: { personaId: persona.id, content: res.content || content, status: 'completed', grounding: finalGrounding, model: executedModel, finishReason: res?.finishReason },
             },
           },
         }));
@@ -2345,13 +2377,14 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           personaName: persona.name,
           roundId,
           apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[persona.id] || 'google/gemini-3.7-flash',
+          model: persona.model || settings.defaultModels[persona.id] || LATEST_GEMINI_FLASH,
           messages: stage2Messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens,
           query: queryText,
           signal: abortController.signal,
           disableFallback: Boolean(settings.disableFallback),
+          webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
@@ -2408,7 +2441,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
         dispatch({
           type: 'FINISH_STAGE2_PERSONA',
-          payload: { roundId, personaId: persona.id, content: res.content || content, grounding: finalGrounding2, model: executedModel2 },
+          payload: { roundId, personaId: persona.id, content: res.content || content, grounding: finalGrounding2, model: executedModel2, finishReason: res?.finishReason },
         });
 
         updateRoundInActiveSession(roundId, (r) => ({
@@ -2417,7 +2450,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             ...r.deliberation,
             stage2: {
               ...r.deliberation?.stage2,
-              [persona.id]: { personaId: persona.id, content: res.content || content, status: 'completed', grounding: finalGrounding2, model: executedModel2 },
+              [persona.id]: { personaId: persona.id, content: res.content || content, status: 'completed', grounding: finalGrounding2, model: executedModel2, finishReason: res?.finishReason },
             },
           },
         }));
@@ -2542,6 +2575,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         maxTokens: settings.synthesisMaxTokens || executionPolicy.maxOutputTokens || 500,
         signal: abortController.signal,
         disableFallback: Boolean(settings.disableFallback),
+          webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
         activePersonas: personas.filter((p) => p.enabled !== false),
         synthesizer,
         rawModels: rawModelsCatalog,
@@ -2558,7 +2592,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId, model: executedSynthModel } });
       updateRoundInActiveSession(roundId, (r) => ({
         ...r,
-        synthesis: { content: fullSynthesis, status: 'completed', model: executedSynthModel },
+        synthesis: { content: fullSynthesis, status: 'completed', model: executedSynthModel, finishReason: res?.finishReason },
       }));
     } catch (err: any) {
       if (err.name === 'AbortError') return;
@@ -2614,11 +2648,11 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
     if (isDeliberating) return;
     const updatedPersonas = personas.map((p) => ({
       ...p,
-      model: 'google/gemini-3.7-flash',
+      model: LATEST_GEMINI_FLASH,
     }));
     const updatedSynthesizer = {
       ...synthesizer,
-      model: 'google/gemini-3.7-flash',
+      model: LATEST_GEMINI_FLASH,
     };
     setPersonas(updatedPersonas);
     setSynthesizer(updatedSynthesizer);
@@ -2988,6 +3022,8 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         setMaxTokens={updateMaxTokens}
         executionMode={settings.executionMode}
         setExecutionMode={updateExecutionMode}
+        webMode={settings.webMode}
+        setWebMode={updateWebMode}
         quickPanelMaxTokens={settings.quickPanelMaxTokens}
         setQuickPanelMaxTokens={updateQuickPanelMaxTokens}
         synthesisMaxTokens={settings.synthesisMaxTokens}

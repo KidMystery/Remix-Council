@@ -25,6 +25,8 @@ interface SettingsPanelProps {
   setMaxTokens?: (val: number) => void;
   executionMode?: 'auto' | 'quick_panel' | 'deep_council';
   setExecutionMode?: (mode: 'auto' | 'quick_panel' | 'deep_council') => void;
+  webMode?: 'off' | 'auto' | 'always';
+  setWebMode?: (mode: 'off' | 'auto' | 'always') => void;
   quickPanelMaxTokens?: number;
   setQuickPanelMaxTokens?: (val: number) => void;
   synthesisMaxTokens?: number;
@@ -81,6 +83,8 @@ export function SettingsPanel({
   setMaxTokens,
   executionMode = 'auto',
   setExecutionMode,
+  webMode = 'auto',
+  setWebMode,
   quickPanelMaxTokens = 350,
   setQuickPanelMaxTokens,
   synthesisMaxTokens = 500,
@@ -267,6 +271,8 @@ export function SettingsPanel({
               setMaxTokens={setMaxTokens}
               executionMode={executionMode}
               setExecutionMode={setExecutionMode}
+              webMode={webMode}
+              setWebMode={setWebMode}
               quickPanelMaxTokens={quickPanelMaxTokens}
               setQuickPanelMaxTokens={setQuickPanelMaxTokens}
               synthesisMaxTokens={synthesisMaxTokens}

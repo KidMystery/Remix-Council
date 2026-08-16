@@ -1,53 +1,105 @@
 {
   "entities": {
-    "UserSession": {
-      "title": "UserSession",
-      "description": "Council deliberation session saved by an authenticated user",
+    "CouncilSession": {
+      "title": "CouncilSession",
+      "description": "A multi-persona deliberation session stored per user.",
       "type": "object",
       "properties": {
         "id": {
           "type": "string",
-          "description": "Unique session identifier"
+          "description": "Unique session ID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$"
         },
         "userId": {
           "type": "string",
-          "description": "Identifier of the user who owns this session"
+          "description": "Firebase Auth UID of the owner",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$"
         },
         "title": {
           "type": "string",
-          "description": "Human-readable session title"
+          "description": "Session title",
+          "maxLength": 500
+        },
+        "rounds": {
+          "type": "array",
+          "description": "Deliberation rounds array"
         },
         "createdAt": {
           "type": "number",
-          "description": "Session creation timestamp in milliseconds"
+          "description": "Creation timestamp in milliseconds"
         },
         "updatedAt": {
           "type": "number",
           "description": "Last updated timestamp in milliseconds"
+        },
+        "shareToken": {
+          "type": "string",
+          "description": "Optional share token",
+          "maxLength": 128
+        },
+        "settings": {
+          "type": "object",
+          "description": "Session execution settings"
+        },
+        "personas": {
+          "type": "array",
+          "description": "Custom personas for this session"
+        },
+        "synthesizer": {
+          "type": "object",
+          "description": "Synthesizer persona"
+        },
+        "customModels": {
+          "type": "object",
+          "description": "Persona model overrides"
+        },
+        "synthesizerModel": {
+          "type": "string",
+          "description": "Synthesizer model override",
+          "maxLength": 120
+        },
+        "attachedFiles": {
+          "type": "array",
+          "description": "Code and text attachments"
         }
       },
       "required": ["id", "userId", "title", "createdAt", "updatedAt"]
     },
     "UserSettings": {
       "title": "UserSettings",
-      "description": "Global user preferences, custom personas, and synthesizer configurations",
+      "description": "User global preferences and default council configuration.",
       "type": "object",
       "properties": {
+        "settings": {
+          "type": "object",
+          "description": "Global execution and UI settings"
+        },
+        "personas": {
+          "type": "array",
+          "description": "Custom default persona roster"
+        },
+        "synthesizer": {
+          "type": "object",
+          "description": "Default synthesizer configuration"
+        },
         "updatedAt": {
           "type": "number",
           "description": "Last updated timestamp in milliseconds"
         }
-      }
+      },
+      "required": ["updatedAt"]
     }
   },
   "firestore": {
     "/users/{userId}/sessions/{sessionId}": {
-      "schema": "UserSession",
-      "description": "User specific council sessions"
+      "schema": "CouncilSession",
+      "description": "Private collection of deliberation sessions created by a user."
     },
     "/users/{userId}/settings/{docId}": {
       "schema": "UserSettings",
-      "description": "User global preferences and custom models"
+      "description": "Private user preference settings document."
     }
   }
 }

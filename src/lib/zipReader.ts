@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
+import { ArchiveEntryStatus, ArchiveManifestEntry } from '../types';
 
-export const MAX_EXTRACTED_FILES = 150;
+export const MAX_EXTRACTED_FILES = 200;
 export const MAX_FILE_CHARS = 150_000;
 export const MAX_TOTAL_CONTEXT_CHARS = 750_000;
 
@@ -21,10 +22,15 @@ export interface ZipArchiveResult {
   totalFiles: number;
   extractedCodeFilesCount: number;
   fileTree: string[];
+  manifest: ArchiveManifestEntry[];
   files: ExtractedZipFile[];
   formattedContext: string;
   warnings?: string[];
   wasTruncated?: boolean;
+  isPartial?: boolean;
+  totalExtractedChars?: number;
+  contextCeiling?: number;
+  omittedFiles?: string[];
 }
 
 export type ArchiveResult = ZipArchiveResult;
@@ -38,7 +44,7 @@ const CODE_EXTENSIONS = new Set([
   'md', 'markdown', 'txt', 'csv', 'yaml', 'yml', 'xml',
   'sql', 'sh', 'bash', 'zsh', 'env', 'example',
   'graphql', 'gql', 'proto', 'dockerfile', 'makefile', 'cmake', 'toml', 'ini',
-  'vue', 'svelte', 'astro', 'prisma', 'graphql', 'diff', 'patch'
+  'vue', 'svelte', 'astro', 'prisma', 'diff', 'patch'
 ]);
 
 // Binary extensions to skip
@@ -51,12 +57,11 @@ const BINARY_EXTENSIONS = new Set([
 ]);
 
 /**
- * Checks if an archive entry path should be skipped (build artifacts, dependencies, lockfiles, system files)
+ * Checks if an archive entry path should be skipped (build artifacts, dependencies, system files)
  */
 export function isIgnoredArchiveEntry(relativePath: string): boolean {
   const normalized = relativePath.toLowerCase().replace(/\\/g, '/');
 
-  // Skip directories and metadata
   if (
     normalized.includes('__macosx/') ||
     normalized.includes('.ds_store') ||
@@ -68,14 +73,24 @@ export function isIgnoredArchiveEntry(relativePath: string): boolean {
     normalized.includes('.nuxt/') ||
     normalized.includes('.turbo/') ||
     normalized.includes('.cache/') ||
-    normalized.includes('coverage/')
+    normalized.includes('coverage/') ||
+    normalized.includes('archive/scripts/') ||
+    normalized.startsWith('archive/scripts/')
   ) {
     return true;
   }
 
   const filename = relativePath.split(/[/\\]/).pop()?.toLowerCase() || '';
 
-  // Skip lockfiles
+  if (
+    filename.startsWith('patch_') ||
+    filename.startsWith('fix_') ||
+    filename.endsWith('.patch')
+  ) {
+    return true;
+  }
+
+  // Skip lockfiles from primary code analysis to save token budget
   if (
     filename === 'package-lock.json' ||
     filename === 'yarn.lock' ||
@@ -95,6 +110,70 @@ export function isIgnoredArchiveEntry(relativePath: string): boolean {
 export const isIgnoredZipEntry = isIgnoredArchiveEntry;
 
 /**
+ * Priority scoring for codebase files.
+ * Lower number = higher priority to be included in limited LLM context window.
+ */
+export function getArchiveFilePriority(relativePath: string): number {
+  const norm = relativePath.toLowerCase().replace(/\\/g, '/');
+  const filename = norm.split('/').pop() || norm;
+
+  // 1. Manifests, package.json, README, deployment specs
+  if (filename === 'package.json' || filename === 'readme.md' || filename === 'railway.json' || filename === 'firestore.rules') {
+    return 1;
+  }
+
+  // 2. Main entry points
+  if (
+    norm === 'server.ts' || norm === 'src/server.ts' ||
+    norm === 'src/main.tsx' || norm === 'src/index.tsx' ||
+    norm === 'src/app.tsx' || norm === 'src/app.ts' ||
+    norm === 'index.html'
+  ) {
+    return 2;
+  }
+
+  // 3. Types and schemas
+  if (norm === 'src/types.ts' || norm.includes('/types') || norm.endsWith('.d.ts') || norm.includes('/schema')) {
+    return 3;
+  }
+
+  // 4. Core config files
+  if (
+    filename === 'vite.config.ts' || filename === 'tsconfig.json' ||
+    filename === 'tailwind.config.js' || filename === '.env.example'
+  ) {
+    return 4;
+  }
+
+  // 5. Core library / hooks / business logic
+  if (norm.startsWith('src/lib/') || norm.startsWith('src/hooks/')) {
+    return 5;
+  }
+
+  // 6. Components
+  if (norm.startsWith('src/components/')) {
+    return 6;
+  }
+
+  // 7. General src/ source code
+  if (norm.startsWith('src/')) {
+    return 7;
+  }
+
+  // 8. Maintained test suite
+  if (norm.includes('__tests__') || norm.includes('.test.') || norm.includes('.spec.')) {
+    return 8;
+  }
+
+  // 9. Root scripts and historical docs
+  if (norm.startsWith('scripts/')) {
+    return 9;
+  }
+
+  return 10;
+}
+
+/**
  * Extracts and parses code files from an uploaded .zip archive file using client-side JSZip
  */
 export async function extractCodeFromZip(file: File): Promise<ZipArchiveResult> {
@@ -104,11 +183,12 @@ export async function extractCodeFromZip(file: File): Promise<ZipArchiveResult> 
 
     const extractedFiles: ExtractedZipFile[] = [];
     const fileTree: string[] = [];
+    const manifest: ArchiveManifestEntry[] = [];
+    const omittedFiles: string[] = [];
     const warnings: string[] = [];
 
     const entries = Object.keys(loadedZip.files);
 
-    // Safety checks: uncompressed size ceiling (50MB) and zip-bomb ratio guard (>200x)
     const uncompressedSize = entries.reduce(
       (sum, path) => sum + ((loadedZip.files[path] as any)?._data?.uncompressedSize || 0),
       0
@@ -123,97 +203,172 @@ export async function extractCodeFromZip(file: File): Promise<ZipArchiveResult> 
       throw new Error('Zip archive has an unsafe compression ratio.');
     }
 
+    // Sort entries by prioritized relevance
+    const nonDirEntries = entries.filter((path) => !loadedZip.files[path].dir);
+    nonDirEntries.sort((a, b) => {
+      const pA = getArchiveFilePriority(a);
+      const pB = getArchiveFilePriority(b);
+      if (pA !== pB) return pA - pB;
+      return a.localeCompare(b);
+    });
+
     let totalExtractedChars = 0;
     let fileCount = 0;
     let wasTruncated = false;
+    let isPartial = false;
 
-    for (const relativePath of entries) {
+    // Enumerate every entry for complete manifest
+    for (const relativePath of nonDirEntries) {
+      fileTree.push(relativePath);
       const entry = loadedZip.files[relativePath];
+      const filename = relativePath.split(/[/\\]/).pop() || relativePath;
+      const ext = filename.split('.').pop()?.toLowerCase() || '';
+      const entrySize = (entry as any)?._data?.uncompressedSize || 0;
 
-      // Skip directories and system/build/lockfile metadata
-      if (entry.dir || isIgnoredArchiveEntry(relativePath)) {
+      if (isIgnoredArchiveEntry(relativePath)) {
+        manifest.push({
+          path: relativePath,
+          size: entrySize,
+          type: ext,
+          status: 'ignored',
+          reason: 'Build artifact, package lockfile, or ignored pattern',
+          extractedChars: 0,
+        });
         continue;
       }
 
-      fileTree.push(relativePath);
-
-      // Abort if maximum extracted files limit is reached
-      if (fileCount >= MAX_EXTRACTED_FILES) {
-        warnings.push(`Extraction capped at ${MAX_EXTRACTED_FILES} files limit.`);
-        wasTruncated = true;
-        break;
-      }
-
-      // Abort if total context limit reached
-      if (totalExtractedChars >= MAX_TOTAL_CONTEXT_CHARS) {
-        warnings.push(`Total context limit of ${MAX_TOTAL_CONTEXT_CHARS.toLocaleString()} characters reached. Remaining files omitted.`);
-        wasTruncated = true;
-        break;
-      }
-
-      const filename = relativePath.split(/[/\\]/).pop() || relativePath;
-      const ext = filename.split('.').pop()?.toLowerCase() || '';
-
-      // Skip known binary extensions
       if (BINARY_EXTENSIONS.has(ext)) {
+        manifest.push({
+          path: relativePath,
+          size: entrySize,
+          type: ext,
+          status: 'binary',
+          reason: 'Binary file skipped',
+          extractedChars: 0,
+        });
+        continue;
+      }
+
+      // Check context budget
+      if (fileCount >= MAX_EXTRACTED_FILES || totalExtractedChars >= MAX_TOTAL_CONTEXT_CHARS) {
+        isPartial = true;
+        omittedFiles.push(relativePath);
+        manifest.push({
+          path: relativePath,
+          size: entrySize,
+          type: ext,
+          status: 'omitted',
+          reason: totalExtractedChars >= MAX_TOTAL_CONTEXT_CHARS
+            ? 'Total context ceiling reached'
+            : 'Maximum extracted files ceiling reached',
+          extractedChars: 0,
+        });
         continue;
       }
 
       try {
-        // Read text content
         let content = await entry.async('string');
 
-        // Check if text is valid (does not contain null bytes)
-        if (isTextContent(content)) {
-          let isFileTruncated = false;
-
-          // Enforce per-file character limit
-          if (content.length > MAX_FILE_CHARS) {
-            content = content.slice(0, MAX_FILE_CHARS) + `\n\n... [FILE TRUNCATED AFTER ${MAX_FILE_CHARS.toLocaleString()} CHARS]`;
-            isFileTruncated = true;
-            wasTruncated = true;
-            warnings.push(`File ${relativePath} truncated at ${MAX_FILE_CHARS.toLocaleString()} chars.`);
-          }
-
-          // Enforce total context character limit
-          if (totalExtractedChars + content.length > MAX_TOTAL_CONTEXT_CHARS) {
-            const remainingAllowed = MAX_TOTAL_CONTEXT_CHARS - totalExtractedChars;
-            if (remainingAllowed > 200) {
-              content = content.slice(0, remainingAllowed) + `\n\n... [TOTAL CONTEXT LIMIT OF ${MAX_TOTAL_CONTEXT_CHARS.toLocaleString()} CHARS REACHED]`;
-              extractedFiles.push({
-                path: relativePath,
-                name: filename,
-                size: content.length,
-                content,
-                isCode: CODE_EXTENSIONS.has(ext) || isLikelyCode(filename, content),
-                truncated: true,
-              });
-              totalExtractedChars += content.length;
-            }
-            wasTruncated = true;
-            warnings.push(`Total context limit of ${MAX_TOTAL_CONTEXT_CHARS.toLocaleString()} chars reached while processing ${relativePath}.`);
-            break;
-          }
-
-          extractedFiles.push({
+        if (!isTextContent(content)) {
+          manifest.push({
             path: relativePath,
-            name: filename,
-            size: content.length,
-            content,
-            isCode: CODE_EXTENSIONS.has(ext) || isLikelyCode(filename, content),
-            truncated: isFileTruncated,
+            size: entrySize,
+            type: ext,
+            status: 'binary',
+            reason: 'Contains non-text binary data',
+            extractedChars: 0,
           });
-
-          totalExtractedChars += content.length;
-          fileCount++;
+          continue;
         }
+
+        let isFileTruncated = false;
+        if (content.length > MAX_FILE_CHARS) {
+          content = content.slice(0, MAX_FILE_CHARS) + `\n\n... [FILE TRUNCATED AFTER ${MAX_FILE_CHARS.toLocaleString()} CHARS]`;
+          isFileTruncated = true;
+          wasTruncated = true;
+          isPartial = true;
+          warnings.push(`File ${relativePath} truncated at ${MAX_FILE_CHARS.toLocaleString()} chars.`);
+        }
+
+        if (totalExtractedChars + content.length > MAX_TOTAL_CONTEXT_CHARS) {
+          const remaining = MAX_TOTAL_CONTEXT_CHARS - totalExtractedChars;
+          if (remaining > 300) {
+            content = content.slice(0, remaining) + `\n\n... [TOTAL CONTEXT CEILING REACHED]`;
+            extractedFiles.push({
+              path: relativePath,
+              name: filename,
+              size: content.length,
+              content,
+              isCode: CODE_EXTENSIONS.has(ext) || isLikelyCode(filename, content),
+              truncated: true,
+            });
+            totalExtractedChars += content.length;
+            manifest.push({
+              path: relativePath,
+              size: entrySize,
+              type: ext,
+              status: 'truncated',
+              reason: 'Partially included before reaching total context ceiling',
+              extractedChars: content.length,
+            });
+          } else {
+            omittedFiles.push(relativePath);
+            manifest.push({
+              path: relativePath,
+              size: entrySize,
+              type: ext,
+              status: 'omitted',
+              reason: 'Total context ceiling reached',
+              extractedChars: 0,
+            });
+          }
+          wasTruncated = true;
+          isPartial = true;
+          continue;
+        }
+
+        extractedFiles.push({
+          path: relativePath,
+          name: filename,
+          size: content.length,
+          content,
+          isCode: CODE_EXTENSIONS.has(ext) || isLikelyCode(filename, content),
+          truncated: isFileTruncated,
+        });
+
+        manifest.push({
+          path: relativePath,
+          size: entrySize,
+          type: ext,
+          status: isFileTruncated ? 'truncated' : 'included',
+          extractedChars: content.length,
+        });
+
+        totalExtractedChars += content.length;
+        fileCount++;
       } catch (err) {
-        console.warn(`Could not read file ${relativePath} from zip:`, err);
+        manifest.push({
+          path: relativePath,
+          size: entrySize,
+          type: ext,
+          status: 'skipped',
+          reason: `Read error: ${(err as any)?.message || 'Unknown'}`,
+          extractedChars: 0,
+        });
       }
     }
 
-    // Build structured codebase context string for LLM models
-    const formattedContext = buildCodebaseContext(file.name, fileTree, extractedFiles, warnings, 'zip');
+    const formattedContext = buildCodebaseContext(
+      file.name,
+      fileTree,
+      extractedFiles,
+      manifest,
+      warnings,
+      isPartial,
+      omittedFiles,
+      totalExtractedChars,
+      'zip'
+    );
 
     return {
       filename: file.name,
@@ -221,28 +376,26 @@ export async function extractCodeFromZip(file: File): Promise<ZipArchiveResult> 
       totalFiles: entries.length,
       extractedCodeFilesCount: extractedFiles.length,
       fileTree,
+      manifest,
       files: extractedFiles,
       formattedContext,
       warnings,
       wasTruncated,
+      isPartial,
+      totalExtractedChars,
+      contextCeiling: MAX_TOTAL_CONTEXT_CHARS,
+      omittedFiles,
     };
   } catch (err: any) {
     console.warn('[ZipReader] Client extraction failed or fallback needed:', err);
-    // Fallback to server extraction endpoint
     return extractViaServerEndpoint(file);
   }
 }
 
-/**
- * Extracts and parses code files from an uploaded .rar archive file
- */
 export async function extractCodeFromRar(file: File): Promise<ZipArchiveResult> {
   return extractViaServerEndpoint(file);
 }
 
-/**
- * Server-side extraction fallback supporting both .rar and .zip archives
- */
 async function extractViaServerEndpoint(file: File): Promise<ZipArchiveResult> {
   const arrayBuffer = await file.arrayBuffer();
   const base64Data = arrayBufferToBase64(arrayBuffer);
@@ -267,9 +420,6 @@ async function extractViaServerEndpoint(file: File): Promise<ZipArchiveResult> {
   return result;
 }
 
-/**
- * Unified archive extractor supporting .zip, .rar, .tar, .tgz archives
- */
 export async function extractCodeFromArchive(file: File): Promise<ZipArchiveResult> {
   const lowerName = file.name.toLowerCase();
   if (lowerName.endsWith('.zip') || file.type === 'application/zip' || file.type.includes('zip')) {
@@ -290,7 +440,6 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 
 export function isTextContent(str: string): boolean {
   if (!str) return true;
-  // Check first 1000 chars for null bytes
   const sample = str.slice(0, 1000);
   let nullCount = 0;
   for (let i = 0; i < sample.length; i++) {
@@ -306,7 +455,9 @@ export function isLikelyCode(filename: string, content: string): boolean {
     lowerName === 'makefile' ||
     lowerName.startsWith('.env') ||
     lowerName === 'procfile' ||
-    lowerName === 'cmakelists.txt'
+    lowerName === 'cmakelists.txt' ||
+    lowerName === 'railway.json' ||
+    lowerName === 'firestore.rules'
   ) {
     return true;
   }
@@ -326,29 +477,45 @@ export function buildCodebaseContext(
   archiveName: string,
   fileTree: string[],
   files: ExtractedZipFile[],
+  manifest: ArchiveManifestEntry[] = [],
   warnings: string[] = [],
+  isPartial: boolean = false,
+  omittedFiles: string[] = [],
+  totalExtractedChars: number = 0,
   archiveType: 'zip' | 'rar' | 'archive' = 'archive'
 ): string {
   const label = archiveType.toUpperCase();
   let context = `================================================================================\n`;
   context += `ATTACHED ${label} CODEBASE ARCHIVE: ${archiveName}\n`;
-  context += `Extracted ${files.length} code & text files (${fileTree.length} total entries in archive)\n`;
-  context += `[CODEBASE EXTRACTION NOTICE: All files from the uploaded archive have been decompressed, parsed, and provided in full below as plain text. You have complete direct access to inspect and cite every file, function, and line of code. You do not need to unzip anything. Do NOT claim you cannot read zip files or access the code.]\n`;
+  context += `Extracted ${files.length} prioritized source & schema files (${totalExtractedChars.toLocaleString()} characters)\n`;
+
+  if (isPartial) {
+    context += `[CODEBASE EXTRACTION NOTICE: PARTIAL CONTEXT - This archive exceeded the context ceiling of ${MAX_TOTAL_CONTEXT_CHARS.toLocaleString()} characters. Critical entry points, schemas, and prioritized runtime files are provided in full below. ${omittedFiles.length} lower-priority file(s) were omitted. Check the manifest below.]\n`;
+  } else {
+    context += `[CODEBASE EXTRACTION NOTICE: COMPLETE CONTEXT - All ${files.length} readable text & code files from this archive have been decompressed and provided in full below as plain text. You have complete direct access to inspect and cite every file, function, and line.]\n`;
+  }
+
   if (warnings.length > 0) {
-    context += `ATTACHMENT GUARDRAIL WARNINGS:\n`;
+    context += `ATTACHMENT NOTICES:\n`;
     warnings.forEach((w) => {
       context += `- ${w}\n`;
     });
   }
   context += `================================================================================\n\n`;
 
-  context += `[CODEBASE FILE TREE]\n`;
-  fileTree.forEach((path) => {
-    context += `- ${path}\n`;
-  });
+  context += `[COMPLETE ARCHIVE MANIFEST: ${manifest.length || fileTree.length} total entries]\n`;
+  if (manifest.length > 0) {
+    manifest.forEach((m) => {
+      context += `- ${m.path} [${m.status.toUpperCase()}${m.reason ? `: ${m.reason}` : ''}] (${m.extractedChars} chars)\n`;
+    });
+  } else {
+    fileTree.forEach((path) => {
+      context += `- ${path}\n`;
+    });
+  }
   context += `\n`;
 
-  context += `[CODEBASE FILE CONTENTS]\n`;
+  context += `[PRIORITIZED FILE CONTENTS]\n`;
   files.forEach((file) => {
     context += `\n--------------------------------------------------------------------------------\n`;
     context += `FILE: ${file.path} (${file.size} chars)${file.truncated ? ' [TRUNCATED]' : ''}\n`;
@@ -362,4 +529,3 @@ export function buildCodebaseContext(
 
   return context;
 }
-

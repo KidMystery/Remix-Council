@@ -168,6 +168,7 @@ export interface BuildArchivistContextOptions {
   sessionFiles?: AttachedTextFile[];
   rounds: CouncilRound[];
   apiKey: string;
+  budget?: 'free' | 'cheap' | 'quality';
   maxTokensWindow?: number; // e.g. 3000 tokens
   recentRoundsWindow?: number; // Configurable number of recent rounds in full detail (default: 2)
   signal?: AbortSignal;
@@ -193,6 +194,7 @@ export async function buildArchivistContext(
     sessionFiles,
     rounds,
     apiKey,
+    budget,
     maxTokensWindow = 3000,
     recentRoundsWindow: customRecentRounds = 2,
     signal,
@@ -275,6 +277,7 @@ export async function buildArchivistContext(
         const summaryRes = await streamOpenRouterCompletion({
           apiKey,
           model: LATEST_GEMINI_FLASH,
+          budget,
           messages: [
             {
               role: 'system',
