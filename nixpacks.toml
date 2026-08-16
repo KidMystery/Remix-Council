@@ -1,0 +1,6 @@
+# Nixpacks builder configuration for Railway deployment targeting Node 24
+[phases.setup]
+nixPkgs = ["nodejs_24"]
+
+[variables]
+NIXPACKS_NODE_VERSION = "24"

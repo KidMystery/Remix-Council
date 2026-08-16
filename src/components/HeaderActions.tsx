@@ -108,7 +108,7 @@ export const HeaderActions: React.FC<HeaderActionsProps> = ({
         </button>
 
         {isOverflowOpen && (
-          <div className="absolute right-0 mt-1.5 w-56 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xl p-1.5 z-50 space-y-1 animate-in fade-in slide-in-from-top-1 duration-150">
+          <div className="absolute right-0 mt-1.5 w-72 max-w-[90vw] rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xl p-2 z-50 space-y-1.5 animate-in fade-in slide-in-from-top-1 duration-150">
             {/* Theme Toggle in Overflow */}
             <button
               type="button"
@@ -207,7 +207,7 @@ export const HeaderActions: React.FC<HeaderActionsProps> = ({
                 }}
                 onError={(err) => {
                   onLoginError?.(err);
-                  setIsOverflowOpen(false);
+                  // Keep overflow open so the troubleshooting advice and redirect option remain accessible
                 }}
                 isCompact={true}
                 className="text-cyan-600 dark:text-cyan-400 hover:bg-cyan-50 dark:hover:bg-cyan-950/40"

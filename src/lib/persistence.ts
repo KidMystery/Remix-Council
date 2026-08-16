@@ -126,25 +126,71 @@ export interface UserCloudData {
   updatedAt?: number;
 }
 
+export interface AuthErrorInfo {
+  code: string;
+  message: string;
+  hostname: string;
+  origin: string;
+  authDomain: string;
+  projectId: string;
+  durationMs: number;
+  isQuickDismissal: boolean;
+}
+
+export class FirebaseAuthError extends Error {
+  authInfo: AuthErrorInfo;
+
+  constructor(message: string, authInfo: AuthErrorInfo) {
+    super(message);
+    this.name = 'FirebaseAuthError';
+    this.authInfo = authInfo;
+  }
+}
+
 function resolveFirebaseConfig() {
   const env = import.meta.env;
 
+  const projectId = env.VITE_FIREBASE_PROJECT_ID || config.projectId || '';
+
+  // VITE_FIREBASE_DATABASE_ID support:
+  // If VITE_FIREBASE_DATABASE_ID is provided, use it.
+  // If VITE_FIREBASE_PROJECT_ID overrides config.projectId, do not reuse a named database ID from another project.
+  let firestoreDatabaseId: string | undefined = undefined;
+  if (env.VITE_FIREBASE_DATABASE_ID !== undefined && env.VITE_FIREBASE_DATABASE_ID !== '') {
+    firestoreDatabaseId = env.VITE_FIREBASE_DATABASE_ID;
+  } else if (!env.VITE_FIREBASE_PROJECT_ID || env.VITE_FIREBASE_PROJECT_ID === config.projectId) {
+    firestoreDatabaseId = config.firestoreDatabaseId || undefined;
+  }
+
   return {
     apiKey: env.VITE_FIREBASE_API_KEY || config.apiKey || '',
-    authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || config.authDomain || '',
-    projectId: env.VITE_FIREBASE_PROJECT_ID || config.projectId || '',
-    storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || config.storageBucket || '',
+    authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || config.authDomain || (projectId ? `${projectId}.firebaseapp.com` : ''),
+    projectId,
+    storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || config.storageBucket || (projectId ? `${projectId}.firebasestorage.app` : ''),
     messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || config.messagingSenderId || '',
     appId: env.VITE_FIREBASE_APP_ID || config.appId || '',
+    firestoreDatabaseId,
   };
 }
 
 const firebaseConfig = resolveFirebaseConfig();
 
+export function getFirebaseActiveConfig() {
+  return {
+    projectId: firebaseConfig.projectId,
+    authDomain: firebaseConfig.authDomain,
+    storageBucket: firebaseConfig.storageBucket,
+    firestoreDatabaseId: firebaseConfig.firestoreDatabaseId || '(default)',
+    hostname: typeof window !== 'undefined' ? window.location.hostname : 'unknown',
+    origin: typeof window !== 'undefined' ? window.location.origin : 'unknown',
+  };
+}
+
 let app: FirebaseApp | null = null;
 let db: Firestore | null = null;
 let auth: Auth | null = null;
 let persistenceInitialized = false;
+let isLoginInFlight = false;
 
 function isOfflineOrUnavailableError(error: unknown): boolean {
   if (!error) return false;
@@ -172,9 +218,9 @@ export function initPersistence(): boolean {
       try {
         db = initializeFirestore(app, {
           ignoreUndefinedProperties: true,
-        }, config.firestoreDatabaseId || undefined);
+        }, firebaseConfig.firestoreDatabaseId || undefined);
       } catch {
-        db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
+        db = firebaseConfig.firestoreDatabaseId ? getFirestore(app, firebaseConfig.firestoreDatabaseId) : getFirestore(app);
       }
 
       auth = getAuth(app);
@@ -184,16 +230,7 @@ export function initPersistence(): boolean {
 
       persistenceInitialized = true;
       console.log('Firebase persistence initialized successfully.');
-      console.log('Firebase active project:', firebaseConfig.projectId);
-
-      // Validate connection to Firestore as per skill guideline
-      if (db) {
-        getDocFromServer(doc(db, 'test', 'connection')).catch((err) => {
-          if (err instanceof Error && err.message.includes('the client is offline')) {
-            console.warn('Please check your Firebase configuration (client offline).');
-          }
-        });
-      }
+      console.log('Firebase active project:', firebaseConfig.projectId, 'Database:', firebaseConfig.firestoreDatabaseId || '(default)');
 
       return true;
     } catch (e) {
@@ -209,9 +246,9 @@ export function initPersistence(): boolean {
       try {
         db = initializeFirestore(app, {
           ignoreUndefinedProperties: true,
-        }, config.firestoreDatabaseId || undefined);
+        }, firebaseConfig.firestoreDatabaseId || undefined);
       } catch {
-        db = config.firestoreDatabaseId ? getFirestore(app, config.firestoreDatabaseId) : getFirestore(app);
+        db = firebaseConfig.firestoreDatabaseId ? getFirestore(app, firebaseConfig.firestoreDatabaseId) : getFirestore(app);
       }
     }
     if (!auth) {
@@ -432,7 +469,12 @@ export async function loadUserSettings(userId: string): Promise<UserCloudData | 
   }
 }
 
-export async function loginWithGoogle(): Promise<User | 'redirecting' | null> {
+export async function loginWithGoogle(): Promise<User | null> {
+  if (isLoginInFlight) {
+    console.warn('[FirebaseAuth] A login operation is already in flight.');
+    return null;
+  }
+
   if (!auth) initPersistence();
   if (!auth) {
     const initErr = new Error('[auth/not-initialized] Firebase Auth is not initialized. Please verify Firebase project configuration.');
@@ -442,7 +484,15 @@ export async function loginWithGoogle(): Promise<User | 'redirecting' | null> {
 
   const hostname = typeof window !== 'undefined' ? window.location.hostname : 'unknown';
   const origin = typeof window !== 'undefined' ? window.location.origin : 'unknown';
-  console.log('[FirebaseAuth] Starting Google sign-in process...', { hostname, origin, authDomain: firebaseConfig.authDomain });
+  const startTime = Date.now();
+  isLoginInFlight = true;
+
+  console.log('[FirebaseAuth] Starting Google sign-in process...', {
+    hostname,
+    origin,
+    authDomain: firebaseConfig.authDomain,
+    projectId: firebaseConfig.projectId,
+  });
 
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: 'select_account' });
@@ -450,70 +500,124 @@ export async function loginWithGoogle(): Promise<User | 'redirecting' | null> {
   try {
     console.log('[FirebaseAuth] Attempting signInWithPopup...');
     const result = await signInWithPopup(auth, provider);
-    console.log('[FirebaseAuth] signInWithPopup succeeded for user:', result?.user?.email || result?.user?.uid);
+    const durationMs = Date.now() - startTime;
+    console.log('[FirebaseAuth] signInWithPopup succeeded for user:', {
+      user: result?.user?.email || result?.user?.uid,
+      durationMs,
+    });
     return result?.user || null;
   } catch (error: any) {
-    const code = error?.code || '';
+    const durationMs = Date.now() - startTime;
+    const code = error?.code || 'auth/unknown';
     const rawMessage = error?.message || 'Google sign-in failed.';
+    const isQuickDismissal = durationMs < 2500;
 
-    console.warn('[FirebaseAuth] signInWithPopup encountered an error:', {
+    const authInfo: AuthErrorInfo = {
       code,
       message: rawMessage,
-      error,
       hostname,
       origin,
-    });
+      authDomain: firebaseConfig.authDomain,
+      projectId: firebaseConfig.projectId,
+      durationMs,
+      isQuickDismissal,
+    };
 
+    // Diagnostic console logging without printing tokens, secrets, or API keys
+    if (code === 'auth/popup-closed-by-user' && !isQuickDismissal) {
+      console.info('[FirebaseAuth] User closed sign-in popup:', {
+        code: authInfo.code,
+        durationMs: authInfo.durationMs,
+      });
+    } else {
+      console.warn('[FirebaseAuth] Authentication notice:', {
+        code: authInfo.code,
+        message: authInfo.message,
+        hostname: authInfo.hostname,
+        origin: authInfo.origin,
+        authDomain: authInfo.authDomain,
+        projectId: authInfo.projectId,
+        durationMs: authInfo.durationMs,
+        isQuickDismissal: authInfo.isQuickDismissal,
+      });
+    }
+
+    let customMessage = rawMessage;
     if (code === 'auth/unauthorized-domain') {
-      const authErr = new Error(
-        `[auth/unauthorized-domain] Unauthorized domain '${hostname}'. Please add '${hostname}' to Firebase Console → Authentication → Settings → Authorized domains.`
-      );
-      console.error('[FirebaseAuth]', authErr);
-      throw authErr;
-    }
-
-    if (code === 'auth/operation-not-allowed' || code === 'auth/admin-restricted-operation') {
-      const authErr = new Error(
-        `[${code}] Google Sign-In provider is disabled in Firebase. Enable Google under Firebase Console → Authentication → Sign-in method.`
-      );
-      console.error('[FirebaseAuth]', authErr);
-      throw authErr;
-    }
-
-    if (code === 'auth/popup-closed-by-user') {
-      console.info('[FirebaseAuth] User dismissed the Google sign-in popup window.');
-      return null;
-    }
-
-    // Trigger signInWithRedirect as fallback for popup blockers or unsupported iframe environments
-    if (
-      code === 'auth/popup-blocked' ||
-      code === 'auth/operation-not-supported-in-this-environment' ||
-      code === 'auth/web-storage-unsupported' ||
-      code === 'auth/cancelled-popup-request' ||
-      rawMessage.toLowerCase().includes('popup') ||
-      rawMessage.toLowerCase().includes('iframe')
-    ) {
-      console.warn(`[FirebaseAuth] Popup issue detected (${code || rawMessage}). Initiating signInWithRedirect fallback...`);
-      try {
-        await signInWithRedirect(auth, provider);
-        console.log('[FirebaseAuth] signInWithRedirect called successfully, redirecting window...');
-        return 'redirecting';
-      } catch (redirectErr: any) {
-        const redirectCode = redirectErr?.code || 'redirect-failed';
-        const redirectMsg = redirectErr?.message || String(redirectErr);
-        console.error('[FirebaseAuth] Both popup and redirect sign-in failed:', {
-          popupError: error,
-          redirectError: redirectErr,
-        });
-        throw new Error(
-          `[${redirectCode}] Sign-in popup was blocked and redirect failed (${redirectMsg}). Please allow popups or open this app in a new tab.`
-        );
+      customMessage = `Unauthorized domain '${hostname}'. Please add this exact hostname to Firebase Console → Authentication → Settings → Authorized domains.`;
+    } else if (code === 'auth/operation-not-allowed' || code === 'auth/admin-restricted-operation') {
+      customMessage = `Google Sign-In provider is disabled in Firebase. Enable Google under Firebase Console → Authentication → Sign-in method.`;
+    } else if (code === 'auth/invalid-api-key' || code === 'auth/api-key-not-valid' || code === 'auth/configuration-not-found') {
+      customMessage = `Firebase configuration error for Project ID '${firebaseConfig.projectId}' and Auth Domain '${firebaseConfig.authDomain}'. Please verify your client configuration.`;
+    } else if (code === 'auth/popup-blocked') {
+      customMessage = `Sign-in popup was blocked by the browser. Click below to continue using redirect authentication.`;
+    } else if (code === 'auth/popup-closed-by-user') {
+      if (isQuickDismissal) {
+        customMessage = `Sign-in popup closed immediately before completing login (${durationMs}ms). This is usually caused by iframe restrictions or popup blockers. Click below to continue using redirect.`;
+      } else {
+        customMessage = `Sign-in popup was closed before completing login.`;
       }
+    } else if (code === 'auth/cancelled-popup-request') {
+      customMessage = `Sign-in popup request was cancelled or superseded by another action. Click below to continue using redirect.`;
+    } else if (code === 'auth/network-request-failed') {
+      customMessage = `Network error connecting to Firebase Authentication. Please check your internet connection or firewall/CORS settings.`;
     }
 
-    console.error('[FirebaseAuth] Unhandled authentication error:', error);
-    throw new Error(`[${code || 'auth/unknown'}] ${rawMessage}`);
+    throw new FirebaseAuthError(customMessage, authInfo);
+  } finally {
+    isLoginInFlight = false;
+  }
+}
+
+export async function loginWithGoogleRedirect(): Promise<void> {
+  if (isLoginInFlight) {
+    console.warn('[FirebaseAuth] A login operation is already in flight.');
+    return;
+  }
+
+  if (!auth) initPersistence();
+  if (!auth) {
+    throw new Error('[auth/not-initialized] Firebase Auth is not initialized.');
+  }
+
+  const hostname = typeof window !== 'undefined' ? window.location.hostname : 'unknown';
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'unknown';
+  isLoginInFlight = true;
+
+  console.log('[FirebaseAuth] User initiated direct signInWithRedirect...', {
+    hostname,
+    origin,
+    authDomain: firebaseConfig.authDomain,
+    projectId: firebaseConfig.projectId,
+  });
+
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+
+  try {
+    await signInWithRedirect(auth, provider);
+  } catch (error: any) {
+    isLoginInFlight = false;
+    const code = error?.code || 'auth/unknown';
+    const rawMessage = error?.message || 'Redirect sign-in failed.';
+    console.error('[FirebaseAuth] Direct signInWithRedirect failed:', {
+      code,
+      message: rawMessage,
+      hostname,
+      origin,
+      authDomain: firebaseConfig.authDomain,
+      projectId: firebaseConfig.projectId,
+    });
+    throw new FirebaseAuthError(rawMessage, {
+      code,
+      message: rawMessage,
+      hostname,
+      origin,
+      authDomain: firebaseConfig.authDomain,
+      projectId: firebaseConfig.projectId,
+      durationMs: 0,
+      isQuickDismissal: false,
+    });
   }
 }
 

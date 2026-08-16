@@ -7,6 +7,7 @@ import JSZip from "jszip";
 import { createExtractorFromData } from "node-unrar-js";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
+import config from "./firebase-applet-config.json";
 import {
   isIgnoredArchiveEntry,
   isTextContent,
@@ -58,15 +59,33 @@ const llmRequestSchema = z.object({
 const ALLOWED_MODEL_PATTERN = /^([a-z0-9._-]+\/[a-z0-9._-]+|[a-z0-9._-]+)(:[a-z0-9._-]+)?$/i;
 // --- END Input Validation Schemas ---
 
-async function startServer() {
+/**
+ * Safely parse and validate the server port.
+ * Accepts numeric or string inputs from process.env.PORT (e.g. injected by Railway),
+ * falling back to 3000 for local development.
+ */
+export function resolvePort(rawPort?: string | number | undefined): number {
+  if (rawPort !== undefined && rawPort !== null && rawPort !== "") {
+    const parsed = typeof rawPort === "number" ? rawPort : parseInt(String(rawPort).trim(), 10);
+    if (!isNaN(parsed) && Number.isInteger(parsed) && parsed > 0 && parsed <= 65535) {
+      return parsed;
+    }
+    console.warn(`[Server] Invalid PORT value provided ("${rawPort}"). Falling back to port 3000.`);
+  }
+  return 3000;
+}
+
+export async function startServer(portOverride?: number) {
   if (!getApps().length) {
+    const serverProjectId = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || config.projectId;
     initializeApp({
-      projectId: process.env.FIREBASE_PROJECT_ID || "gen-lang-client-0644203869",
+      projectId: serverProjectId,
     });
+    console.log(`[Server] Firebase Admin initialized with Project ID: ${serverProjectId}`);
   }
 
   const app = express();
-  const PORT = 3000;
+  const PORT = portOverride !== undefined ? resolvePort(portOverride) : resolvePort(process.env.PORT);
 
   // Public health check
   app.get("/api/health", (req, res) => {
@@ -858,9 +877,14 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  return new Promise<import("http").Server>((resolve) => {
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://0.0.0.0:${PORT} (PORT=${PORT}, process.env.PORT=${process.env.PORT || "undefined"})`);
+      resolve(server);
+    });
   });
 }
 
-startServer();
+if (process.env.NODE_ENV !== "test") {
+  startServer();
+}

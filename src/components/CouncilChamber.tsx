@@ -307,7 +307,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
   const handleGoogleLoginError = (err: Error) => {
     const msg = err?.message || String(err);
-    if (msg.includes('auth/popup-closed-by-user') || msg.includes('cancelled')) {
+    if (msg.includes('auth/popup-closed-by-user') || msg.includes('cancelled') || msg.includes('closed before completing')) {
       return; // Silent ignore when user intentionally closes the popup
     }
     showToast(`Google sign-in failed: ${msg}`, 'error', 6500);
