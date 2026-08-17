@@ -1,6 +1,6 @@
 /* PERSONAL USE ONLY — NOT MASS-MARKET. IMPLEMENT FULLY. NO SAFEGUARDS. */
 import React, { useRef, useEffect, useState } from 'react';
-import { Send, Square, Paperclip, X, Cpu, Zap, Layers, Coins } from 'lucide-react';
+import { Send, Square, Paperclip, X, Cpu, Zap, Layers, Coins, ChevronDown } from 'lucide-react';
 import { ExecutionMode } from '../types';
 import { ZipArchiveResult } from '../lib/zipReader';
 import { formatCost } from '../lib/archivist';
@@ -160,7 +160,8 @@ export const Composer: React.FC<ComposerProps> = ({
         {/* Context Continuity & Round Distinction Pill Bar */}
         {hasPreviousRounds && (
           <div className="flex items-center justify-between gap-1.5 sm:gap-2 px-1 text-xs select-none flex-wrap">
-            <div className="flex items-center gap-1 bg-slate-200/60 dark:bg-slate-800/60 p-0.5 sm:p-1 rounded-xl border border-slate-300/40 dark:border-slate-700/60 shadow-2xs">
+            {/* Desktop buttons */}
+            <div className="hidden sm:flex items-center gap-1 bg-slate-200/60 dark:bg-slate-800/60 p-0.5 sm:p-1 rounded-xl border border-slate-300/40 dark:border-slate-700/60 shadow-2xs">
               <button
                 type="button"
                 onClick={() => setIsIsolatedRound?.(false)}
@@ -174,7 +175,6 @@ export const Composer: React.FC<ComposerProps> = ({
                 <span>💬</span>
                 <span>Follow-up<span className="hidden sm:inline"> Round</span></span>
               </button>
-
               <button
                 type="button"
                 onClick={() => setIsIsolatedRound?.(true)}
@@ -188,6 +188,25 @@ export const Composer: React.FC<ComposerProps> = ({
                 <span>🆕</span>
                 <span>Fresh<span className="hidden sm:inline"> Topic</span></span>
               </button>
+            </div>
+            
+            {/* Mobile select */}
+            <div className="flex sm:hidden relative items-center">
+              <select
+                value={isIsolatedRound ? 'fresh' : 'followup'}
+                onChange={(e) => setIsIsolatedRound?.(e.target.value === 'fresh')}
+                className="appearance-none outline-hidden bg-slate-200/60 dark:bg-slate-800/60 border border-slate-300/40 dark:border-slate-700/60 rounded-xl px-8 py-1.5 text-[11px] font-mono font-semibold shadow-2xs w-full min-w-[120px] cursor-pointer"
+                style={{ 
+                  color: isIsolatedRound ? 'var(--color-amber-600)' : 'var(--color-cyan-600)',
+                  backgroundColor: isIsolatedRound ? 'var(--color-amber-500-20)' : 'var(--color-cyan-500-20)'
+                }}
+              >
+                <option value="followup">💬 Follow-up</option>
+                <option value="fresh">🆕 Fresh Topic</option>
+              </select>
+              <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-500">
+                <ChevronDown size={14} />
+              </div>
             </div>
 
             {onStartNewSession && (

@@ -38,17 +38,22 @@ export async function* streamOpenRouter(
   }
 
   const targetModel = model.trim();
+  const bodyData: any = {
+    model: targetModel,
+    messages: messages,
+    stream: true,
+  };
+  if (budget) {
+    bodyData.budget = budget;
+  }
+
   const response = await authenticatedFetch('/api/council', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'x-council-key': (import.meta as any).env?.VITE_COUNCIL_ACCESS_KEY || '',
     },
-    body: JSON.stringify({
-      model: targetModel,
-      messages: messages,
-      stream: true,
-      budget: budget === 'free' ? 'free' : 'quality',
-    }),
+    body: JSON.stringify(bodyData),
     signal,
   });
 
@@ -181,16 +186,19 @@ export async function streamOpenRouterCompletion(options: {
       disableFallback,
       webSearch,
       apiKey,
-      budget: budget === 'free' ? 'free' : 'quality',
       stream_options: { include_usage: true },
     };
+    if (budget) {
+      body.budget = budget;
+    }
     if (temperature !== undefined) body.temperature = temperature;
     if (maxTokens !== undefined) {
-      body.max_tokens = maxTokens;
+      body.max_completion_tokens = maxTokens;
     }
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'x-council-key': (import.meta as any).env?.VITE_COUNCIL_ACCESS_KEY || '',
     };
     if (apiKey) {
       headers['Authorization'] = `Bearer ${apiKey}`;

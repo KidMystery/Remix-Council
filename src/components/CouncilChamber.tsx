@@ -43,7 +43,7 @@ import {
 } from '../lib/auditLogger';
 import { getAuthorOrganization } from '../lib/modelMapper';
 import { streamOpenRouterCompletion } from '../lib/openrouter';
-import { policyForPreset } from '../lib/executionPolicy';
+import { policyForPreset, assertPolicyModel } from '../lib/executionPolicy';
 import { LATEST_GEMINI_FLASH } from '../config/modelCatalog';
 import {
   streamPersonaWithFallback,
@@ -123,6 +123,19 @@ interface ThinkingIndicatorProps {
   role?: string;
   model?: string;
   accentColor?: 'cyan' | 'purple' | 'amber';
+}
+
+function buildFullQueryWithAttachments(round: CouncilRound): string {
+  let q = round.userQuery || '';
+  if (round.attachedTextFiles && round.attachedTextFiles.length > 0) {
+    const fileText = round.attachedTextFiles
+      .map((f) => `--- Attached File: ${f.name} ---\n${f.content}`)
+      .join('\n\n');
+    q = q.includes('Review attached file context')
+      ? fileText
+      : `${q}\n\n${fileText}`;
+  }
+  return q;
 }
 
 const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
@@ -305,8 +318,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     }
   };
 
-  const handleGoogleLoginError = (err: Error) => {
-    const msg = err?.message || String(err);
+  const handleGoogleLoginError = (err: any) => {
+    const msg = err?.authInfo?.message || err?.message || String(err);
     if (msg.includes('auth/popup-closed-by-user') || msg.includes('cancelled') || msg.includes('closed before completing')) {
       return; // Silent ignore when user intentionally closes the popup
     }
@@ -1115,7 +1128,68 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
-      setIsDeliberating(false);
+    }
+    releaseDeliberationLock();
+    showToast('Deliberation stopped by user', 'info', 3000);
+
+    // Clean up any lingering 'streaming' status in the active rounds so UI exits loading state immediately
+    if (rounds.length > 0) {
+      const latestRound = rounds[rounds.length - 1];
+      if (latestRound) {
+        let changed = false;
+        const updatedStage1 = { ...(latestRound.deliberation?.stage1 || {}) };
+        const updatedStage2 = { ...(latestRound.deliberation?.stage2 || {}) };
+        let updatedSynthesis = latestRound.synthesis ? { ...latestRound.synthesis } : undefined;
+
+        Object.keys(updatedStage1).forEach((pId) => {
+          if (updatedStage1[pId]?.status === 'streaming') {
+            changed = true;
+            if (updatedStage1[pId].content?.trim()) {
+              updatedStage1[pId] = { ...updatedStage1[pId], status: 'completed' };
+              dispatch({ type: 'FINISH_STAGE1_PERSONA', payload: { roundId: latestRound.id, personaId: pId, content: updatedStage1[pId].content } });
+            } else {
+              updatedStage1[pId] = { ...updatedStage1[pId], status: 'error', error: 'Deliberation stopped' };
+              dispatch({ type: 'ERROR_STAGE1_PERSONA', payload: { roundId: latestRound.id, personaId: pId, error: 'Deliberation stopped' } });
+            }
+          }
+        });
+
+        Object.keys(updatedStage2).forEach((pId) => {
+          if (updatedStage2[pId]?.status === 'streaming') {
+            changed = true;
+            if (updatedStage2[pId].content?.trim()) {
+              updatedStage2[pId] = { ...updatedStage2[pId], status: 'completed' };
+              dispatch({ type: 'FINISH_STAGE2_PERSONA', payload: { roundId: latestRound.id, personaId: pId, content: updatedStage2[pId].content } });
+            } else {
+              updatedStage2[pId] = { ...updatedStage2[pId], status: 'error', error: 'Deliberation stopped' };
+              dispatch({ type: 'ERROR_STAGE2_PERSONA', payload: { roundId: latestRound.id, personaId: pId, error: 'Deliberation stopped' } });
+            }
+          }
+        });
+
+        if (updatedSynthesis?.status === 'streaming') {
+          changed = true;
+          if (updatedSynthesis.content?.trim()) {
+            updatedSynthesis = { ...updatedSynthesis, status: 'completed' };
+            dispatch({ type: 'FINISH_SYNTHESIS', payload: { roundId: latestRound.id, content: updatedSynthesis.content } });
+          } else {
+            updatedSynthesis = { ...updatedSynthesis, status: 'error', error: 'Deliberation stopped' };
+            dispatch({ type: 'ERROR_SYNTHESIS', payload: { roundId: latestRound.id, error: 'Deliberation stopped' } });
+          }
+        }
+
+        if (changed) {
+          updateRoundInActiveSession(latestRound.id, (r) => ({
+            ...r,
+            deliberation: {
+              ...r.deliberation,
+              stage1: updatedStage1,
+              stage2: updatedStage2,
+            },
+            ...(updatedSynthesis ? { synthesis: updatedSynthesis } : {}),
+          }));
+        }
+      }
     }
   };
 
@@ -1207,9 +1281,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     }
 
     let fullSynthesis = '';
+    const executionPolicy = policyForPreset(activePresetId);
     const targetSynthModel = (synthesizer?.model || settings?.defaultModels?.['synthesizer'] || LATEST_GEMINI_FLASH).trim() || LATEST_GEMINI_FLASH;
 
     try {
+      assertPolicyModel(targetSynthModel, executionPolicy, rawModelsCatalog);
       console.log(`[Synthesis Phase] Initiating stream with model: ${targetSynthModel}`);
       console.log(`[Synthesis Phase] Messages payload length: ${JSON.stringify(chairmanMessages).length} chars`);
       
@@ -1502,6 +1578,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
+    const fullQuery = buildFullQueryWithAttachments(round);
+
     try {
       const executionPolicy = policyForPreset(activePresetId);
       const activePersonas = personas.filter((p) => p.enabled !== false);
@@ -1509,6 +1587,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       if (!personaModel) {
         throw new Error(`No model assigned for persona ${persona.name}`);
       }
+      assertPolicyModel(personaModel, executionPolicy, rawModelsCatalog);
 
       if (stage === 1) {
         const stage1State = round.deliberation?.stage1 || {};
@@ -1525,7 +1604,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
         const messages = await buildArchivistContext({
           systemPrompt: persona.systemPrompt,
-          userQuery: round.userQuery,
+          userQuery: fullQuery,
           attachedImages: round.attachedImages,
           rounds: rounds.filter((r) => r.id !== roundId),
           apiKey: settings.apiKey,
@@ -1547,14 +1626,14 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens || executionPolicy.maxOutputTokens,
-          query: round.userQuery,
+          query: fullQuery,
           signal: abortController.signal,
           disableFallback: Boolean(settings.disableFallback),
           webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
-          isFreeOnlyPreset: executionPolicy.budget === 'free',
+          policy: executionPolicy,
           onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
           onGrounding: (gData) => { streamGroundingData = gData; },
           onToken: (chunk) => {
@@ -1586,15 +1665,21 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         }));
       } else {
         const stage1Map = round.deliberation?.stage1 || {};
-        const peerProposals = Object.values(stage1Map)
-          .filter((resp: PersonaResponse | any) => resp?.personaId !== personaId && resp?.personaId !== 'synthesizer')
-          .map((resp: PersonaResponse | any) => {
-            const p = personas.find((item) => item.id === resp.personaId);
-            return `### ${p?.name || resp.personaId} (${p?.role}):\n${resp.content || '[No proposal]'}`;
+        const letters = ['A', 'B', 'C', 'D'];
+        const myLetter = letters[activePersonas.findIndex((p) => p.id === persona.id)] || `P${1}`;
+
+        let letterIdx = 0;
+        const peerProposals = activePersonas
+          .map((p) => {
+            if (p.id === persona.id) return null;
+            const resp = stage1Map[p.id];
+            const letter = letters[letterIdx++] || `P${letterIdx}`;
+            return `### Panelist ${letter} (${p.role}):\n${resp?.content || '[No proposal / Error]'}`;
           })
+          .filter(Boolean)
           .join('\n\n');
 
-        const queryContentStr = `User Question: "${round.userQuery}"\n\n--- Initial Stage 1 Proposals from Other Council Members ---\n${peerProposals}\n\nTask: Peer review the proposals above. Point out unaddressed risks, test assumptions, highlight valuable ideas, and refine your position.`;
+        const queryContentStr = `You are Panelist ${myLetter}. User Question: "${fullQuery}"\n\n--- Initial Stage 1 Proposals from Other Council Members ---\n${peerProposals}\n\nTask: Peer review the proposals above. Point out unaddressed risks, test assumptions, highlight valuable ideas, and refine your position.\n\nIf the user question contains code, documents, or attachments, treat them as available and refer to the relevant sections directly. Do not claim that code, objects, or panelists are missing unless the source data genuinely omits them.`;
 
         const stage2Messages: { role: 'system' | 'user' | 'assistant'; content: any }[] = [
           { role: 'system', content: persona.systemPrompt },
@@ -1639,14 +1724,14 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           messages: stage2Messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens || executionPolicy.maxOutputTokens,
-          query: round.userQuery,
+          query: fullQuery,
           signal: abortController.signal,
           disableFallback: Boolean(settings.disableFallback),
           webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
-          isFreeOnlyPreset: executionPolicy.budget === 'free',
+          policy: executionPolicy,
           onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
           onGrounding: (gData) => { streamGroundingData2 = gData; },
           onToken: (chunk) => {
@@ -1769,6 +1854,8 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     const stage1Map: Record<string, PersonaResponse> = { ...(round.deliberation?.stage1 || {}) };
     const stage2Map: Record<string, PersonaResponse> = { ...(round.deliberation?.stage2 || {}) };
 
+    const fullQuery = buildFullQueryWithAttachments(round);
+
     try {
       const executionPolicy = policyForPreset(activePresetId);
 
@@ -1795,10 +1882,11 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           if (!personaModel) {
             throw new Error(`No model assigned for persona ${persona.name}`);
           }
+          assertPolicyModel(personaModel, executionPolicy, rawModelsCatalog);
 
           const messages = await buildArchivistContext({
             systemPrompt: persona.systemPrompt,
-            userQuery: round.userQuery,
+            userQuery: fullQuery,
             attachedImages: round.attachedImages,
             rounds: rounds.filter((r) => r.id !== roundId),
             apiKey: settings.apiKey,
@@ -1820,14 +1908,14 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
               messages,
               temperature: settings.temperature,
               maxTokens: settings.maxTokens || executionPolicy.maxOutputTokens,
-              query: round.userQuery,
+              query: fullQuery,
               signal: abortController.signal,
               disableFallback: Boolean(settings.disableFallback),
           webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
               activePersonas,
               synthesizer,
               rawModels: rawModelsCatalog,
-              isFreeOnlyPreset: executionPolicy.budget === 'free',
+              policy: executionPolicy,
               onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
               onToken: (chunk) => {
                 content += chunk;
@@ -1908,16 +1996,23 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             if (!personaModel) {
               throw new Error(`No model assigned for persona ${persona.name}`);
             }
+            assertPolicyModel(personaModel, executionPolicy, rawModelsCatalog);
 
-            const peerProposals = Object.values(stage1Map)
-              .filter((resp: any) => resp?.personaId !== persona.id && resp?.personaId !== 'synthesizer')
-              .map((resp: any) => {
-                const p = personas.find((item) => item.id === resp.personaId);
-                return `### ${p?.name || resp.personaId} (${p?.role}):\n${resp.content || '[No proposal]'}`;
+            const letters = ['A', 'B', 'C', 'D'];
+            const myLetter = letters[activePersonas.findIndex((p) => p.id === persona.id)] || `P${idx + 1}`;
+
+            let letterIdx = 0;
+            const peerProposals = activePersonas
+              .map((p) => {
+                if (p.id === persona.id) return null;
+                const resp = stage1Map[p.id];
+                const letter = letters[letterIdx++] || `P${letterIdx}`;
+                return `### Panelist ${letter} (${p.role}):\n${resp?.content || '[No proposal / Error]'}`;
               })
+              .filter(Boolean)
               .join('\n\n');
 
-            const queryContentStr = `User Question: "${round.userQuery}"\n\n--- Initial Stage 1 Proposals from Other Council Members ---\n${peerProposals}\n\nTask: Peer review the proposals above. Point out unaddressed risks, test assumptions, highlight valuable ideas, and refine your position.`;
+            const queryContentStr = `You are Panelist ${myLetter}. User Question: "${fullQuery}"\n\n--- Initial Stage 1 Proposals from Other Council Members ---\n${peerProposals}\n\nTask: Peer review the proposals above. Point out unaddressed risks, test assumptions, highlight valuable ideas, and refine your position.\n\nIf the user question contains code, documents, or attachments, treat them as available and refer to the relevant sections directly. Do not claim that code, objects, or panelists are missing unless the source data genuinely omits them.`;
             
             const stage2Messages: { role: 'system' | 'user' | 'assistant'; content: any }[] = [
               { role: 'system', content: persona.systemPrompt },
@@ -1949,14 +2044,14 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
                 messages: stage2Messages,
                 temperature: settings.temperature,
                 maxTokens: settings.maxTokens || executionPolicy.maxOutputTokens,
-                query: round.userQuery,
+                query: fullQuery,
                 signal: abortController.signal,
                 disableFallback: Boolean(settings.disableFallback),
           webSearch: ['standard', 'best_value', 'highest_quality'].includes(activePresetId),
                 activePersonas,
                 synthesizer,
                 rawModels: rawModelsCatalog,
-                isFreeOnlyPreset: executionPolicy.budget === 'free',
+                policy: executionPolicy,
                 onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
                 onToken: (chunk) => {
                   content += chunk;
@@ -2007,7 +2102,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       }
 
       // PHASE 3: RESUME STAGE 3 (SYNTHESIS)
-      await runSynthesisPhase(roundId, round.userQuery, round.attachedImages, stage1Map, stage2Map, abortController.signal);
+      await runSynthesisPhase(roundId, fullQuery, round.attachedImages, stage1Map, stage2Map, abortController.signal);
     } finally {
       releaseDeliberationLock();
       abortControllerRef.current = null;
@@ -2136,13 +2231,16 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       let content = '';
       let streamGroundingData: any = undefined;
 
+      const personaModel = persona.model || settings.defaultModels[persona.id] || LATEST_GEMINI_FLASH;
+
       try {
+        assertPolicyModel(personaModel, executionPolicy, rawModelsCatalog);
         const res = await streamPersonaWithFallback({
           personaId: persona.id,
           personaName: persona.name,
           roundId,
           apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[persona.id] || LATEST_GEMINI_FLASH,
+          model: personaModel,
           messages,
           temperature: settings.temperature,
           maxTokens: mode === 'quick_panel' ? (settings.quickPanelMaxTokens || 350) : settings.maxTokens,
@@ -2153,7 +2251,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
-          isFreeOnlyPreset: activePersonas.every((p) => (p.model || '').includes(':free')),
+          policy: executionPolicy,
           onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
           onGrounding: (gData) => { streamGroundingData = gData; },
           onToken: (chunk) => {
@@ -2387,17 +2485,20 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       if (idx > 0) {
         await new Promise((r) => setTimeout(r, idx * 150));
       }
+      const myLetter = letters[activePersonas.findIndex((p) => p.id === persona.id)] || `P${idx + 1}`;
+
+      let letterIdx = 0;
       const peerProposals = activePersonas
-        .map((p, pIdx) => {
+        .map((p) => {
           if (p.id === persona.id) return null;
           const resp = stage1Outputs[p.id];
-          const letter = letters[pIdx] || `P${pIdx + 1}`;
+          const letter = letters[letterIdx++] || `P${letterIdx}`;
           return `### Panelist ${letter} (${p.role}):\n${resp?.content || '[No proposal / Error]'}`;
         })
         .filter(Boolean)
         .join('\n\n');
 
-      const queryContentStr = `User Question: "${queryText}"\n\n--- Initial Round 1 Proposals from Other Council Members (Anonymized) ---\n${peerProposals}\n\nTask: Peer review the proposals above. Point out unaddressed risks, test assumptions, highlight valuable ideas, and refine your position. Refer to other members as Panelist A, Panelist B, Panelist C, etc.`;
+      const queryContentStr = `You are Panelist ${myLetter}. User Question: "${queryText}"\n\n--- Initial Round 1 Proposals from Other Council Members (Anonymized) ---\n${peerProposals}\n\nTask: Peer review the proposals above. Point out unaddressed risks, test assumptions, highlight valuable ideas, and refine your position. Refer to other members as Panelist A, Panelist B, Panelist C, etc.\n\nIf the user question contains code, documents, or attachments, treat them as available and refer to the relevant sections directly. Do not claim that code, objects, or panelists are missing unless the source data genuinely omits them.`;
 
       const stage2Messages: { role: 'system' | 'user' | 'assistant'; content: any }[] = [
         { role: 'system', content: persona.systemPrompt },
@@ -2421,13 +2522,16 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
       let content = '';
       let streamGroundingData2: any = undefined;
 
+      const personaModel = persona.model || settings.defaultModels[persona.id] || LATEST_GEMINI_FLASH;
+
       try {
+        assertPolicyModel(personaModel, executionPolicy, rawModelsCatalog);
         const res = await streamPersonaWithFallback({
           personaId: persona.id,
           personaName: persona.name,
           roundId,
           apiKey: settings.apiKey,
-          model: persona.model || settings.defaultModels[persona.id] || LATEST_GEMINI_FLASH,
+          model: personaModel,
           messages: stage2Messages,
           temperature: settings.temperature,
           maxTokens: settings.maxTokens,
@@ -2438,7 +2542,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
           activePersonas,
           synthesizer,
           rawModels: rawModelsCatalog,
-          isFreeOnlyPreset: activePersonas.every((p) => (p.model || '').includes(':free')),
+          policy: executionPolicy,
           onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
           onGrounding: (gData) => { streamGroundingData2 = gData; },
           onToken: (chunk) => {
@@ -2630,6 +2734,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       if (!synthModel) {
         throw new Error('No model assigned for synthesis');
       }
+      assertPolicyModel(synthModel, executionPolicy, rawModelsCatalog);
 
       const res = await streamPersonaWithFallback({
         personaId: 'synthesizer',
@@ -2646,7 +2751,7 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
         activePersonas: personas.filter((p) => p.enabled !== false),
         synthesizer,
         rawModels: rawModelsCatalog,
-        isFreeOnlyPreset: executionPolicy.budget === 'free',
+        policy: executionPolicy,
         onFallbackTriggered: (event) => setFallbackLogs((prev) => [event, ...prev]),
         onToken: (chunk) => {
           fullSynthesis += chunk;
@@ -2692,8 +2797,9 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
       capabilityFailure: undefined,
     }));
 
-    const mode = round.resolvedMode || resolveExecutionMode(settings.executionMode || 'auto', round.userQuery);
-    await runRoundExecution(round.id, round.userQuery, round.attachedImages, mode);
+    const fullQuery = buildFullQueryWithAttachments(round);
+    const mode = round.resolvedMode || resolveExecutionMode(settings.executionMode || 'auto', fullQuery);
+    await runRoundExecution(round.id, fullQuery, round.attachedImages, mode);
   };
 
   const handleUpgradeToCodingModels = async (roundId: string) => {
@@ -3165,26 +3271,34 @@ Task: Provide a concise, highly readable synthesis summarizing the key answers, 
               <span>Council Deliberating...</span>
             </div>
             <p className="text-xs text-slate-400 font-normal">
-              Stage execution in progress. You can watch live in feed or dismiss this overlay.
+              Stage execution in progress. You can watch live in feed or stop at any time.
             </p>
-            <div className="flex items-center gap-3 pt-1">
+            <div className="flex items-center gap-2 pt-1">
               <button
                 type="button"
-                onClick={() => updateDisableLoadingOverlay(true)}
-                className="text-xs text-slate-400 hover:text-slate-200 underline cursor-pointer"
-                title="Never show this loading overlay again (can re-enable in Settings > Advanced)"
+                onClick={handleStop}
+                className="px-3.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-xs font-semibold text-white cursor-pointer flex items-center gap-1.5 shadow-md shadow-red-950/40 transition-colors"
+                title="Stop Deliberation"
               >
-                Don't show again
+                <Square size={13} fill="currentColor" />
+                Stop
               </button>
-              <span className="text-slate-600">•</span>
               <button
                 type="button"
                 onClick={() => updateDisableLoadingOverlay(true)}
-                className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 border border-slate-700 cursor-pointer"
+                className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 border border-slate-700 cursor-pointer transition-colors"
               >
                 Dismiss
               </button>
             </div>
+            <button
+              type="button"
+              onClick={() => updateDisableLoadingOverlay(true)}
+              className="text-[11px] text-slate-500 hover:text-slate-300 underline cursor-pointer mt-1"
+              title="Never show this loading overlay again (can re-enable in Settings > Advanced)"
+            >
+              Don't show again
+            </button>
           </div>
         </div>
       )}

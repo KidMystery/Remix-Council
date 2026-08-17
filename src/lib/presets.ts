@@ -2,6 +2,7 @@ import { Persona, PersonaId } from '../types';
 import { registerModelPricing, updateModelPricingFromOpenRouter } from './archivist';
 import { mapOpenRouterModels, AssignedModel, getAuthorOrganization } from './modelMapper';
 import { routeCouncilModels, TaskDomain } from './smartModelSelector';
+import { policyForPreset, assertPolicyModel } from './executionPolicy';
 
 export type PresetId = 'fastest_cheapest' | 'fast_and_free' | 'fast_and_cheap' | 'best_value' | 'highest_quality';
 
@@ -231,6 +232,7 @@ export function applyPreset(
   domain: TaskDomain = 'general'
 ): { updatedPersonas: Persona[]; updatedSynthesizer: Persona } {
   const targetId = presetId === 'fastest_cheapest' ? 'fast_and_free' : presetId;
+  const policy = policyForPreset(presetId);
 
   const result = routeCouncilModels({
     domain,
@@ -244,6 +246,11 @@ export function applyPreset(
 
   const updatedPersonas = result.updatedPersonas;
   const updatedSynthesizer = result.updatedSynthesizer;
+
+  updatedPersonas.forEach(p => {
+    assertPolicyModel(p.model, policy, rawModels);
+  });
+  assertPolicyModel(updatedSynthesizer.model, policy, rawModels);
 
   // Sync MODEL_PRESETS object assignments for standard persona IDs
   const presetObj = MODEL_PRESETS.find(p => p.id === targetId);

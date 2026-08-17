@@ -62,7 +62,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
   const activePersonas = personas.filter((p) => p.enabled !== false);
   const hasStage2 = Object.keys(round.deliberation?.stage2 || {}).length > 0 &&
     Object.values(round.deliberation?.stage2 || {}).some(
-      (r: PersonaResponse | any) => r?.content || r?.status === 'streaming'
+      (r: any) => r?.content || r?.status === 'streaming'
     );
   const hasSynthesis = !!round.synthesis?.content || round.synthesis?.status === 'streaming';
   const isSynthesisFinished = !isDeliberating && (round.synthesis?.status === 'completed' || !!round.synthesis?.content);
@@ -306,7 +306,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = React.memo(func
                 <span>Consensus pending. Run deliberation to generate synthesis.</span>
                 {(completedStage1 > 0 || completedStage2 > 0) && (
                   <span className="text-[10px] text-slate-500 font-mono">
-                    Stage 1: {completedStage1}/{activePersonas.length} · Stage 2: {completedStage2}/{activePersonas.length}
+                    Stage 1: {completedStage1}/{activePersonas.length} completed · Stage 2: {completedStage2}/{activePersonas.length} completed
                   </span>
                 )}
               </div>

@@ -388,6 +388,9 @@ export async function extractCodeFromZip(file: File): Promise<ZipArchiveResult> 
       omittedFiles,
     };
   } catch (err: any) {
+    if (err.message?.includes('50MB safety limit') || err.message?.includes('unsafe compression ratio')) {
+      throw err;
+    }
     console.warn('[ZipReader] Client extraction failed or fallback needed:', err);
     return extractViaServerEndpoint(file);
   }

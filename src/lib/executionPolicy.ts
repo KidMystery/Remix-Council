@@ -21,9 +21,7 @@ export const DEFAULT_POLICY: ExecutionPolicy = {
   maxOutputTokens: 4000,
 };
 
-export function policyForPreset(
-  presetId: string
-): ExecutionPolicy {
+export function policyForPreset(presetId: string): ExecutionPolicy {
   if (
     presetId === 'fast_and_free' ||
     presetId === 'fastest_cheapest'
@@ -49,7 +47,7 @@ export function isFreeModelId(
   }
 
   const catalogModel = catalog?.find(
-    (m) => m.id.toLowerCase() === normalized
+    (model) => model.id.toLowerCase() === normalized
   );
 
   if (catalogModel) {

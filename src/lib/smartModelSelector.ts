@@ -324,12 +324,12 @@ export interface RouteCouncilModelsResult {
   timestamp: number;
 }
 
+import { ExecutionPolicy, assertPolicyModel } from './executionPolicy';
+
 export interface SmartSelectionOptions {
   availableModels?: { id: string; name: string }[];
   rawModelsCatalog?: RawOpenRouterModel[];
-  isFreeOnly?: boolean;
-  budget?: string;
-  policy?: { budget: 'free' | 'cheap' | 'quality' };
+  policy?: ExecutionPolicy;
   autoSelectModels?: boolean;
 }
 
@@ -982,23 +982,21 @@ export function applySmartModelSelection(
 ): SmartSelectionResult {
   let availableModels: { id: string; name: string }[] = [];
   let rawModelsCatalog: RawOpenRouterModel[] | undefined = undefined;
-  let isFreeOnly = false;
   let autoSelectEnabled = true;
-  let budget: string | undefined = undefined;
+  let policy: ExecutionPolicy | undefined = undefined;
 
   if (Array.isArray(options)) {
     availableModels = options;
   } else if (options) {
     availableModels = options.availableModels || [];
     rawModelsCatalog = options.rawModelsCatalog;
-    isFreeOnly = !!options.isFreeOnly;
-    budget = options.policy?.budget || options.budget;
+    policy = options.policy;
     if (options.autoSelectModels !== undefined) {
       autoSelectEnabled = options.autoSelectModels;
     }
   }
 
-  const effectiveBudget = budget || (isFreeOnly ? 'free' : undefined);
+  const effectiveBudget = policy?.budget;
 
   const routeResult = routeCouncilModels({
     domain,
@@ -1018,8 +1016,11 @@ export function applySmartModelSelection(
 
   const assignedModels: Record<string, string> = {};
   uniquePersonas.forEach((p) => {
+    if (policy) assertPolicyModel(p.model, policy, rawModelsCatalog);
     assignedModels[p.id] = p.model;
   });
+  
+  if (policy) assertPolicyModel(uniqueSynthesizer.model, policy, rawModelsCatalog);
   assignedModels[uniqueSynthesizer.id] = uniqueSynthesizer.model;
 
   return {

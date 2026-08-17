@@ -10,6 +10,7 @@ import {
   query,
   getDocs,
   deleteDoc,
+  onSnapshot,
   Firestore,
 } from 'firebase/firestore';
 import {
@@ -150,25 +151,16 @@ export class FirebaseAuthError extends Error {
 function resolveFirebaseConfig() {
   const env = import.meta.env;
 
-  const projectId = env.VITE_FIREBASE_PROJECT_ID || config.projectId || '';
-
-  // VITE_FIREBASE_DATABASE_ID support:
-  // If VITE_FIREBASE_DATABASE_ID is provided, use it.
-  // If VITE_FIREBASE_PROJECT_ID overrides config.projectId, do not reuse a named database ID from another project.
-  let firestoreDatabaseId: string | undefined = undefined;
-  if (env.VITE_FIREBASE_DATABASE_ID !== undefined && env.VITE_FIREBASE_DATABASE_ID !== '') {
-    firestoreDatabaseId = env.VITE_FIREBASE_DATABASE_ID;
-  } else if (!env.VITE_FIREBASE_PROJECT_ID || env.VITE_FIREBASE_PROJECT_ID === config.projectId) {
-    firestoreDatabaseId = config.firestoreDatabaseId || undefined;
-  }
+  const projectId = env.VITE_FIREBASE_PROJECT_ID || config.projectId;
+  const firestoreDatabaseId = env.VITE_FIREBASE_DATABASE_ID || config.firestoreDatabaseId;
 
   return {
-    apiKey: env.VITE_FIREBASE_API_KEY || config.apiKey || '',
-    authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || config.authDomain || (projectId ? `${projectId}.firebaseapp.com` : ''),
+    apiKey: env.VITE_FIREBASE_API_KEY || config.apiKey,
+    authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || config.authDomain,
     projectId,
-    storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || config.storageBucket || (projectId ? `${projectId}.firebasestorage.app` : ''),
-    messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || config.messagingSenderId || '',
-    appId: env.VITE_FIREBASE_APP_ID || config.appId || '',
+    storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || config.storageBucket,
+    messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || config.messagingSenderId,
+    appId: env.VITE_FIREBASE_APP_ID || config.appId,
     firestoreDatabaseId,
   };
 }
@@ -192,18 +184,65 @@ let auth: Auth | null = null;
 let persistenceInitialized = false;
 let isLoginInFlight = false;
 
-function isOfflineOrUnavailableError(error: unknown): boolean {
+const authListeners = new Set<(user: User | null) => void>();
+let cachedCurrentUser: User | null = null;
+let isAuthReady = false;
+let authStartupBound = false;
+
+export function isOfflineOrUnavailableError(error: unknown): boolean {
   if (!error) return false;
   const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   const code = (error as any)?.code;
   return (
     code === 'unavailable' ||
     code === 'failed-precondition' ||
+    code === 'resource-exhausted' ||
     msg.includes('offline') ||
     msg.includes('unavailable') ||
     msg.includes('client is offline') ||
-    msg.includes('network error')
+    msg.includes('network error') ||
+    msg.includes('closing') ||
+    msg.includes('hidden') ||
+    msg.includes('database is closing') ||
+    msg.includes('database is closing/hidden') ||
+    msg.includes('the database connection is closing') ||
+    msg.includes('indexeddb') ||
+    msg.includes('aborterror') ||
+    msg.includes('operation was aborted')
   );
+}
+
+export function bindAuthStartupListener(): void {
+  if (authStartupBound || !auth) return;
+  authStartupBound = true;
+
+  console.log('[FirebaseAuth] Binding Firebase Auth state listener to app startup...');
+  onAuthStateChanged(
+    auth,
+    (user) => {
+      cachedCurrentUser = user;
+      isAuthReady = true;
+      console.log(
+        '[FirebaseAuth] Auth state resolved on startup listener:',
+        user ? `User authenticated: ${user.email || user.uid}` : 'User unauthenticated (guest mode)'
+      );
+      authListeners.forEach((cb) => {
+        try {
+          cb(user);
+        } catch (err) {
+          console.error('[FirebaseAuth] Error executing auth change callback:', err);
+        }
+      });
+    },
+    (error) => {
+      console.error('[FirebaseAuth] Error in startup Firebase Auth state listener:', error);
+    }
+  );
+
+  // Check for pending redirect sign-in result seamlessly during startup
+  handleAuthRedirectResult().catch((err) => {
+    console.warn('[FirebaseAuth] Automatic redirect result check on startup encountered:', err);
+  });
 }
 
 export function initPersistence(): boolean {
@@ -227,6 +266,8 @@ export function initPersistence(): boolean {
       try {
         setPersistence(auth, browserLocalPersistence).catch(() => {});
       } catch {}
+
+      bindAuthStartupListener();
 
       persistenceInitialized = true;
       console.log('Firebase persistence initialized successfully.');
@@ -257,6 +298,7 @@ export function initPersistence(): boolean {
         setPersistence(auth, browserLocalPersistence).catch(() => {});
       } catch {}
     }
+    bindAuthStartupListener();
     persistenceInitialized = true;
     return true;
   } catch (e) {
@@ -329,7 +371,42 @@ export function migrateLocalSession(raw: any): Session {
   };
 }
 
+const pendingSyncs = new Map<string, { session: PersistedSession, timeout: any, resolve: (val: string) => void, reject: (err: any) => void }>();
+
 export async function syncCouncilSession(session: PersistedSession): Promise<string> {
+  return new Promise((resolve, reject) => {
+    // If a sync is already scheduled, update the payload but do not delay the timer
+    if (pendingSyncs.has(session.id)) {
+      const existing = pendingSyncs.get(session.id)!;
+      existing.session = session; // Update to the latest session data
+      existing.resolve = resolve;
+      existing.reject = reject;
+      return;
+    }
+    
+    // Otherwise, schedule a new sync
+    const timeout = setTimeout(async () => {
+      const pending = pendingSyncs.get(session.id);
+      pendingSyncs.delete(session.id);
+      
+      if (!pending) {
+        resolve(session.shareToken || session.id);
+        return;
+      }
+      
+      try {
+        const result = await _syncCouncilSessionImmediate(pending.session);
+        pending.resolve(result);
+      } catch (err) {
+        pending.reject(err);
+      }
+    }, 2500); // 2.5 second throttle to prevent Firestore quota exhaustion
+
+    pendingSyncs.set(session.id, { session, timeout, resolve, reject });
+  });
+}
+
+async function _syncCouncilSessionImmediate(session: PersistedSession): Promise<string> {
   if (!db) initPersistence();
   const sanitized = sanitizeForFirestore(session);
 
@@ -382,6 +459,37 @@ export async function loadUserSessions(userId: string): Promise<PersistedSession
     console.warn('Could not load user sessions from Firestore:', e);
     return [];
   }
+}
+
+export function subscribeToUserSessions(
+  userId: string, 
+  onUpdate: (sessions: PersistedSession[]) => void, 
+  onError?: (err: any) => void
+): () => void {
+  if (!db) initPersistence();
+  if (!db || !userId) return () => {};
+
+  const sessionsRef = collection(db, 'users', userId, 'sessions');
+  const q = query(sessionsRef);
+  
+  return onSnapshot(q, (snapshot) => {
+    const sessions: PersistedSession[] = [];
+    snapshot.forEach((doc) => {
+      const data = doc.data() as PersistedSession;
+      if (data && data.id) {
+        sessions.push(data);
+      }
+    });
+    sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    onUpdate(sessions);
+  }, (error) => {
+    if (isOfflineOrUnavailableError(error)) {
+      console.warn('Firestore offline: session subscription paused.');
+    } else {
+      console.warn('Failed to subscribe to sessions in Firestore', error);
+      if (onError) onError(error);
+    }
+  });
 }
 
 export async function deleteCloudSession(userId: string, sessionId: string): Promise<void> {
@@ -523,8 +631,31 @@ export async function loginWithGoogle(): Promise<User | null> {
       isQuickDismissal,
     };
 
+    if (code === 'auth/popup-blocked' || (code === 'auth/popup-closed-by-user' && isQuickDismissal) || code === 'auth/cross-origin-opener-policy-failed') {
+      console.warn('[FirebaseAuth] Popup failed, automatically falling back to signInWithRedirect...');
+      try {
+        await signInWithRedirect(auth, provider);
+        const redirectResult = await getRedirectResult(auth);
+        return redirectResult?.user || null;
+      } catch (redirectError: any) {
+        console.error('[FirebaseAuth] Redirect fallback failed:', redirectError);
+        throw new FirebaseAuthError(redirectError.message || 'Redirect sign-in failed', authInfo);
+      }
+    }
+
     // Diagnostic console logging without printing tokens, secrets, or API keys
-    if (code === 'auth/popup-closed-by-user' && !isQuickDismissal) {
+    if (code === 'auth/popup-blocked') {
+      console.warn('[FirebaseAuth] Sign-in popup was blocked by browser or iframe security policy. Surfacing redirect fallback instructions to user:', {
+        code: authInfo.code,
+        message: authInfo.message,
+        hostname: authInfo.hostname,
+        origin: authInfo.origin,
+        authDomain: authInfo.authDomain,
+        projectId: authInfo.projectId,
+        durationMs: authInfo.durationMs,
+        recommendedAction: 'Use signInWithRedirect fallback to authenticate.',
+      });
+    } else if (code === 'auth/popup-closed-by-user' && !isQuickDismissal) {
       console.info('[FirebaseAuth] User closed sign-in popup:', {
         code: authInfo.code,
         durationMs: authInfo.durationMs,
@@ -543,22 +674,22 @@ export async function loginWithGoogle(): Promise<User | null> {
     }
 
     let customMessage = rawMessage;
-    if (code === 'auth/unauthorized-domain') {
+    if (code === 'auth/popup-blocked') {
+      customMessage = `Sign-in popup was blocked by your browser or environment permissions. Please use the redirect fallback ("Continue using redirect") to sign in with your Google account.`;
+    } else if (code === 'auth/unauthorized-domain') {
       customMessage = `Unauthorized domain '${hostname}'. Please add this exact hostname to Firebase Console → Authentication → Settings → Authorized domains.`;
     } else if (code === 'auth/operation-not-allowed' || code === 'auth/admin-restricted-operation') {
       customMessage = `Google Sign-In provider is disabled in Firebase. Enable Google under Firebase Console → Authentication → Sign-in method.`;
     } else if (code === 'auth/invalid-api-key' || code === 'auth/api-key-not-valid' || code === 'auth/configuration-not-found') {
       customMessage = `Firebase configuration error for Project ID '${firebaseConfig.projectId}' and Auth Domain '${firebaseConfig.authDomain}'. Please verify your client configuration.`;
-    } else if (code === 'auth/popup-blocked') {
-      customMessage = `Sign-in popup was blocked by the browser. Click below to continue using redirect authentication.`;
     } else if (code === 'auth/popup-closed-by-user') {
       if (isQuickDismissal) {
-        customMessage = `Sign-in popup closed immediately before completing login (${durationMs}ms). This is usually caused by iframe restrictions or popup blockers. Click below to continue using redirect.`;
+        customMessage = `Sign-in popup closed immediately before completing login (${durationMs}ms). This is usually caused by iframe restrictions or popup blockers. Please use the redirect fallback ("Continue using redirect").`;
       } else {
         customMessage = `Sign-in popup was closed before completing login.`;
       }
     } else if (code === 'auth/cancelled-popup-request') {
-      customMessage = `Sign-in popup request was cancelled or superseded by another action. Click below to continue using redirect.`;
+      customMessage = `Sign-in popup request was cancelled or superseded by another action. Please use the redirect fallback ("Continue using redirect").`;
     } else if (code === 'auth/network-request-failed') {
       customMessage = `Network error connecting to Firebase Authentication. Please check your internet connection or firewall/CORS settings.`;
     }
@@ -621,36 +752,51 @@ export async function loginWithGoogleRedirect(): Promise<void> {
   }
 }
 
+let redirectResultPromise: Promise<User | null> | null = null;
+
 export async function handleAuthRedirectResult(): Promise<User | null> {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+    return null;
+  }
+  if (redirectResultPromise) return redirectResultPromise;
+
   if (!auth) initPersistence();
   if (!auth) {
     console.warn('[FirebaseAuth] Auth not initialized during handleAuthRedirectResult.');
     return null;
   }
 
-  try {
-    console.log('[FirebaseAuth] Checking for pending redirect authentication result...');
-    const result = await getRedirectResult(auth);
-    if (result?.user) {
-      console.log('[FirebaseAuth] Successfully recovered user from redirect sign-in:', result.user.email || result.user.uid);
-      return result.user;
+  redirectResultPromise = (async () => {
+    try {
+      console.log('[FirebaseAuth] Checking for pending redirect authentication result...');
+      const result = await getRedirectResult(auth);
+      if (result?.user) {
+        console.log('[FirebaseAuth] Successfully recovered user from redirect sign-in:', result.user.email || result.user.uid);
+        return result.user;
+      }
+      console.log('[FirebaseAuth] No pending redirect authentication result found.');
+      return null;
+    } catch (error: any) {
+      const errMsg = error?.message || String(error);
+      const code = error?.code || '';
+      if (isOfflineOrUnavailableError(error) || errMsg.includes('closing') || errMsg.includes('hidden')) {
+        console.warn('[FirebaseAuth] Google redirect sign-in skipped: Database is closing/hidden or unavailable.');
+      } else {
+        console.error('[FirebaseAuth] Error resolving redirect authentication result:', {
+          code,
+          message: errMsg,
+          error,
+        });
+      }
+      return null;
+    } finally {
+      setTimeout(() => {
+        redirectResultPromise = null;
+      }, 5000);
     }
-    console.log('[FirebaseAuth] No pending redirect authentication result found.');
-    return null;
-  } catch (error: any) {
-    const errMsg = error?.message || String(error);
-    const code = error?.code || '';
-    if (errMsg.includes('closing') || errMsg.includes('hidden')) {
-      console.warn('[FirebaseAuth] Google redirect sign-in skipped: Database is closing/hidden (iframe context).');
-    } else {
-      console.error('[FirebaseAuth] Error resolving redirect authentication result:', {
-        code,
-        message: errMsg,
-        error,
-      });
-    }
-    return null;
-  }
+  })();
+
+  return redirectResultPromise;
 }
 
 export async function logout(): Promise<void> {
@@ -663,8 +809,33 @@ export async function logout(): Promise<void> {
 export function onAuthChange(callback: (user: User | null) => void): () => void {
   if (!auth) initPersistence();
   if (!auth) {
-    console.warn("Firebase Auth not initialized for auth change listener.");
+    console.warn("[FirebaseAuth] Firebase Auth not initialized for auth change listener.");
     return () => {};
   }
-  return onAuthStateChanged(auth, callback);
+
+  authListeners.add(callback);
+
+  // If auth has already completed its startup resolution, immediately trigger with cached state
+  if (isAuthReady || auth.currentUser) {
+    try {
+      callback(cachedCurrentUser || auth.currentUser || null);
+    } catch (err) {
+      console.error('[FirebaseAuth] Error executing immediate auth callback:', err);
+    }
+  }
+
+  const directUnsubscribe = onAuthStateChanged(auth, (user) => {
+    cachedCurrentUser = user;
+    isAuthReady = true;
+    try {
+      callback(user);
+    } catch (err) {
+      console.error('[FirebaseAuth] Error in onAuthStateChanged listener:', err);
+    }
+  });
+
+  return () => {
+    authListeners.delete(callback);
+    directUnsubscribe();
+  };
 }

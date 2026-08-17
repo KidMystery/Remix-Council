@@ -7,7 +7,9 @@ import {
   syncCouncilSession,
   loadUserSessions,
   deleteCloudSession,
+  subscribeToUserSessions,
   PersistedSession,
+  isOfflineOrUnavailableError,
 } from '../lib/persistence';
 import { User } from 'firebase/auth';
 
@@ -56,6 +58,7 @@ export function useSessionManager(user: User | null = null) {
   // Bidirectional merge function between Firestore cloud sessions and local sessions
   const mergeCloudAndLocalSessions = useCallback(async (currentUserId: string, silent = false) => {
     if (!currentUserId || !isPersistenceEnabled()) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
 
     if (!silent) setIsSyncing(true);
 
@@ -132,9 +135,12 @@ export function useSessionManager(user: User | null = null) {
 
         // Upload any local sessions that need to be backed up to cloud
         if (sessionsToUpload.length > 0) {
-          Promise.allSettled(
-            sessionsToUpload.map((s) =>
-              syncCouncilSession({
+          // Process uploads sequentially or in small batches to prevent Firestore quota exhaustion
+          const uploadConcurrently = async () => {
+            for (let i = 0; i < sessionsToUpload.length; i += 5) {
+              const batch = sessionsToUpload.slice(i, i + 5);
+              await Promise.allSettled(batch.map((s) => 
+                syncCouncilSession({
                 id: s.id,
                 userId: currentUserId,
                 title: s.title,
@@ -148,8 +154,10 @@ export function useSessionManager(user: User | null = null) {
                 synthesizerModel: s.synthesizerModel,
                 attachedFiles: s.attachedFiles,
               })
-            )
-          ).catch((err) => console.warn('Background batch sync encountered an issue:', err));
+              ));
+            }
+          };
+          uploadConcurrently().catch((err) => console.warn('Background batch sync encountered an issue:', err));
         }
 
         return {
@@ -161,9 +169,8 @@ export function useSessionManager(user: User | null = null) {
       setLastSyncedAt(Date.now());
       lastSyncCheckRef.current = Date.now();
     } catch (e: any) {
-      const errMsg = e?.message || String(e);
-      if (errMsg.includes('closing') || errMsg.includes('hidden')) {
-        console.warn('Cloud sync skipped: Database is closing/hidden (iframe context).');
+      if (isOfflineOrUnavailableError(e)) {
+        console.warn('Cloud sync skipped: Database offline or closing/hidden.');
       } else {
         console.error('Failed to load and merge cloud sessions:', e);
       }
@@ -172,13 +179,83 @@ export function useSessionManager(user: User | null = null) {
     }
   }, []);
 
-  // Effect for cloud load and merging whenever user logs in or auth resolves
+  // Effect for cloud load and merging whenever user logs in or auth resolves, using real-time subscription
   useEffect(() => {
     if (userId && isCloudSyncEnabled) {
       if (loadedUserRef.current !== userId) {
         loadedUserRef.current = userId;
+        // Do an initial merge (which also handles local->cloud upload of un-synced items)
         mergeCloudAndLocalSessions(userId, false);
       }
+
+      // Start real-time subscription for subsequent updates
+      const unsubscribe = subscribeToUserSessions(userId, (cloudSessions) => {
+        setData((prev) => {
+          const localMap = new Map(prev.sessions.map((s) => [s.id, s]));
+          const mergedSessions: Session[] = [];
+          const sessionsToUpload: Session[] = [];
+          let newActiveSessionId = prev.activeSessionId;
+
+          cloudSessions.forEach((cloudSess) => {
+            const localSess = localMap.get(cloudSess.id);
+            if (localSess) {
+              if ((cloudSess.updatedAt || 0) >= (localSess.updatedAt || 0)) {
+                mergedSessions.push({
+                  ...cloudSess,
+                  userId,
+                  rounds: cloudSess.rounds || [],
+                  presetId: cloudSess.presetId || localSess.presetId,
+                  personas: cloudSess.personas || localSess.personas,
+                  synthesizer: cloudSess.synthesizer || localSess.synthesizer,
+                  customModels: cloudSess.customModels || localSess.customModels,
+                  synthesizerModel: cloudSess.synthesizerModel || localSess.synthesizerModel,
+                  attachedFiles: cloudSess.attachedFiles || localSess.attachedFiles,
+                });
+              } else {
+                const updatedLocal = { ...localSess, userId };
+                mergedSessions.push(updatedLocal);
+                sessionsToUpload.push(updatedLocal);
+              }
+            } else {
+              mergedSessions.push({ ...cloudSess, userId, rounds: cloudSess.rounds || [] });
+            }
+          });
+
+          prev.sessions.forEach((localSess) => {
+            if (!cloudSessions.some(c => c.id === localSess.id)) {
+              const adoptedSession = { ...localSess, userId };
+              mergedSessions.push(adoptedSession);
+              sessionsToUpload.push(adoptedSession);
+            }
+          });
+
+          mergedSessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+          if (!newActiveSessionId || !mergedSessions.some((s) => s.id === newActiveSessionId)) {
+            newActiveSessionId = mergedSessions[0]?.id || null;
+          }
+
+          if (sessionsToUpload.length > 0) {
+            const uploadConcurrently = async () => {
+              for (let i = 0; i < sessionsToUpload.length; i += 5) {
+                const batch = sessionsToUpload.slice(i, i + 5);
+                await Promise.allSettled(batch.map((s) => syncCouncilSession(s as any)));
+              }
+            };
+            uploadConcurrently().catch((err) => console.warn('Background batch sync encountered an issue:', err));
+          }
+
+          return {
+            sessions: mergedSessions,
+            activeSessionId: newActiveSessionId,
+          };
+        });
+        setLastSyncedAt(Date.now());
+      });
+
+      return () => {
+        unsubscribe();
+      };
     } else {
       loadedUserRef.current = null;
     }
@@ -187,6 +264,7 @@ export function useSessionManager(user: User | null = null) {
   // Window Focus / Visibility Change Listener to automatically refresh sessions when returning on mobile/tab switch
   useEffect(() => {
     const handleVisibilityOrFocus = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       if (!userId || !isCloudSyncEnabled) return;
       const now = Date.now();
       // Throttle background refresh to at most once every 10 seconds
@@ -499,12 +577,29 @@ export function useSessionManager(user: User | null = null) {
       };
       sessions[activeIndex] = updatedSession;
 
+      if (isCloudSyncEnabled && userId) {
+        syncCouncilSession({
+          id: updatedSession.id,
+          userId,
+          title: updatedSession.title,
+          rounds: updatedSession.rounds,
+          createdAt: updatedSession.createdAt,
+          updatedAt: updatedSession.updatedAt,
+          presetId: updatedSession.presetId,
+          personas: updatedSession.personas,
+          synthesizer: updatedSession.synthesizer,
+          customModels: updatedSession.customModels,
+          synthesizerModel: updatedSession.synthesizerModel,
+          attachedFiles: updatedSession.attachedFiles,
+        });
+      }
+
       return {
         ...prev,
         sessions,
       };
     });
-  }, [userId]);
+  }, [isCloudSyncEnabled, userId]);
 
   const deleteRoundFromActiveSession = useCallback((roundId: string) => {
     setData((prev) => {
@@ -569,20 +664,17 @@ export function useSessionManager(user: User | null = null) {
       let importedSessions: Session[] = [];
       let activeId: string | null = null;
 
-      if (Array.isArray(parsed)) {
-        if (parsed.some((s: any) => !s || !s.id || !Array.isArray(s.rounds))) {
-          return { success: false, count: 0, error: 'Invalid session schema.' };
-        }
-        importedSessions = parsed;
-      } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.sessions)) {
-        if (parsed.sessions.some((s: any) => !s || !s.id || !Array.isArray(s.rounds))) {
-          return { success: false, count: 0, error: 'Invalid session schema.' };
-        }
-        importedSessions = parsed.sessions;
-        activeId = parsed.activeSessionId || null;
-      } else {
-        return { success: false, count: 0, error: 'Invalid session schema.' };
+      if (!Array.isArray(parsed)) {
+        return { success: false, count: 0, error: 'Invalid schema: imported data must be an array of sessions.' };
       }
+
+      for (const s of parsed) {
+        if (!s || typeof s.id !== 'string' || !Array.isArray(s.rounds)) {
+          return { success: false, count: 0, error: 'Invalid session schema: every session must have a string id and an array of rounds.' };
+        }
+      }
+      
+      importedSessions = parsed;
 
       if (importedSessions.length === 0) {
         return { success: false, count: 0, error: 'No sessions found in file.' };

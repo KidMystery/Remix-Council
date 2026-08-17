@@ -1,3 +1,4 @@
+import { fetchNormalizedArenaStats } from "./src/lib/arena";
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
@@ -20,6 +21,8 @@ import {
 import { validateAndParseGitHubUrl } from "./src/lib/githubValidator";
 
 dotenv.config();
+
+const COUNCIL_ACCESS_KEY = process.env.COUNCIL_ACCESS_KEY?.trim() || "";
 
 // --- Input Validation Schemas ---
 const imagePartSchema = z.object({
@@ -46,9 +49,10 @@ const llmRequestSchema = z.object({
   model: z.string().min(2, "Model ID too short").max(120, "Model ID too long"),
   messages: z.array(messageSchema).min(1, "Messages array cannot be empty").max(100, "Too many messages"),
   temperature: z.number().min(0).max(2).optional(),
+  max_completion_tokens: z.number().int().positive().min(1).max(32768).optional(),
   max_tokens: z.number().int().positive().min(1).max(32768).optional(),
   stream: z.boolean().optional(),
-  budget: z.enum(["free", "cheap", "quality"]).optional(),
+  budget: z.enum(["free", "quality"]).optional(),
   query: z.string().optional(),
   disableFallback: z.boolean().optional(),
   apiKey: z.string().optional(),
@@ -56,7 +60,7 @@ const llmRequestSchema = z.object({
   tools: z.array(z.any()).optional(),
 });
 
-const ALLOWED_MODEL_PATTERN = /^([a-z0-9._-]+\/[a-z0-9._-]+|[a-z0-9._-]+)(:[a-z0-9._-]+)?$/i;
+const ALLOWED_MODEL_PATTERN = /^(google\/gemini-[a-z0-9.-]+|anthropic\/claude-[a-z0-9.-]+|openai\/[a-z0-9.-]+|deepseek\/[a-z0-9.-]+|meta-llama\/[a-z0-9.-]+|nvidia\/[a-z0-9.-]+|qwen\/[a-z0-9.-]+|mistralai\/[a-z0-9.-]+|poolside\/[a-z0-9.-]+|inclusionai\/[a-z0-9.-]+)(:[a-z]+)?$/i;
 // --- END Input Validation Schemas ---
 
 /**
@@ -85,11 +89,21 @@ export async function startServer(portOverride?: number) {
   }
 
   const app = express();
-  const PORT = portOverride !== undefined ? resolvePort(portOverride) : resolvePort(process.env.PORT);
+  const PORT = 3000;
 
   // Public health check
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
+  });
+
+  app.use("/api/council", (req, res, next) => {
+    if (COUNCIL_ACCESS_KEY) {
+      const clientKey = req.header('x-council-key') || "";
+      if (clientKey !== COUNCIL_ACCESS_KEY) {
+        return res.status(401).json({ error: 'Missing or invalid council access key.' });
+      }
+    }
+    next();
   });
 
   // 50MB limit for codebase archive uploads
@@ -183,7 +197,7 @@ export async function startServer(portOverride?: number) {
   };
 
   function normalizeModelName(value: string): string {
-    let trimmed = value.trim();
+    let trimmed = value.trim().replace(/^["']|["']$/g, "");
     const lower = trimmed.toLowerCase();
     const withoutFree = lower.replace(/\s*\(free\)/g, "").replace(/\s*\(paid\)/g, "").trim();
 
@@ -191,13 +205,11 @@ export async function startServer(portOverride?: number) {
       return KNOWN_MODEL_NAME_MAP[withoutFree];
     }
 
-    if (trimmed.includes("(free)") && !trimmed.endsWith(":free")) {
-      trimmed = trimmed.replace(/\s*\(free\)/i, ":free");
-    } else {
-      trimmed = trimmed.replace(/\s*\(paid\)/i, "");
+    if (ALLOWED_MODEL_PATTERN.test(trimmed)) {
+      return trimmed;
     }
 
-    return trimmed.replace(/^["']|["']$/g, "").trim();
+    throw new Error(`Unsupported model identifier: ${value}`);
   }
 
   // Model catalog cache mapped by sort key
@@ -564,6 +576,188 @@ export async function startServer(portOverride?: number) {
     }
   });
 
+    // Priority 1: Arena.ai integration via HuggingFace dataset with normalization layer
+  app.post("/api/arena/normalize", requireOwnerAuth, async (req, res) => {
+    try {
+      const { models } = req.body;
+      const normalizedStats = await fetchNormalizedArenaStats(models);
+      return res.json({ status: "success", data: normalizedStats });
+    } catch (err: any) {
+      console.error("[Arena] Error:", err);
+      return res.status(500).json({ error: "Failed to fetch and normalize Arena stats" });
+    }
+  });
+
+  app.get("/api/arena/leaderboard", async (req, res) => {
+    try {
+      const modelsParam = typeof req.query.models === "string" ? req.query.models.split(",").map(m => m.trim()).filter(Boolean) : undefined;
+      const normalizedStats = await fetchNormalizedArenaStats(modelsParam);
+      return res.json({ status: "success", data: normalizedStats });
+    } catch (err: any) {
+      console.error("[Arena Leaderboard] Error:", err);
+      return res.status(500).json({ error: "Failed to load Arena leaderboard stats" });
+    }
+  });
+
+  // Priority 2: Self-replacing mini-council for meta-reflection / prompt rewriting
+  app.post("/api/meta", requireOwnerAuth, async (req, res) => {
+    try {
+      const { query, originalModel, apiKey, mode, personas } = req.body;
+      if (!query) {
+        return res.status(400).json({ error: "Query is required for meta-reflection" });
+      }
+
+      const openrouterKey = apiKey || process.env.OPENROUTER_API_KEY || "";
+      const geminiKey = process.env.GEMINI_API_KEY || "";
+
+      if (mode === "replace_council") {
+        const systemPrompt = `You are the Meta-Council Architect. Analyze the user's objective and generate an optimal, self-replacing 3-member Council Chamber composition with distinct intellectual archetypes tailored to this specific domain.
+Output JSON only in format:
+{
+  "reflections": ["insight1", "insight2"],
+  "recommendedPersonas": [
+    { "id": "p1", "name": "Role 1", "role": "skeptic", "systemPrompt": "..." },
+    { "id": "p2", "name": "Role 2", "role": "visionary", "systemPrompt": "..." },
+    { "id": "p3", "name": "Role 3", "role": "pragmatist", "systemPrompt": "..." }
+  ]
+}`;
+        let rawContent = "";
+        if (openrouterKey) {
+          try {
+            const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${openrouterKey}`,
+              },
+              body: JSON.stringify({
+                model: "google/gemini-2.5-flash",
+                messages: [
+                  { role: "system", content: systemPrompt },
+                  { role: "user", content: `Query: ${query}\nCurrent Personas: ${JSON.stringify(personas || [])}` },
+                ],
+                max_completion_tokens: 1000,
+              }),
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              rawContent = data.choices?.[0]?.message?.content || "";
+            }
+          } catch (e) {
+            console.warn("[Meta Council] OpenRouter replace_council failed, trying Gemini fallback:", e);
+          }
+        }
+
+        if (!rawContent && geminiKey) {
+          try {
+            const resp = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${geminiKey}`,
+              },
+              body: JSON.stringify({
+                model: "gemini-2.5-flash",
+                messages: [
+                  { role: "system", content: systemPrompt },
+                  { role: "user", content: `Query: ${query}\nCurrent Personas: ${JSON.stringify(personas || [])}` },
+                ],
+                max_completion_tokens: 1000,
+              }),
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              rawContent = data.choices?.[0]?.message?.content || "";
+            }
+          } catch (e) {
+            console.error("[Meta Council] Gemini fallback failed:", e);
+          }
+        }
+
+        try {
+          const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+          const parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+          return res.json({ status: "success", original: query, ...parsed });
+        } catch {
+          return res.json({ status: "success", original: query, rawReflection: rawContent });
+        }
+      }
+
+      // Default mode: Prompt optimization / meta-reflection
+      const systemPrompt = `You are part of a self-replacing mini-council. Your job is to improve and rewrite the user's prompt to be maximally effective for the target LLM council deliberation. Return ONLY the rewritten prompt without preamble.`;
+      
+      let rewrittenPrompt = "";
+      if (openrouterKey) {
+        try {
+          const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${openrouterKey}`,
+            },
+            body: JSON.stringify({
+              model: "google/gemini-2.5-flash",
+              messages: [
+                { role: "system", content: systemPrompt },
+                {
+                  role: "user",
+                  content: `Original query: ${query}\nTarget model: ${originalModel || "unknown"}\n\nRewrite this prompt:`,
+                },
+              ],
+              max_completion_tokens: 1000,
+            }),
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            rewrittenPrompt = data.choices?.[0]?.message?.content?.trim() || "";
+          }
+        } catch (e) {
+          console.warn("[Meta Council] OpenRouter reflection failed, trying Gemini fallback:", e);
+        }
+      }
+
+      if (!rewrittenPrompt && geminiKey) {
+        try {
+          const response = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${geminiKey}`,
+            },
+            body: JSON.stringify({
+              model: "gemini-2.5-flash",
+              messages: [
+                { role: "system", content: systemPrompt },
+                {
+                  role: "user",
+                  content: `Original query: ${query}\nTarget model: ${originalModel || "unknown"}\n\nRewrite this prompt:`,
+                },
+              ],
+              max_completion_tokens: 1000,
+            }),
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            rewrittenPrompt = data.choices?.[0]?.message?.content?.trim() || "";
+          }
+        } catch (e) {
+          console.error("[Meta Council] Gemini reflection fallback failed:", e);
+        }
+      }
+
+      return res.json({
+        status: "success",
+        original: query,
+        rewritten: rewrittenPrompt || query,
+      });
+    } catch (err: any) {
+      console.error("[Meta Council] Error:", err);
+      return res.status(500).json({ error: "Failed to execute mini-council reflection" });
+    }
+  });
+
   app.post("/api/council", requireOwnerAuth, async (req, res) => {
     if (isRateLimited(req)) {
       return res.status(429).json({ error: "Too many requests. Please slow down." });
@@ -587,7 +781,6 @@ export async function startServer(portOverride?: number) {
       model: rawModel,
       messages,
       temperature,
-      max_tokens,
       stream,
       budget,
       query: rawQuery,
@@ -596,6 +789,8 @@ export async function startServer(portOverride?: number) {
       webSearch,
       tools,
     } = req.body;
+
+    const max_completion_tokens = req.body.max_completion_tokens ?? req.body.max_tokens;
 
     const headerAuth = (req.headers.authorization?.replace(/^Bearer\s+/i, "") || "").trim();
     const rawClientKey = typeof clientApiKey === "string" ? clientApiKey.trim() : "";
@@ -618,7 +813,12 @@ export async function startServer(portOverride?: number) {
       budget === "free"
     );
 
-    const actualModelUsed = normalizeModelName(rawModel);
+    let actualModelUsed: string;
+    try {
+      actualModelUsed = normalizeModelName(rawModel);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message });
+    }
 
     // Validate model pattern
     if (!ALLOWED_MODEL_PATTERN.test(actualModelUsed)) {
@@ -629,7 +829,7 @@ export async function startServer(portOverride?: number) {
     if (budget === "free") {
       if (!openrouterKey || openrouterKey.length < 6) {
         return res.status(503).json({
-          error: "Free mode requires an OpenRouter key configured in environment or settings.",
+          error: "Free mode requires an OpenRouter key with access to free models.",
         });
       }
 
@@ -656,7 +856,7 @@ export async function startServer(portOverride?: number) {
         }
 
         if (temperature !== undefined) body.temperature = temperature;
-        if (max_tokens !== undefined) body.max_tokens = max_tokens;
+        if (max_completion_tokens !== undefined) body.max_completion_tokens = max_completion_tokens;
 
         if (webSearch && budget !== "free") {
           body.tools = tools || [
@@ -684,7 +884,7 @@ export async function startServer(portOverride?: number) {
         });
 
         if (!response.ok) {
-          if (isNoFallback) {
+          if (isNoFallback || [401, 403, 402].includes(response.status)) {
             const errorText = await response.text();
             return res.status(response.status).json({ error: `OpenRouter API Error (${response.status}): ${errorText}` });
           }
@@ -724,7 +924,7 @@ export async function startServer(portOverride?: number) {
         };
 
         if (temperature !== undefined) body.temperature = temperature;
-        if (max_tokens !== undefined) body.max_tokens = Math.min(max_tokens, 8192);
+        if (max_completion_tokens !== undefined) body.max_completion_tokens = Math.min(max_completion_tokens, 8192);
 
         response = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
           method: "POST",

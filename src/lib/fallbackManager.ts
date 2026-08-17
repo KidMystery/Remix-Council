@@ -2,6 +2,7 @@ import { Persona, PersonaId, GroundingData } from '../types';
 import { RawOpenRouterModel, cleanModelName } from './presets';
 import { isFreeModel, getAuthorOrganization, getFamily, getCanonicalTarget } from './modelMapper';
 import { streamOpenRouterCompletion } from './openrouter';
+import { ExecutionPolicy, assertPolicyModel } from './executionPolicy';
 
 export type TriggerReason = 
   | 'HTTP 429 (Rate Limit)'
@@ -156,7 +157,7 @@ export function computeOrderedBackupList(options: {
   synthesizer?: Persona;
   failingPersonaId: PersonaId;
   rawModels?: RawOpenRouterModel[];
-  isFreeOnlyPreset?: boolean;
+  policy: ExecutionPolicy;
   attemptedModels?: Set<string>;
 }): BackupCandidate[] {
   const {
@@ -164,9 +165,11 @@ export function computeOrderedBackupList(options: {
     synthesizer,
     failingPersonaId,
     rawModels,
-    isFreeOnlyPreset = false,
+    policy,
     attemptedModels = new Set<string>(),
   } = options;
+
+  const isFreeOnlyPreset = policy.budget === 'free';
 
   // Determine currently used author orgs and model families by OTHER active council members
   const usedOrgs = new Set<string>();
@@ -276,7 +279,7 @@ export interface StreamPersonaWithFallbackOptions {
   activePersonas: Persona[];
   synthesizer?: Persona;
   rawModels?: RawOpenRouterModel[];
-  isFreeOnlyPreset?: boolean;
+  policy: ExecutionPolicy;
   onFallbackTriggered?: (event: FallbackEvent) => void;
 }
 
@@ -315,7 +318,7 @@ export async function streamPersonaWithFallback(
     activePersonas,
     synthesizer,
     rawModels,
-    isFreeOnlyPreset = false,
+    policy,
     disableFallback = false,
     onFallbackTriggered,
   } = options;
@@ -329,6 +332,7 @@ export async function streamPersonaWithFallback(
 
   while (attempts <= MAX_FALLBACK_ATTEMPTS) {
     attempts++;
+    assertPolicyModel(currentModel, policy, rawModels);
     attemptedModels.add(currentModel);
 
     let streamResult: { content: string; actualModel?: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }; grounding?: GroundingData; finishReason?: string } = { content: '' };
@@ -352,7 +356,58 @@ export async function streamPersonaWithFallback(
         onGrounding,
       });
 
-      const streamContent = streamResult.content;
+      let streamContent = streamResult.content;
+      let finalFinishReason = streamResult.finishReason;
+      let finalUsage = streamResult.usage;
+
+      // Automatic token expansion on truncation detection
+      if (finalFinishReason === 'length' || finalFinishReason === 'max_tokens') {
+        let continuationCount = 0;
+        const maxContinuations = 2; // Allow up to 2 auto-expansions
+        let currentMessages = [...messages];
+        let currentMaxTokens = maxTokens ? maxTokens * 1.5 : 4000;
+
+        while ((finalFinishReason === 'length' || finalFinishReason === 'max_tokens') && continuationCount < maxContinuations) {
+          continuationCount++;
+          console.log(`[Token Expansion] Truncation detected for ${currentModel}. Auto-expanding tokens (Attempt ${continuationCount})...`);
+          
+          currentMessages = [
+            ...currentMessages,
+            { role: 'assistant', content: streamContent },
+            { role: 'user', content: 'Continue exactly where you left off. Do not repeat anything from your previous response, just pick up from the exact last word.' }
+          ];
+
+          const contResult = await streamOpenRouterCompletion({
+            apiKey,
+            model: currentModel,
+            messages: currentMessages,
+            temperature,
+            maxTokens: Math.floor(currentMaxTokens),
+            budget,
+            query,
+            signal,
+            disableFallback,
+            onToken: (chunk) => {
+              if (chunk) hasTokenStreamed = true;
+              if (onToken) onToken(chunk);
+            },
+            onGrounding
+          });
+
+          streamContent += contResult.content;
+          finalFinishReason = contResult.finishReason;
+          if (contResult.usage && finalUsage) {
+             finalUsage = {
+                promptTokens: (finalUsage.promptTokens || 0) + (contResult.usage.promptTokens || 0),
+                completionTokens: (finalUsage.completionTokens || 0) + (contResult.usage.completionTokens || 0),
+                totalTokens: (finalUsage.totalTokens || 0) + (contResult.usage.totalTokens || 0)
+             };
+          } else {
+             finalUsage = contResult.usage || finalUsage;
+          }
+          currentMaxTokens *= 1.5;
+        }
+      }
 
       // Verify response validity
       if (!streamContent || streamContent.trim().length === 0) {
@@ -366,9 +421,9 @@ export async function streamPersonaWithFallback(
         content: streamContent,
         finalModel: actualExecutedModel,
         fallbackOccurred: attempts > 1,
-        usage: streamResult.usage,
+        usage: finalUsage,
         grounding: streamResult.grounding,
-        finishReason: streamResult.finishReason,
+        finishReason: finalFinishReason,
       };
     } catch (err: any) {
       lastError = err;
@@ -416,7 +471,7 @@ export async function streamPersonaWithFallback(
         synthesizer,
         failingPersonaId: personaId,
         rawModels,
-        isFreeOnlyPreset,
+        policy,
         attemptedModels,
       });
 
@@ -443,9 +498,7 @@ export async function streamPersonaWithFallback(
       }
 
       if (!replacementCandidate) {
-        throw new Error(
-          `Model execution failed (${triggerReason}: ${err.message}). No valid replacement models available matching unused org & family constraints.`
-        );
+        throw new Error(`No policy-compliant fallback is available for "${currentModel}".`);
       }
 
       // Switch to replacement model for next attempt loop

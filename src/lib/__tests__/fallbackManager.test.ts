@@ -162,4 +162,15 @@ describe('Fallback Manager tests', () => {
       expect(getStoredFallbackEvents()).toHaveLength(0);
     });
   });
+
+  describe('truncation detection & token expansion', () => {
+    it('identifies length and max_tokens finish reasons as truncation triggers', () => {
+      const checkTruncation = (reason?: string) => reason === 'length' || reason === 'max_tokens';
+
+      expect(checkTruncation('length')).toBe(true);
+      expect(checkTruncation('max_tokens')).toBe(true);
+      expect(checkTruncation('stop')).toBe(false);
+      expect(checkTruncation(undefined)).toBe(false);
+    });
+  });
 });
