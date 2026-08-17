@@ -220,7 +220,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         executionMode: savedMode || 'auto',
         quickPanelMaxTokens: savedQuickTokens ? parseInt(savedQuickTokens, 10) : 350,
         synthesisMaxTokens: savedSynthTokens ? parseInt(savedSynthTokens, 10) : 500,
-        panelTimeoutSeconds: savedTimeout ? parseInt(savedTimeout, 10) : 30,
+        panelTimeoutSeconds: savedTimeout ? parseInt(savedTimeout, 10) : 120,
         maxRoundCostCeiling: savedCostCeiling ? parseFloat(savedCostCeiling) : 0,
         stopAfterStage1: savedStopStage1 === 'true',
         useSingleModelForSimple: savedSingleModelSimple === 'true',
@@ -243,7 +243,7 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
         executionMode: 'auto',
         quickPanelMaxTokens: 350,
         synthesisMaxTokens: 500,
-        panelTimeoutSeconds: 30,
+        panelTimeoutSeconds: 120,
         maxRoundCostCeiling: 0,
         stopAfterStage1: false,
         useSingleModelForSimple: false,
@@ -1860,6 +1860,20 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
         await Promise.allSettled(stage1Promises);
         if (abortController.signal.aborted) return;
+
+        const stillIncompleteStage1 = activePersonas.filter((p) => {
+          const resp = stage1Map[p.id];
+          return !resp || resp.status !== 'completed' || !resp.content?.trim();
+        });
+
+        if (stillIncompleteStage1.length > 0) {
+          showToast(
+            `Stage 1 still incomplete (${stillIncompleteStage1.length} member${stillIncompleteStage1.length > 1 ? 's' : ''} pending). Deliberation paused.`,
+            'warning',
+            5000
+          );
+          return;
+        }
       }
 
       // Skip Stage 2 and Stage 3 if single council member
@@ -1886,7 +1900,10 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
             deliberation: { ...r.deliberation, stage2: initialStage2Update },
           }));
 
-          const stage2Promises = pendingStage2Personas.map(async (persona) => {
+          const stage2Promises = pendingStage2Personas.map(async (persona, idx) => {
+            if (idx > 0) {
+              await new Promise((r) => setTimeout(r, idx * 150));
+            }
             const personaModel = persona.model || settings?.defaultModels?.[persona.id];
             if (!personaModel) {
               throw new Error(`No model assigned for persona ${persona.name}`);
@@ -1972,6 +1989,20 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
           await Promise.allSettled(stage2Promises);
           if (abortController.signal.aborted) return;
+
+          const stillIncompleteStage2 = activePersonas.filter((p) => {
+            const resp = stage2Map[p.id];
+            return !resp || resp.status !== 'completed' || !resp.content?.trim();
+          });
+
+          if (stillIncompleteStage2.length > 0) {
+            showToast(
+              `Stage 2 peer review still incomplete (${stillIncompleteStage2.length} member${stillIncompleteStage2.length > 1 ? 's' : ''} pending). Deliberation paused.`,
+              'warning',
+              5000
+            );
+            return;
+          }
         }
       }
 
@@ -2066,9 +2097,12 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     const stage1Outputs: Record<string, PersonaResponse> = {};
 
     const stage1Promises = activePersonas.map(async (persona, idx) => {
+      if (idx > 0) {
+        await new Promise((r) => setTimeout(r, idx * 150));
+      }
       let perCallSignal = abortController.signal;
       if (mode === 'quick_panel') {
-        const timeoutMs = (settings.panelTimeoutSeconds || 30) * 1000;
+        const timeoutMs = (settings.panelTimeoutSeconds || 120) * 1000;
         perCallSignal = (AbortSignal as any).any
           ? (AbortSignal as any).any([abortController.signal, AbortSignal.timeout(timeoutMs)])
           : abortController.signal;
@@ -2221,6 +2255,23 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
 
     if (abortController.signal.aborted) return;
 
+    // Strict Stage 1 Completion Guard: Do not proceed to next step if any persona failed or timed out
+    const incompleteStage1 = activePersonas.filter((p) => {
+      const resp = stage1Outputs[p.id];
+      return !resp || resp.status !== 'completed' || !resp.content?.trim();
+    });
+
+    if (incompleteStage1.length > 0) {
+      showToast(
+        `Stage 1 incomplete (${incompleteStage1.length} member${incompleteStage1.length > 1 ? 's' : ''} failed or timed out). Deliberation paused.`,
+        'warning',
+        6000
+      );
+      setIsDeliberating(false);
+      abortControllerRef.current = null;
+      return;
+    }
+
     if (mode === 'quick_panel' || activePersonas.length === 1) {
       try {
         const fullSynthText = await runSynthesisPhase(roundId, queryText, attachedImages, stage1Outputs, {}, abortController.signal);
@@ -2333,6 +2384,9 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     const stage2Outputs: Record<string, PersonaResponse> = {};
 
     const stage2Promises = activePersonas.map(async (persona, idx) => {
+      if (idx > 0) {
+        await new Promise((r) => setTimeout(r, idx * 150));
+      }
       const peerProposals = activePersonas
         .map((p, pIdx) => {
           if (p.id === persona.id) return null;
@@ -2484,6 +2538,23 @@ export const CouncilChamber: React.FC<Props> = ({ settings: propsSettings, onUpd
     await Promise.allSettled(stage2Promises);
 
     if (abortController.signal.aborted) return;
+
+    // Strict Stage 2 Completion Guard: Do not proceed to Synthesis if any peer review failed or timed out
+    const incompleteStage2 = activePersonas.filter((p) => {
+      const resp = stage2Outputs[p.id];
+      return !resp || resp.status !== 'completed' || !resp.content?.trim();
+    });
+
+    if (incompleteStage2.length > 0) {
+      showToast(
+        `Stage 2 peer review incomplete (${incompleteStage2.length} member${incompleteStage2.length > 1 ? 's' : ''} failed or timed out). Deliberation paused.`,
+        'warning',
+        6000
+      );
+      setIsDeliberating(false);
+      abortControllerRef.current = null;
+      return;
+    }
 
     const fullSynthText = await runSynthesisPhase(roundId, queryText, attachedImages, stage1Outputs, stage2Outputs, abortController.signal);
     const roundWallClockMs = Date.now() - roundStartMs;

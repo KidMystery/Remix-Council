@@ -61,7 +61,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
       skeptic: { model: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1 (free)' },
       visionary: { model: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash (free)' },
       pragmatist: { model: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B Instruct (free)' },
-      synthesizer: { model: 'nvidia/nemotron-3.5-content-safety:free', name: 'Nemotron 3.5 Content Safety (free)' },
+      synthesizer: { model: 'qwen/qwen-2.5-coder-32b-instruct:free', name: 'Qwen 2.5 Coder 32B (free)' },
     },
   },
   {

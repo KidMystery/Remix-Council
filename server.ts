@@ -688,10 +688,8 @@ export async function startServer(portOverride?: number) {
             const errorText = await response.text();
             return res.status(response.status).json({ error: `OpenRouter API Error (${response.status}): ${errorText}` });
           }
-          if (response.status === 401 || response.status === 403 || response.status === 402) {
-            console.warn(`[API Proxy] OpenRouter returned HTTP ${response.status}. Falling back to Gemini API...`);
-            response = null;
-          }
+          console.warn(`[API Proxy] OpenRouter returned HTTP ${response.status}. Falling back to Gemini API...`);
+          response = null;
         }
       } catch (err: any) {
         if (isNoFallback) {

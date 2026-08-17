@@ -90,7 +90,7 @@ export function SettingsPanel({
   setQuickPanelMaxTokens,
   synthesisMaxTokens = 500,
   setSynthesisMaxTokens,
-  panelTimeoutSeconds = 30,
+  panelTimeoutSeconds = 120,
   setPanelTimeoutSeconds,
   isProCompareEnabled,
   handleToggleProCompare,

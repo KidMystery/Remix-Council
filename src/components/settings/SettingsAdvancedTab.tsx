@@ -460,8 +460,8 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
               <input
                 type="range"
                 min={15}
-                max={60}
-                step={5}
+                max={180}
+                step={15}
                 value={panelTimeoutSeconds}
                 onChange={(e) => setPanelTimeoutSeconds(parseInt(e.target.value, 10))}
                 className="w-full accent-indigo-600 cursor-pointer"

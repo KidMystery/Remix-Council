@@ -342,7 +342,6 @@ export interface SmartSelectionResult extends RouteCouncilModelsResult {
  */
 const FREE_ROLE_CANDIDATES: Record<'skeptic' | 'visionary' | 'pragmatist' | 'synthesizer', string[]> = {
   skeptic: [
-    'nvidia/nemotron-3.5-content-safety:free',
     'deepseek/deepseek-r1:free',
     'google/gemini-2.0-flash-thinking-exp:free',
     'qwen/qwen-2.5-coder-32b-instruct:free',
@@ -356,14 +355,15 @@ const FREE_ROLE_CANDIDATES: Record<'skeptic' | 'visionary' | 'pragmatist' | 'syn
   ],
   pragmatist: [
     'inclusionai/ling-3.0-tiny:free',
+    'meta-llama/llama-3.3-70b-instruct:free',
     'meta-llama/llama-3.2-3b-instruct:free',
     'google/gemma-2-9b-it:free',
-    'nvidia/nemotron-3.5-content-safety:free',
   ],
   synthesizer: [
     'google/gemma-4-31b-it:free',
     'google/gemini-2.0-flash-thinking-exp:free',
     'deepseek/deepseek-r1:free',
+    'qwen/qwen-2.5-coder-32b-instruct:free',
     'inclusionai/ling-3.0-tiny:free',
   ],
 };
@@ -931,10 +931,10 @@ export function ensureUniquePersonaModels(
     ? [
         'deepseek/deepseek-r1:free',
         'google/gemini-2.0-flash-thinking-exp:free',
+        'meta-llama/llama-3.3-70b-instruct:free',
         'meta-llama/llama-3.2-3b-instruct:free',
         'google/gemma-2-9b-it:free',
         'qwen/qwen-2.5-coder-32b-instruct:free',
-        'nvidia/nemotron-3.5-content-safety:free',
       ]
     : [
         'deepseek/deepseek-chat',

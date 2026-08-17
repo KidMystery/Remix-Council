@@ -125,8 +125,8 @@ export function classifyTriggerReason(error: any, responseText?: string): Trigge
  * Default fallback candidates when raw OpenRouter models are not dynamically fetched yet.
  */
 const DEFAULT_FREE_BACKUPS: BackupCandidate[] = [
+  { model: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash (free)', org: 'google', family: 'gemini-2.0', isFree: true },
   { model: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B (free)', org: 'google', family: 'gemma-4', isFree: true },
-  { model: 'nvidia/nemotron-3.5-content-safety:free', name: 'Nemotron 3.5 Content Safety (free)', org: 'nvidia', family: 'nemotron-3.5', isFree: true },
   { model: 'poolside/laguna-xs-2.1:free', name: 'Laguna XS 2.1 (free)', org: 'poolside', family: 'laguna-xs', isFree: true },
   { model: 'inclusionai/ling-3.0-tiny:free', name: 'Ling 3.0 Tiny (free)', org: 'inclusionai', family: 'ling-3.0', isFree: true },
   { model: 'qwen/qwen-2.5-coder-32b-instruct:free', name: 'Qwen 2.5 Coder 32B (free)', org: 'qwen', family: 'qwen-2.5-coder', isFree: true },
