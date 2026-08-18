@@ -2,7 +2,7 @@ import { Persona, PersonaId, GroundingData } from '../types';
 import { RawOpenRouterModel, cleanModelName } from './presets';
 import { isFreeModel, getAuthorOrganization, getFamily, getCanonicalTarget } from './modelMapper';
 import { streamOpenRouterCompletion } from './openrouter';
-import { ExecutionPolicy, assertPolicyModel } from './executionPolicy';
+import { ExecutionPolicy, assertPolicyModel, policyForPreset } from './executionPolicy';
 
 export type TriggerReason = 
   | 'HTTP 429 (Rate Limit)'
@@ -157,7 +157,8 @@ export function computeOrderedBackupList(options: {
   synthesizer?: Persona;
   failingPersonaId: PersonaId;
   rawModels?: RawOpenRouterModel[];
-  policy: ExecutionPolicy;
+  policy?: ExecutionPolicy;
+  isFreeOnlyPreset?: boolean;
   attemptedModels?: Set<string>;
 }): BackupCandidate[] {
   const {
@@ -165,7 +166,7 @@ export function computeOrderedBackupList(options: {
     synthesizer,
     failingPersonaId,
     rawModels,
-    policy,
+    policy = options.policy || (options.isFreeOnlyPreset ? policyForPreset('fast_and_free') : policyForPreset('all')),
     attemptedModels = new Set<string>(),
   } = options;
 

@@ -330,6 +330,8 @@ export interface SmartSelectionOptions {
   availableModels?: { id: string; name: string }[];
   rawModelsCatalog?: RawOpenRouterModel[];
   policy?: ExecutionPolicy;
+  budget?: BudgetMode;
+  isFreeOnly?: boolean;
   autoSelectModels?: boolean;
 }
 
@@ -782,42 +784,72 @@ export function routeCouncilModels(params: RouteCouncilModelsParams): RouteCounc
     // AUTHORITY STEP 4: CATALOG & DEFAULT FALLBACK
     // ═════════════════════════════════════════════════════════════════════
     if (!selectedModel) {
-      const domainMap = DOMAIN_MODEL_MAPPINGS[normalizedDomain] || DOMAIN_MODEL_MAPPINGS.general;
-      const primaryTarget = domainMap[roleKey] || domainMap.defaultFallback;
-      const roleCandidates = isFreeBudget
-        ? FREE_ROLE_CANDIDATES[roleKey]
-        : isCheapBudget
-        ? CHEAP_ROLE_CANDIDATES[roleKey]
-        : isBestValueBudget
-        ? BEST_VALUE_ROLE_CANDIDATES[roleKey]
-        : isHighestQualityBudget
-        ? HIGHEST_QUALITY_ROLE_CANDIDATES[roleKey]
-        : STANDARD_ROLE_CANDIDATES[roleKey];
+      if (isFreeBudget) {
+        const freePool = [
+          ...(FREE_ROLE_CANDIDATES[roleKey] || []),
+          'google/gemma-4-31b-it:free',
+          'google/gemini-2.0-flash-thinking-exp:free',
+          'poolside/laguna-xs-2.1:free',
+          'inclusionai/ling-3.0-tiny:free',
+          'meta-llama/llama-3.3-70b-instruct:free',
+          'qwen/qwen-2.5-coder-32b-instruct:free',
+          'meta-llama/llama-3.2-3b-instruct:free',
+        ];
 
-      const fallbackPool = [
-        primaryTarget,
-        ...(roleCandidates || []),
-        domainMap.defaultFallback,
-        'google/gemini-2.5-flash',
-      ];
+        for (const target of freePool) {
+          const resolvedInCatalog = rawCatalog.length > 0 ? findModelInCatalog(target, rawCatalog) : target;
+          const candidateToUse = resolvedInCatalog || target;
 
-      for (const target of fallbackPool) {
-        const resolvedInCatalog = rawCatalog.length > 0 ? findModelInCatalog(target, rawCatalog) : target;
-        const candidateToUse = resolvedInCatalog || target;
-
-        if (!usedModels.has(candidateToUse)) {
-          selectedModel = candidateToUse;
-          selectedSource = rawCatalog.length > 0 ? 'catalog_fallback' : 'default_fallback';
-          selectedReason = `Step 4: ${selectedSource === 'catalog_fallback' ? 'Catalog fallback' : 'Default fallback'} applied for ${roleKey} role (${candidateToUse}).`;
-          evaluations.push({ candidateId: candidateToUse, passedFilter: true, reason: 'Step 4 Fallback target selected.' });
-          break;
+          if (!usedModels.has(candidateToUse)) {
+            selectedModel = candidateToUse;
+            selectedSource = rawCatalog.length > 0 ? 'catalog_fallback' : 'default_fallback';
+            selectedReason = `Step 4: Free fallback applied for ${roleKey} role (${candidateToUse}).`;
+            evaluations.push({ candidateId: candidateToUse, passedFilter: true, reason: 'Step 4 Free fallback target selected.' });
+            break;
+          }
         }
-      }
 
-      if (!selectedModel) {
-        selectedModel = primaryTarget;
-        selectedSource = 'default_fallback';
-        selectedReason = `Step 4: Absolute default fallback target assigned (${primaryTarget}).`;
+        if (!selectedModel) {
+          selectedModel = FREE_ROLE_CANDIDATES[roleKey]?.[0] || 'google/gemma-4-31b-it:free';
+          selectedSource = 'default_fallback';
+          selectedReason = `Step 4: Absolute free fallback assigned (${selectedModel}).`;
+        }
+      } else {
+        const domainMap = DOMAIN_MODEL_MAPPINGS[normalizedDomain] || DOMAIN_MODEL_MAPPINGS.general;
+        const primaryTarget = domainMap[roleKey] || domainMap.defaultFallback;
+        const roleCandidates = isCheapBudget
+          ? CHEAP_ROLE_CANDIDATES[roleKey]
+          : isBestValueBudget
+          ? BEST_VALUE_ROLE_CANDIDATES[roleKey]
+          : isHighestQualityBudget
+          ? HIGHEST_QUALITY_ROLE_CANDIDATES[roleKey]
+          : STANDARD_ROLE_CANDIDATES[roleKey];
+
+        const fallbackPool = [
+          primaryTarget,
+          ...(roleCandidates || []),
+          domainMap.defaultFallback,
+          'google/gemini-2.5-flash',
+        ];
+
+        for (const target of fallbackPool) {
+          const resolvedInCatalog = rawCatalog.length > 0 ? findModelInCatalog(target, rawCatalog) : target;
+          const candidateToUse = resolvedInCatalog || target;
+
+          if (!usedModels.has(candidateToUse)) {
+            selectedModel = candidateToUse;
+            selectedSource = rawCatalog.length > 0 ? 'catalog_fallback' : 'default_fallback';
+            selectedReason = `Step 4: ${selectedSource === 'catalog_fallback' ? 'Catalog fallback' : 'Default fallback'} applied for ${roleKey} role (${candidateToUse}).`;
+            evaluations.push({ candidateId: candidateToUse, passedFilter: true, reason: 'Step 4 Fallback target selected.' });
+            break;
+          }
+        }
+
+        if (!selectedModel) {
+          selectedModel = primaryTarget;
+          selectedSource = 'default_fallback';
+          selectedReason = `Step 4: Absolute default fallback target assigned (${primaryTarget}).`;
+        }
       }
     }
 
@@ -984,6 +1016,7 @@ export function applySmartModelSelection(
   let rawModelsCatalog: RawOpenRouterModel[] | undefined = undefined;
   let autoSelectEnabled = true;
   let policy: ExecutionPolicy | undefined = undefined;
+  let budgetOption: BudgetMode | undefined = undefined;
 
   if (Array.isArray(options)) {
     availableModels = options;
@@ -991,12 +1024,13 @@ export function applySmartModelSelection(
     availableModels = options.availableModels || [];
     rawModelsCatalog = options.rawModelsCatalog;
     policy = options.policy;
+    budgetOption = options.budget || (options.isFreeOnly ? 'fast_and_free' : undefined);
     if (options.autoSelectModels !== undefined) {
       autoSelectEnabled = options.autoSelectModels;
     }
   }
 
-  const effectiveBudget = policy?.budget;
+  const effectiveBudget = budgetOption || policy?.budget;
 
   const routeResult = routeCouncilModels({
     domain,
