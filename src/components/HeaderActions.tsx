@@ -1,17 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Settings as SettingsIcon, Sun, Moon, ShieldAlert, LogIn, LogOut, User as UserIcon, MoreVertical, Cloud, RefreshCw, CheckCircle2 } from 'lucide-react';
-import { User } from 'firebase/auth';
-import { FirebaseAuthUI } from './FirebaseAuthUI';
+import { Settings as SettingsIcon, Sun, Moon, ShieldAlert, MoreVertical, Cloud, RefreshCw, CheckCircle2 } from 'lucide-react';
 
 interface HeaderActionsProps {
   theme: 'dark' | 'light' | 'system';
   onSetTheme: (t: 'dark' | 'light' | 'system') => void;
   onOpenAuditModal?: () => void;
   onOpenSettings: () => void;
-  user?: User | null;
-  onLogin?: (user?: User) => void;
-  onLoginError?: (error: Error) => void;
-  onLogout?: () => void;
   isDeliberating?: boolean;
   isSyncing?: boolean;
   onSyncWithCloud?: () => Promise<void> | void;
@@ -23,10 +17,6 @@ export const HeaderActions: React.FC<HeaderActionsProps> = ({
   onSetTheme,
   onOpenAuditModal,
   onOpenSettings,
-  user,
-  onLogin,
-  onLoginError,
-  onLogout,
   isDeliberating,
   isSyncing,
   onSyncWithCloud,
@@ -52,166 +42,83 @@ export const HeaderActions: React.FC<HeaderActionsProps> = ({
 
   return (
     <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-      {/* Cloud Sync Status Indicator for Authenticated Users */}
-      {user && onSyncWithCloud && (
+      {/* Cloud Sync Status Indicator */}
+      {onSyncWithCloud && (
         <button
           type="button"
           onClick={() => onSyncWithCloud()}
-          disabled={isSyncing || isDeliberating}
-          className={`min-w-[36px] min-h-[36px] sm:min-w-[38px] sm:min-h-[38px] px-2.5 rounded-xl border text-xs font-mono transition-all flex items-center gap-1.5 cursor-pointer shadow-xs ${
-            isSyncing
-              ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-600 dark:text-cyan-400'
-              : 'bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
-          }`}
-          title={
-            isSyncing
-              ? 'Syncing sessions to Firebase cloud...'
-              : `Cloud Sync Active (Click to sync now)${lastSyncedAt ? ` • Last synced ${new Date(lastSyncedAt).toLocaleTimeString()}` : ''}`
-          }
-          aria-label="Synchronize threads with Firebase"
+          className="hidden sm:inline-flex items-center gap-1 text-[11px] font-mono px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-cyan-600 dark:hover:text-cyan-300 transition-colors cursor-pointer"
+          title={`${isSyncing ? 'Syncing...' : 'Sync sessions to Google Drive'}${lastSyncedAt ? ` — Last synced ${new Date(lastSyncedAt).toLocaleTimeString()}` : ''}`}
         >
           {isSyncing ? (
-            <RefreshCw size={14} className="animate-spin text-cyan-500" />
+            <RefreshCw size={11} className="animate-spin text-cyan-500" />
           ) : (
-            <Cloud size={14} className="text-cyan-500" />
+            <Cloud size={11} className="text-cyan-500" />
           )}
-          <span className="hidden lg:inline text-[11px]">
-            {isSyncing ? 'Syncing...' : 'Cloud'}
-          </span>
+          <span>{isSyncing ? 'Syncing…' : 'Cloud Sync'}</span>
         </button>
       )}
 
-      {/* Settings Modal Trigger */}
+      {/* Theme Toggle */}
       <button
         type="button"
-        onClick={onOpenSettings}
-        disabled={isDeliberating}
-        className="min-w-[36px] min-h-[36px] sm:min-w-[38px] sm:min-h-[38px] rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 transition-colors flex items-center justify-center cursor-pointer shadow-xs"
-        title={isDeliberating ? "Settings unavailable during active deliberation" : "Chamber Settings & Data Management"}
+        onClick={() => onSetTheme(theme === 'dark' ? 'light' : 'dark')}
+        className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-amber-500 dark:hover:text-amber-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+        title="Toggle theme"
       >
-        <SettingsIcon size={16} />
+        {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
       </button>
 
-      {/* Overflow Utilities Menu (Theme Switcher, Audit Log, User Profile / Auth) */}
+      {/* Audit Log */}
+      {onOpenAuditModal && (
+        <button
+          type="button"
+          onClick={onOpenAuditModal}
+          className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-cyan-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+          title="Council Request Audit Log"
+        >
+          <ShieldAlert size={14} />
+        </button>
+      )}
+
+      {/* Overflow Utilities Menu */}
       <div className="relative" ref={overflowRef}>
         <button
           type="button"
           onClick={() => setIsOverflowOpen(!isOverflowOpen)}
-          className={`min-w-[36px] min-h-[36px] sm:min-w-[38px] sm:min-h-[38px] rounded-xl border transition-all flex items-center justify-center cursor-pointer shadow-xs ${
-            isOverflowOpen
-              ? 'bg-slate-100 dark:bg-slate-800 border-cyan-500/50 text-cyan-600 dark:text-cyan-400'
-              : 'bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
-          }`}
-          title="More tools & options"
+          className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+          title="More options"
         >
-          <MoreVertical size={16} />
+          <MoreVertical size={14} />
         </button>
 
         {isOverflowOpen && (
-          <div className="absolute right-0 mt-1.5 w-72 max-w-[90vw] rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xl p-2 z-50 space-y-1.5 animate-in fade-in slide-in-from-top-1 duration-150">
-            {/* Theme Toggle in Overflow */}
+          <div className="absolute right-0 top-full mt-2 z-50 w-52 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-1.5 space-y-0.5">
             <button
               type="button"
-              onClick={() => {
-                onSetTheme(theme === 'dark' ? 'light' : 'dark');
-                setIsOverflowOpen(false);
-              }}
-              className="w-full px-3 py-2 rounded-xl text-left text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-between transition-colors cursor-pointer"
+              onClick={() => { onOpenSettings(); setIsOverflowOpen(false); }}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
             >
-              <div className="flex items-center gap-2.5">
-                {theme === 'dark' ? <Sun size={15} className="text-amber-400" /> : <Moon size={15} className="text-indigo-400" />}
-                <span>Theme: {theme === 'dark' ? 'Dark Mode' : 'Light Mode'}</span>
-              </div>
-              <span className="text-[10px] font-mono text-slate-400 uppercase">Switch</span>
+              <SettingsIcon size={13} />
+              <span>Settings</span>
             </button>
 
-            {/* Audit Log / Routing Trace in Overflow */}
-            {onOpenAuditModal && (
+            {onSyncWithCloud && (
               <button
                 type="button"
-                onClick={() => {
-                  onOpenAuditModal();
-                  setIsOverflowOpen(false);
-                }}
-                className="w-full px-3 py-2 rounded-xl text-left text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors cursor-pointer"
+                onClick={() => { onSyncWithCloud(); setIsOverflowOpen(false); }}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
               >
-                <ShieldAlert size={15} className="text-indigo-500" />
-                <span>Audit & Routing Trace</span>
+                {isSyncing ? <RefreshCw size={13} className="animate-spin text-cyan-500" /> : <Cloud size={13} className="text-cyan-500" />}
+                <span>{isSyncing ? 'Syncing…' : 'Sync to Google Drive'}</span>
               </button>
             )}
 
-            <div className="border-t border-slate-100 dark:border-slate-800 my-1" />
-
-            {/* User Account / Sync in Overflow */}
-            {user ? (
-              <div className="p-2 bg-slate-50 dark:bg-slate-950/60 rounded-xl space-y-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  {user.photoURL ? (
-                    <img
-                      src={user.photoURL}
-                      alt={user.displayName || 'User'}
-                      className="w-6 h-6 rounded-full border border-cyan-500/50 shadow-xs object-cover shrink-0"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className="w-6 h-6 rounded-full bg-cyan-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0">
-                      {user.displayName ? user.displayName.slice(0, 1).toUpperCase() : <UserIcon size={12} />}
-                    </div>
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[11px] font-semibold text-slate-800 dark:text-slate-200 truncate">
-                      {user.displayName || 'Signed In'}
-                    </p>
-                    <p className="text-[10px] text-slate-400 truncate">{user.email}</p>
-                  </div>
-                </div>
-
-                {onSyncWithCloud && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onSyncWithCloud();
-                      setIsOverflowOpen(false);
-                    }}
-                    className="w-full py-1.5 px-2 rounded-lg text-left text-xs font-medium text-cyan-700 dark:text-cyan-300 hover:bg-cyan-50 dark:hover:bg-cyan-950/40 flex items-center justify-between transition-colors cursor-pointer"
-                  >
-                    <div className="flex items-center gap-2">
-                      <RefreshCw size={13} className={isSyncing ? "animate-spin text-cyan-500" : "text-cyan-500"} />
-                      <span>{isSyncing ? 'Syncing...' : 'Sync Cloud Threads'}</span>
-                    </div>
-                    {lastSyncedAt && !isSyncing && (
-                      <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />
-                    )}
-                  </button>
-                )}
-
-                {onLogout && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onLogout();
-                      setIsOverflowOpen(false);
-                    }}
-                    className="w-full py-1.5 px-2 rounded-lg text-left text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2 transition-colors cursor-pointer"
-                  >
-                    <LogOut size={13} />
-                    <span>Log Out</span>
-                  </button>
-                )}
+            {isSyncing && (
+              <div className="flex items-center gap-2 px-3 py-2 text-[11px] font-mono text-cyan-600 dark:text-cyan-300">
+                <CheckCircle2 size={12} />
+                <span>Cloud sync in progress…</span>
               </div>
-            ) : (
-              <FirebaseAuthUI 
-                onSuccess={(u) => {
-                  onLogin?.(u);
-                  setIsOverflowOpen(false);
-                }}
-                onError={(err) => {
-                  onLoginError?.(err);
-                  // Keep overflow open so the troubleshooting advice and redirect option remain accessible
-                }}
-                isCompact={true}
-                className="text-cyan-600 dark:text-cyan-400 hover:bg-cyan-50 dark:hover:bg-cyan-950/40"
-              />
             )}
           </div>
         )}
@@ -219,5 +126,3 @@ export const HeaderActions: React.FC<HeaderActionsProps> = ({
     </div>
   );
 };
-
-

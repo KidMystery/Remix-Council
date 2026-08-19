@@ -1,10 +1,10 @@
 import React from 'react';
 import { ShieldCheck, TrendingUp, CheckCircle2, AlertCircle, Users, Activity } from 'lucide-react';
-import type { ConsensusMetric, CouncilPersona } from '../types';
+import type { ConsensusMetric, Persona } from '../types';
 
 export interface ConsensusVisualizerProps {
-  metric: ConsensusMetric;
-  personas?: CouncilPersona[];
+  metric?: ConsensusMetric | undefined;
+  personas?: Persona[];
   roundIndex?: number;
 }
 
@@ -13,6 +13,9 @@ export const ConsensusVisualizer: React.FC<ConsensusVisualizerProps> = ({
   personas = [],
   roundIndex,
 }) => {
+  // If no metric is provided, render nothing.
+  if (!metric) return null;
+
   const score = Math.min(100, Math.max(0, metric.agreementScore || 85));
   const delta = metric.iterationDelta ?? 0;
 

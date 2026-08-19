@@ -17,3 +17,31 @@
     @apply bg-slate-300 dark:bg-slate-600;
   }
 }
+
+/* Nexus Lab Dossier print-only styling (Print / Save as PDF export) */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .nexus-dossier-print,
+  .nexus-dossier-print * {
+    visibility: visible;
+  }
+  .nexus-dossier-print {
+    display: block !important;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 24px;
+    background: #ffffff;
+    color: #0f172a;
+  }
+  .nexus-dossier-print pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 11px;
+    line-height: 1.5;
+    color: #0f172a;
+  }
+}

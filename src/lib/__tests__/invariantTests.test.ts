@@ -7,7 +7,7 @@ import { shouldEnableWebSearch, getWebSearchToolDefinition } from '../webGroundi
 import { getArchiveFilePriority, buildCodebaseContext } from '../zipReader';
 import { calculateRoundAggregateCost, isWithinBudgetCeiling } from '../costGovernor';
 import { Persona, CouncilRound, Session } from '../../types';
-import { migrateLocalSession } from '../persistence';
+import { migrateLocalSession } from '../drivePersistence';
 
 describe('Invariant Tests Suite (Section 1)', () => {
   describe('1. Exact-zero free classification', () => {

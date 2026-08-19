@@ -13,35 +13,120 @@ import {
   DollarSign,
   AlertTriangle,
   Layers,
-  Sparkles,
   ArrowRight,
   Cpu,
+  FileDown,
+  Printer,
 } from 'lucide-react';
 import type {
-  AutonomousMission,
-  CouncilPersona,
+  Persona,
   RawOpenRouterModel,
   CouncilRound,
   CostCeilingConfig,
   ConsensusMetric,
 } from '../types';
-import { policyForPreset } from '../lib/executionPolicy';
-import { routeCouncilModels } from '../lib/smartModelSelector';
-import { streamOpenRouter } from '../lib/openrouter';
-import { saveMissionToFirestore } from '../lib/persistence';
+import { policyForPreset, type ExecutionPolicy } from '../lib/executionPolicy';
+import { streamPersonaWithFallback } from '../lib/fallbackManager';
 import { MessageMarkdown } from './MessageMarkdown';
 import { ConsensusVisualizer } from './ConsensusVisualizer';
 
 export interface NexusLabViewProps {
-  personas: CouncilPersona[];
+  personas: Persona[];
+  synthesizer: Persona;
   catalog: RawOpenRouterModel[];
   onCompleteRound: (sessionId: string, round: CouncilRound) => void;
   activeSessionId?: string | null;
   costCeiling: CostCeilingConfig;
 }
 
+const MISSIONS_STORAGE_KEY = 'nexus-missions-v1';
+const MAX_STORED_CONTENT_CHARS = 5000;
+
+interface PersistedMission {
+  id: string;
+  goal: string;
+  presetId: string;
+  maxIterations: number;
+  currentIteration: number;
+  status: 'idle' | 'running' | 'paused' | 'converged' | 'max_reached' | 'awaiting_approval' | 'error';
+  rounds: CouncilRound[];
+  consensusMetrics: ConsensusMetric[];
+  estimatedCost: number;
+  updatedAt: number;
+}
+
+function sanitizeMissionForStorage(mission: PersistedMission): PersistedMission {
+  return {
+    ...mission,
+    rounds: mission.rounds.map((r) => ({
+      ...r,
+      attachedTextFiles: (r.attachedTextFiles || []).map((f) => ({
+        ...f,
+        content:
+          f.content && f.content.length > MAX_STORED_CONTENT_CHARS
+            ? f.content.slice(0, MAX_STORED_CONTENT_CHARS)
+            : f.content || '',
+      })),
+    })),
+  };
+}
+
+function loadPersistedMission(): PersistedMission | null {
+  try {
+    const raw = localStorage.getItem(MISSIONS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.rounds)) {
+      return parsed as PersistedMission;
+    }
+    return null;
+  } catch (err) {
+    console.warn('[NexusLab] Failed to load persisted mission:', err);
+    return null;
+  }
+}
+
+function persistMission(mission: PersistedMission | null): void {
+  try {
+    if (!mission) {
+      localStorage.removeItem(MISSIONS_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(MISSIONS_STORAGE_KEY, JSON.stringify(sanitizeMissionForStorage(mission)));
+  } catch (err) {
+    console.warn('[NexusLab] Failed to persist mission:', err);
+  }
+}
+
+function stripJsonBlocks(text: string): string {
+  return (text || '').replace(/```json\s*([\s\S]*?)```/g, '').trim();
+}
+
+/**
+ * Catalog-based mission cost estimate.
+ */
+function calculateEstimatedCost(
+  personas: Persona[],
+  rawModelsCatalog: RawOpenRouterModel[],
+  maxIterations: number,
+  isFreePreset: boolean
+): number {
+  if (isFreePreset) return 0;
+  const INPUT_TOKENS = 2000;
+  const OUTPUT_TOKENS = 800;
+  const parse = (v: any) => parseFloat(String(v || '0'));
+  let costPerIteration = 0;
+  for (const p of personas) {
+    const m = rawModelsCatalog.find((r) => r.id === p.model);
+    if (!m?.pricing) continue;
+    costPerIteration += INPUT_TOKENS * parse(m.pricing.prompt) + OUTPUT_TOKENS * parse(m.pricing.completion);
+  }
+  return costPerIteration * maxIterations;
+}
+
 export const NexusLabView: React.FC<NexusLabViewProps> = ({
   personas,
+  synthesizer,
   catalog,
   onCompleteRound,
   activeSessionId,
@@ -57,31 +142,44 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [currentIteration, setCurrentIteration] = useState(0);
   const [rounds, setRounds] = useState<CouncilRound[]>([]);
   const [consensusMetrics, setConsensusMetrics] = useState<ConsensusMetric[]>([]);
+  const [missionStatus, setMissionStatus] = useState<PersistedMission['status']>('idle');
   const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
   const [showCostApprovalModal, setShowCostApprovalModal] = useState(false);
   const [estimatedMissionCost, setEstimatedMissionCost] = useState(0);
+  const [showDossier, setShowDossier] = useState(false);
+  const [isExportOpen, setIsExportOpen] = useState(false);
 
   const pauseRequestedRef = useRef(false);
+
+  // Restore the last persisted mission on mount.
+  useEffect(() => {
+    const persisted = loadPersistedMission();
+    if (persisted) {
+      setMissionGoal(persisted.goal);
+      setMaxIterations(persisted.maxIterations);
+      setActivePreset(persisted.presetId === 'deep_council' ? 'deep_council' : 'fast_and_free');
+      setCurrentIteration(persisted.currentIteration);
+      setRounds(persisted.rounds);
+      setConsensusMetrics(persisted.consensusMetrics);
+      setMissionStatus(persisted.status);
+      setEstimatedMissionCost(persisted.estimatedCost);
+    }
+  }, []);
 
   const addLog = (msg: string) => {
     setTerminalLogs((prev) => [...prev.slice(-30), `[${new Date().toLocaleTimeString()}] ${msg}`]);
   };
 
-  // Calculate estimated cost
-  const calculateEstimatedCost = (): number => {
+  const getEstimatedCost = (): number => {
     const isFree = activePreset === 'fast_and_free';
-    if (isFree) return 0.00;
-    // Estimated ~4000 tokens per model per iteration for 3 models + 1 chair synthesis
-    const tokenEstPerIteration = 4 * 4000;
-    const costPer1k = 0.004; // ~$0.004 per 1k frontier tokens
-    const totalEst = (tokenEstPerIteration / 1000) * costPer1k * maxIterations;
-    return parseFloat(totalEst.toFixed(4));
+    const activePersonas = personas.filter((p) => p.enabled !== false);
+    return calculateEstimatedCost(activePersonas, catalog, maxIterations, isFree);
   };
 
   const handlePreLaunchCheck = () => {
     if (!missionGoal.trim()) return;
 
-    const estCost = calculateEstimatedCost();
+    const estCost = getEstimatedCost();
     setEstimatedMissionCost(estCost);
 
     if (estCost > costCeiling.requireApprovalAboveDollars && costCeiling.requireApprovalAboveDollars > 0) {
@@ -95,15 +193,14 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setShowCostApprovalModal(false);
     setIsRunning(true);
     pauseRequestedRef.current = false;
+    setMissionStatus('running');
     addLog(`🚀 Initializing Nexus Lab Mission with ${maxIterations} autonomous cycles...`);
 
-    const policy = policyForPreset(activePreset);
-    const activePersonas = routeCouncilModels(
-      personas.filter((p) => p.enabled !== false),
-      policy,
-      catalog,
-      missionGoal
-    );
+    const policy: ExecutionPolicy = policyForPreset(activePreset);
+    const activePersonas = personas.filter((p) => p.enabled !== false);
+
+    let accumulatedRounds: CouncilRound[] = [...rounds];
+    let accumulatedMetrics: ConsensusMetric[] = [...consensusMetrics];
 
     let iter = currentIteration;
     while (iter < maxIterations && !pauseRequestedRef.current) {
@@ -117,29 +214,33 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       const newRound: CouncilRound = {
         id: `nexus_round_${Date.now()}_${iter}`,
         userQuery: cycleQuery,
-        createdAt: Date.now(),
+        timestamp: Date.now(),
         mode: 'nexus_lab',
         deliberation: { stage1: {}, stage2: {} },
+        synthesis: { content: '', status: 'idle' },
       };
 
-      // Stage 1: Proposals
+      // Stage 1: Proposals (via policy-compliant fallback streaming)
       const s1Promises = activePersonas.map(async (p) => {
         addLog(`• Model [${p.name} - ${p.model.split('/').pop()}] analyzing objective...`);
         try {
-          const res = await streamOpenRouter({
-            model: p.model,
+          const res = await streamPersonaWithFallback({
+            persona: p,
             messages: [
               { role: 'system', content: p.systemPrompt },
               { role: 'user', content: cycleQuery },
             ],
-            budget: policy.budget,
-            maxTokens: policy.maxOutputTokens,
+            policy,
+            rawModels: catalog,
+            sessionId: activeSessionId ?? undefined,
           });
           newRound.deliberation.stage1[p.id] = {
             personaId: p.id,
             model: p.model,
+            actualModel: res.actualModel,
             content: res.content,
             status: 'completed',
+            finishReason: res.finishReason,
           };
         } catch (e: any) {
           newRound.deliberation.stage1[p.id] = {
@@ -147,6 +248,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
             model: p.model,
             content: `[Error: ${e.message}]`,
             status: 'error',
+            error: e.message,
           };
         }
       });
@@ -160,59 +262,124 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         .join('\n\n');
 
       try {
-        const synthRes = await streamOpenRouter({
-          model: chair.model,
+        const chairPersona: Persona = {
+          ...(chair || synthesizer),
+          id: chair?.id || 'synthesizer',
+          name: chair?.name || synthesizer.name || 'Presiding Nexus Chair',
+          role: chair?.role || synthesizer.role || 'Chair',
+        };
+
+        const synthRes = await streamPersonaWithFallback({
+          persona: chairPersona,
           messages: [
-            { role: 'system', content: 'You are the Presiding Nexus Chair. Synthesize decisive consensus, list immutable invariants, and calculate convergence alignment.' },
+            { role: 'system', content: 'You are the Presiding Nexus Chair. Synthesize decisive consensus, list immutable invariants, and calculate convergence alignment. After your synthesis append exactly one fenced JSON block with keys: agreementScore (integer 0-100), keyConsensusPoints (array), keyDisagreements (array), panelistAlignment (object of persona id -> integer 0-100).' },
             { role: 'user', content: `Synthesize Cycle ${iter} findings:\n\n${s1Text}` },
           ],
-          budget: policy.budget,
-          maxTokens: policy.maxOutputTokens,
+          policy,
+          rawModels: catalog,
+          sessionId: activeSessionId ?? undefined,
         });
 
-        const agreementScore = Math.min(98, 70 + iter * 9);
-        const metric: ConsensusMetric = {
-          agreementScore,
-          iterationDelta: iter > 1 ? 9 : 0,
-          keyConsensusPoints: [
-            'Zero-trust cryptographic validation on internal endpoints',
-            'Immutable state snapshots committed to distributed consensus',
-            'Sub-millisecond memory barrier latency target',
-          ],
-          keyDisagreements: iter < maxIterations ? ['Tradeoff between optimistic lock throughput and rollback overhead'] : [],
-          panelistAlignment: Object.fromEntries(activePersonas.map((p, idx) => [p.id, Math.min(99, 75 + iter * 7 + idx * 2)])),
+        // Real consensus parser from the Chair output.
+        let synthesis = synthRes.content;
+        const jsonMatch = synthesis.match(/```json\s*([\s\S]*?)```/);
+        let consensusMetric: ConsensusMetric = {
+          agreementScore: 50,
+          keyConsensusPoints: [] as string[],
+          keyDisagreements: [] as string[],
+          panelistAlignment: {} as Record<string, number>,
+        };
+        if (jsonMatch) {
+          try {
+            const parsed = JSON.parse(jsonMatch[1]);
+            if (typeof parsed.agreementScore === 'number') {
+              consensusMetric = parsed as ConsensusMetric;
+              synthesis = synthesis.replace(jsonMatch[0], '').trim();
+            }
+          } catch {
+            // ignore parse failure
+          }
+        }
+
+        consensusMetric = {
+          ...consensusMetric,
+          iterationDelta: iter > 1 && consensusMetrics.length > 0 ? consensusMetric.agreementScore - (consensusMetrics[consensusMetrics.length - 1]?.agreementScore || consensusMetric.agreementScore) : undefined,
         };
 
         newRound.deliberation.stage3 = {
-          model: chair.model,
-          chairPersonaId: chair.id,
-          content: synthRes.content,
-          consensusMetric: metric,
+          model: synthRes.actualModel || chair.model,
+          chairPersonaId: chair?.id,
+          content: synthesis,
+          consensusMetric,
           status: 'completed',
+          finishReason: synthRes.finishReason,
+        };
+        newRound.synthesis = {
+          model: synthRes.actualModel || chair.model,
+          chairPersonaId: chair?.id,
+          content: synthesis,
+          consensusMetric,
+          status: 'completed',
+          finishReason: synthRes.finishReason,
         };
 
-        setConsensusMetrics((prev) => [...prev, metric]);
-        addLog(`✨ Cycle ${iter} Consensus reached with ${agreementScore}% alignment score.`);
+        accumulatedMetrics = [...accumulatedMetrics, consensusMetric];
+        setConsensusMetrics(accumulatedMetrics);
+        addLog(`✨ Cycle ${iter} Consensus reached with ${consensusMetric.agreementScore}% alignment score.`);
       } catch (err: any) {
         addLog(`❌ Chair synthesis error: ${err.message}`);
       }
 
-      setRounds((prev) => [...prev, newRound]);
+      accumulatedRounds = [...accumulatedRounds, newRound];
+      setRounds(accumulatedRounds);
       if (activeSessionId) {
         onCompleteRound(activeSessionId, newRound);
       }
+
+      // Persist mission progress (truncated for storage).
+      persistMission({
+        id: `nexus_${Date.now()}`,
+        goal: missionGoal,
+        presetId: activePreset,
+        maxIterations,
+        currentIteration: iter,
+        status: 'running',
+        rounds: accumulatedRounds,
+        consensusMetrics: accumulatedMetrics,
+        estimatedCost: getEstimatedCost(),
+        updatedAt: Date.now(),
+      });
 
       // Short delay between iterations
       await new Promise((r) => setTimeout(r, 1200));
     }
 
+    const finalMetrics = accumulatedMetrics;
+    const lastScore = finalMetrics.length > 0 ? finalMetrics[finalMetrics.length - 1].agreementScore : 50;
+    const finalStatus: PersistedMission['status'] = lastScore >= 85 ? 'converged' : 'max_reached';
+
     setIsRunning(false);
-    addLog(`🏁 Nexus Lab Mission finalized.`);
+    setMissionStatus(finalStatus);
+    addLog(`🏁 Nexus Lab Mission finalized (${lastScore >= 85 ? 'CONVERGED' : 'MAX ITERATIONS REACHED'}).`);
+
+    persistMission({
+      id: `nexus_${Date.now()}`,
+      goal: missionGoal,
+      presetId: activePreset,
+      maxIterations,
+      currentIteration: iter,
+      status: finalStatus,
+      rounds: accumulatedRounds,
+      consensusMetrics: finalMetrics,
+      estimatedCost: getEstimatedCost(),
+      updatedAt: Date.now(),
+    });
   };
 
   const handlePause = () => {
     pauseRequestedRef.current = true;
     setIsRunning(false);
+    setMissionStatus('paused');
     addLog(`⏸️ Nexus Lab Mission paused.`);
   };
 
@@ -223,7 +390,79 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setRounds([]);
     setConsensusMetrics([]);
     setTerminalLogs([]);
+    setMissionStatus('idle');
+    setShowDossier(false);
+    persistMission(null);
     addLog(`🔄 Nexus Lab reset to standby.`);
+  };
+
+  const canExport = missionStatus === 'converged' || missionStatus === 'max_reached';
+
+  const buildDossierMarkdown = (): string => {
+    const lines: string[] = [];
+    lines.push(`# Council Mission Dossier`);
+    lines.push('');
+    lines.push(`**Mission Goal:** ${missionGoal}`);
+    lines.push(`**Preset:** ${activePreset === 'fast_and_free' ? 'Fast & Free' : 'Deep Frontier'}`);
+    lines.push(`**Iterations Run:** ${currentIteration}/${maxIterations}`);
+    lines.push(`**Status:** ${missionStatus === 'converged' ? 'Converged' : 'Max Iterations Reached'}`);
+    lines.push('');
+
+    rounds.forEach((r, idx) => {
+      lines.push(`## Cycle ${idx + 1}`);
+      lines.push('');
+      const synthesis = r.synthesis || r.deliberation?.stage3;
+      if (synthesis?.content) {
+        lines.push(stripJsonBlocks(synthesis.content));
+        lines.push('');
+      }
+      const metric = synthesis?.consensusMetric;
+      if (metric) {
+        lines.push(`**Agreement Score:** ${metric.agreementScore}%`);
+        if (metric.keyConsensusPoints.length > 0) {
+          lines.push('**Consensus Points:**');
+          metric.keyConsensusPoints.forEach((pt) => lines.push(`- ${pt}`));
+        }
+        if (metric.keyDisagreements.length > 0) {
+          lines.push('**Key Disagreements:**');
+          metric.keyDisagreements.forEach((d) => lines.push(`- ${d}`));
+        }
+        lines.push('');
+      }
+    });
+
+    const lastMetric = consensusMetrics[consensusMetrics.length - 1];
+    lines.push(`## Final Convergence Verdict`);
+    lines.push('');
+    if (missionStatus === 'converged') {
+      lines.push(`The mission converged with a final agreement score of ${lastMetric?.agreementScore ?? 'N/A'}%.`);
+    } else {
+      lines.push(`The mission reached the maximum iteration limit with a final agreement score of ${lastMetric?.agreementScore ?? 'N/A'}%. Consider refining the directive or raising the cycle budget.`);
+    }
+    lines.push('');
+
+    return lines.join('\n');
+  };
+
+  const handleExportMarkdown = () => {
+    const md = buildDossierMarkdown();
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `council-mission-${Date.now()}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportPdf = () => {
+    setShowDossier(true);
+    // Give the print-only dossier a moment to render before opening print dialog.
+    setTimeout(() => {
+      window.print();
+    }, 150);
   };
 
   const latestMetric = consensusMetrics[consensusMetrics.length - 1];
@@ -234,7 +473,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       <header className="mb-6 flex flex-wrap items-center justify-between gap-4 p-4 bg-gradient-to-r from-emerald-950/60 via-slate-900 to-indigo-950/60 border border-emerald-500/30 rounded-3xl shadow-2xl backdrop-blur-xl">
         <div className="flex items-center gap-3">
           <div className="p-3 bg-gradient-to-tr from-emerald-500 to-teal-400 rounded-2xl shadow-lg shadow-emerald-500/20 text-slate-950">
-            <Orbit size={24} className="animate-spin-slow" />
+            <Orbit size={24} />
           </div>
           <div>
             <div className="flex items-center gap-2">
@@ -259,10 +498,57 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
           </div>
           <div className="flex items-center gap-1.5 text-xs font-mono px-3 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-300">
             <DollarSign size={13} className="text-emerald-400" />
-            <span>Est: ${calculateEstimatedCost().toFixed(3)}</span>
+            <span>Est: ${getEstimatedCost().toFixed(3)}</span>
           </div>
+          {canExport && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setIsExportOpen(!isExportOpen)}
+                className="inline-flex items-center gap-1.5 text-xs font-mono font-bold px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 border border-emerald-400/60 shadow-lg shadow-emerald-900/30 cursor-pointer"
+              >
+                <FileDown size={13} />
+                <span>Export Dossier</span>
+              </button>
+              {isExportOpen && (
+                <div className="absolute right-0 top-full mt-2 z-50 w-64 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-2 space-y-1">
+                  <button
+                    type="button"
+                    onClick={() => { handleExportMarkdown(); setIsExportOpen(false); }}
+                    className="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-800 text-xs font-semibold text-slate-200 transition-colors cursor-pointer flex items-center gap-2"
+                  >
+                    <FileDown size={14} className="text-emerald-400" />
+                    <span>
+                      Markdown
+                      <span className="block text-[10px] font-mono text-slate-500">council-mission-TIMESTAMP.md</span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { handleExportPdf(); setIsExportOpen(false); }}
+                    className="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-800 text-xs font-semibold text-slate-200 transition-colors cursor-pointer flex items-center gap-2"
+                  >
+                    <Printer size={14} className="text-cyan-400" />
+                    <span>
+                      Print / Save as PDF
+                      <span className="block text-[10px] font-mono text-slate-500">Uses the browser print dialog</span>
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </header>
+
+      {/* Print-only Dossier (invisible on screen) */}
+      {showDossier && (
+        <div className="nexus-dossier-print hidden print:block">
+          <pre className="whitespace-pre-wrap font-mono text-[11px] text-slate-900">
+            {buildDossierMarkdown()}
+          </pre>
+        </div>
+      )}
 
       {/* Main 3-Column Lab Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
@@ -422,7 +708,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                   <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 text-xs">
                     <span className="font-bold text-emerald-400">Cycle {idx + 1} Consensus</span>
                     <span className="text-slate-400 font-mono text-[11px]">
-                      {new Date(r.createdAt).toLocaleTimeString()}
+                      {new Date(r.timestamp || r.createdAt || Date.now()).toLocaleTimeString()}
                     </span>
                   </div>
                   {r.deliberation?.stage3?.content && (
@@ -472,14 +758,14 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               <button
                 type="button"
                 onClick={() => setShowCostApprovalModal(false)}
-                className="px-4 py-2 text-xs text-slate-400 hover:text-slate-200"
+                className="px-4 py-2 text-xs text-slate-400 hover:text-slate-200 cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={startAutonomousExecution}
-                className="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold rounded-xl text-xs shadow-lg"
+                className="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold rounded-xl text-xs shadow-lg cursor-pointer"
               >
                 Approve & Execute
               </button>
@@ -490,3 +776,5 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     </div>
   );
 };
+
+export { calculateEstimatedCost };
