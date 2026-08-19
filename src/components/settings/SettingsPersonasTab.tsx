@@ -5,6 +5,7 @@ import {
   RefreshCw,
   Edit3,
   Trash2,
+  BookOpen,
 } from 'lucide-react';
 import { Persona } from '../../types';
 import {
@@ -13,7 +14,17 @@ import {
   PresetId,
 } from '../../lib/presets';
 import { CouncilPreset } from '../../lib/councilPresets';
+import { ARCHETYPE_LIBRARY, instantiateArchetype } from '../../lib/archetypes';
 import { ModelDetailsCard } from '../ModelDetailsCard';
+
+const MAX_ACTIVE_PERSONAS = 6;
+
+function weightDescription(weight: number): string {
+  if (weight >= 1.6) return 'Dominant voice';
+  if (weight > 1.0) return 'Elevated influence';
+  if (weight === 1.0) return 'Standard (balanced)';
+  return 'Supplementary voice';
+}
 
 interface SettingsPersonasTabProps {
   personas: Persona[];
@@ -33,6 +44,8 @@ interface SettingsPersonasTabProps {
   onApplyPreset: (presetId: PresetId) => void;
   onApplyCouncilPreset: (preset: CouncilPreset) => void;
   onOpenCreateModal: (persona?: Persona | null) => void;
+  enableWeightTuning?: boolean;
+  setEnableWeightTuning?: (val: boolean) => void;
 }
 
 export const SettingsPersonasTab: React.FC<SettingsPersonasTabProps> = ({
@@ -53,7 +66,17 @@ export const SettingsPersonasTab: React.FC<SettingsPersonasTabProps> = ({
   onApplyPreset,
   onApplyCouncilPreset,
   onOpenCreateModal,
+  enableWeightTuning = false,
+  setEnableWeightTuning,
 }) => {
+  const activePersonaCount = personas.filter((p) => p.enabled !== false).length;
+  const atMaxActive = activePersonaCount >= MAX_ACTIVE_PERSONAS;
+
+  const handleAddArchetype = (archetypeId: string) => {
+    if (atMaxActive) return;
+    const newPersona = instantiateArchetype(archetypeId);
+    setPersonas([...personas, newPersona]);
+  };
   const dupInfo = checkDuplicateModels(personas, synthesizer);
   const dupOrgInfo = checkDuplicateOrganizations(personas, synthesizer);
 
@@ -269,6 +292,38 @@ export const SettingsPersonasTab: React.FC<SettingsPersonasTabProps> = ({
                   rawModelsCatalog={rawModelsCatalog}
                 />
               )}
+
+              {/* Synthesis Influence Weight Slider (only when weight tuning is enabled) */}
+              {enableWeightTuning && (
+                <div className="space-y-1.5 pt-1 border-t border-slate-200/60 dark:border-slate-800/60">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 block">
+                      Synthesis Influence
+                    </label>
+                    <span className="text-xs font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                      {(persona.synthesisWeight ?? 1.0).toFixed(1)}x
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={2.0}
+                    step={0.1}
+                    value={persona.synthesisWeight ?? 1.0}
+                    onChange={(e) =>
+                      updatePersona(persona.id, { synthesisWeight: parseFloat(e.target.value) })
+                    }
+                    className="w-full accent-indigo-600 cursor-pointer"
+                  />
+                  <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                    <span>0.5x</span>
+                    <span className="text-indigo-500 dark:text-indigo-400 font-bold">
+                      {weightDescription(persona.synthesisWeight ?? 1.0)}
+                    </span>
+                    <span>2.0x</span>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -318,6 +373,86 @@ export const SettingsPersonasTab: React.FC<SettingsPersonasTabProps> = ({
               rawModelsCatalog={rawModelsCatalog}
             />
           )}
+        </div>
+      </section>
+
+      {/* Synthesis Weight Tuning note + toggle */}
+      {enableWeightTuning && (
+        <section className="space-y-3 p-3 rounded-xl border border-indigo-200/70 dark:border-indigo-800/50 bg-indigo-50/50 dark:bg-indigo-950/30">
+          <h3 className="text-[10px] font-bold text-indigo-600 dark:text-indigo-300 uppercase tracking-wider">
+            Synthesis Weight Tuning
+          </h3>
+          <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+            Weight affects how the Chair synthesizes conclusions. Use 2.0x for literal, precise answers. Use 0.5x to treat a panelist as a secondary perspective.
+          </p>
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-slate-500 dark:text-slate-400">
+              Disable weight tuning to remove sliders.
+            </span>
+            <button
+              type="button"
+              onClick={() => setEnableWeightTuning?.(false)}
+              className="px-2.5 py-1 text-[10px] font-bold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
+            >
+              Disable
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* Archetype Library */}
+      <section className="space-y-3">
+        <div className="flex items-center gap-2">
+          <BookOpen size={14} className="text-cyan-500" />
+          <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+            Archetype Library
+          </h3>
+        </div>
+        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+          Instantly add specialized expert panelists built from proven system prompts.
+        </p>
+
+        {atMaxActive && (
+          <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-800 dark:text-amber-300 text-xs font-semibold">
+            ⚠️ Maximum {MAX_ACTIVE_PERSONAS} active personas.
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-2.5">
+          {ARCHETYPE_LIBRARY.map((arch) => {
+            const alreadyPresent = personas.some((p) => p.archetypeId === arch.id);
+            const disabled = atMaxActive || alreadyPresent;
+            return (
+              <div
+                key={arch.id}
+                className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/40 flex items-center gap-3"
+              >
+                <span className="text-2xl shrink-0" aria-hidden="true">{arch.avatar}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                      {arch.name}
+                    </span>
+                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full uppercase tracking-wider border ${arch.color}`}>
+                      {arch.role}
+                    </span>
+                  </div>
+                  <div className="text-[10px] font-mono text-cyan-600 dark:text-cyan-400 truncate mt-0.5" title={arch.recommendedModel}>
+                    {arch.recommendedModel}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleAddArchetype(arch.id)}
+                  disabled={disabled}
+                  className="shrink-0 px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed bg-cyan-600 hover:bg-cyan-500 text-white"
+                  title={alreadyPresent ? 'This archetype is already on the council' : atMaxActive ? `Maximum ${MAX_ACTIVE_PERSONAS} active personas.` : 'Add to Council'}
+                >
+                  {alreadyPresent ? 'Added' : 'Add to Council'}
+                </button>
+              </div>
+            );
+          })}
         </div>
       </section>
     </div>

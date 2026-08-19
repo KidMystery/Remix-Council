@@ -61,7 +61,24 @@ When the query touches on financial, legal, or medical domains, explicitly integ
 - **Sensitivity to Assumptions**: How volatile or sensitive the verdict is if core assumptions shift.
 - **Disclaimer**: Mandatory notice: "Disclaimer: This synthesis is for informational and analytical guidance only and does not constitute formal professional financial, legal, or medical advice."
 
-Be clear, precise, and context-appropriate.`;
+Be clear, precise, and context-appropriate.
+
+After your synthesis, if this is a multi-persona deliberation, append exactly one fenced JSON block:
+
+\`\`\`json
+{
+  "agreementScore": <integer 0-100>,
+  "keyConsensusPoints": ["...", "..."],
+  "keyDisagreements": ["...", "..."],
+  "panelistAlignment": {
+    "skeptic": <integer 0-100>,
+    "visionary": <integer 0-100>,
+    "pragmatist": <integer 0-100>
+  }
+}
+\`\`\`
+
+This block will be stripped from the displayed output. Do not include it for single-model responses.`;
 
 export const defaultSynthesizer: Persona = {
   id: 'synthesizer',

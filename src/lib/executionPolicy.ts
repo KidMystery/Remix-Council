@@ -1,5 +1,4 @@
 import type { RawOpenRouterModel } from '../types';
-import { isFreeModel } from './modelMapper';
 
 export type BudgetPolicy = 'free' | 'cheap' | 'quality';
 
@@ -33,34 +32,40 @@ export function policyForPreset(presetId: string): ExecutionPolicy {
 
 export function isFreeModelId(
   modelId: string,
-  catalog?: RawOpenRouterModel[]
+  catalog?: any[]
 ): boolean {
   if (!modelId) return false;
 
-  const normalized = modelId.trim().toLowerCase();
+  const n = modelId.trim().toLowerCase();
 
   if (
-    normalized === 'openrouter/free' ||
-    normalized === 'openrouter/auto'
+    n === 'openrouter/free' ||
+    n === 'openrouter/auto'
   ) {
     return false;
   }
 
-  const catalogModel = catalog?.find(
-    (model) => model.id.toLowerCase() === normalized
+  const found = catalog?.find(
+    (m) => m?.id?.toLowerCase() === n
   );
 
-  if (catalogModel) {
-    return isFreeModel(catalogModel);
+  if (found?.pricing) {
+    const parse = (v: any) => parseFloat(String(v || '0'));
+    const EPS = 0.000001;
+    return (
+      parse(found.pricing.request) <= EPS &&
+      parse(found.pricing.prompt) <= EPS &&
+      parse(found.pricing.completion) <= EPS
+    );
   }
 
-  return normalized.endsWith(':free');
+  return n.endsWith(':free');
 }
 
 export function assertPolicyModel(
   modelId: string,
   policy: ExecutionPolicy,
-  catalog?: RawOpenRouterModel[]
+  catalog?: any[]
 ): void {
   if (
     policy.budget === 'free' &&
@@ -71,3 +76,5 @@ export function assertPolicyModel(
     );
   }
 }
+
+export type { RawOpenRouterModel };

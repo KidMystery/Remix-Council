@@ -69,6 +69,12 @@ interface SettingsPanelProps {
   onExportSessions?: () => void;
   onImportSessions?: (file: File) => void;
   sessionsCount?: number;
+  enableChunking?: boolean;
+  setEnableChunking?: (val: boolean) => void;
+  showConsensusVisualizer?: boolean;
+  setShowConsensusVisualizer?: (val: boolean) => void;
+  enableWeightTuning?: boolean;
+  setEnableWeightTuning?: (val: boolean) => void;
 }
 
 export function SettingsPanel({
@@ -126,6 +132,12 @@ export function SettingsPanel({
   onExportSessions,
   onImportSessions,
   sessionsCount,
+  enableChunking = false,
+  setEnableChunking,
+  showConsensusVisualizer = false,
+  setShowConsensusVisualizer,
+  enableWeightTuning = false,
+  setEnableWeightTuning,
 }: SettingsPanelProps) {
   const [activeTab, setActiveTab] = useState<'personas' | 'presets' | 'advanced' | 'theme' | 'notifications' | 'account'>('personas');
   const [usageData, setUsageData] = useState<{ usage: number; limit: number | null } | null>(null);
@@ -248,6 +260,8 @@ export function SettingsPanel({
                 setEditingPersona(p || null);
                 setIsCreateModalOpen(true);
               }}
+              enableWeightTuning={enableWeightTuning}
+              setEnableWeightTuning={setEnableWeightTuning}
             />
           )}
 
@@ -301,6 +315,12 @@ export function SettingsPanel({
               onExportSessions={onExportSessions}
               onImportSessions={onImportSessions}
               sessionsCount={sessionsCount}
+              enableChunking={enableChunking}
+              setEnableChunking={setEnableChunking}
+              showConsensusVisualizer={showConsensusVisualizer}
+              setShowConsensusVisualizer={setShowConsensusVisualizer}
+              enableWeightTuning={enableWeightTuning}
+              setEnableWeightTuning={setEnableWeightTuning}
             />
           )}
 

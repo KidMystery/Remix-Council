@@ -4,6 +4,7 @@ import { CouncilRound, Persona } from '../types';
 import { MessageMarkdown } from './MessageMarkdown';
 import { GroundingSourcesCard } from './GroundingSourcesCard';
 import { ThinkingIndicator } from './ThinkingIndicator';
+import { ConsensusVisualizer } from './ConsensusVisualizer';
 import { LATEST_GEMINI_FLASH } from '../config/modelCatalog';
 
 interface SynthesisCardProps {
@@ -16,6 +17,7 @@ interface SynthesisCardProps {
   onCopy: (id: string, text: string) => void;
   onResynthesize: (roundId: string) => void;
   defaultSynthModel?: string;
+  showConsensusVisualizer?: boolean;
 }
 
 export const SynthesisCard: React.FC<SynthesisCardProps> = ({
@@ -28,6 +30,7 @@ export const SynthesisCard: React.FC<SynthesisCardProps> = ({
   onCopy,
   onResynthesize,
   defaultSynthModel = LATEST_GEMINI_FLASH,
+  showConsensusVisualizer = false,
 }) => {
   if (!round.synthesis?.content && round.synthesis?.status !== 'streaming') {
     return null;
@@ -123,6 +126,9 @@ export const SynthesisCard: React.FC<SynthesisCardProps> = ({
             <MessageMarkdown content={round.synthesis.content} />
           </div>
           <GroundingSourcesCard grounding={round.synthesis.grounding} />
+          {showConsensusVisualizer && round.synthesis.consensusMetric && (
+            <ConsensusVisualizer metric={round.synthesis.consensusMetric} personas={[]} />
+          )}
         </div>
       ) : (
         <ThinkingIndicator

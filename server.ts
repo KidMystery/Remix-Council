@@ -2,20 +2,20 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { z } from 'zod';
-import { initializeApp, getApps } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Works under both ESM (tsx dev) and the CJS production bundle (esbuild).
+const __filename =
+  typeof __dirname !== 'undefined'
+    ? path.join(__dirname, 'server.ts')
+    : fileURLToPath(import.meta.url);
+const serverDirname = path.dirname(__filename);
 
-function resolvePort(portValue?: string | number): number {
-  if (typeof portValue === 'number') return portValue;
-  if (typeof portValue === 'string') {
-    const parsed = parseInt(portValue, 10);
-    if (!isNaN(parsed) && parsed > 0) return parsed;
-  }
-  return 3000;
+export function resolvePort(raw?: string | number): number {
+  const p = typeof raw === 'number' ? raw : parseInt(String(raw || ''), 10);
+  return !isNaN(p) && p > 0 && p <= 65535 ? p : 3000;
 }
+
+const PORT = resolvePort(process.env.PORT);
 
 // Model validation pattern
 const ALLOWED_MODEL_PATTERN =
@@ -36,21 +36,14 @@ const CouncilRequestSchema = z.object({
   stream: z.boolean().optional(),
 });
 
-// In-memory catalog cache
+// In-memory catalog cache (10 minute TTL)
 let cachedCatalog: any[] | null = null;
 let lastCatalogFetchTime = 0;
 const CATALOG_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 export async function startServer(portOverride?: number) {
-  if (!getApps().length) {
-    const serverProjectId =
-      process.env.FIREBASE_PROJECT_ID ||
-      process.env.VITE_FIREBASE_PROJECT_ID;
-    initializeApp(serverProjectId ? { projectId: serverProjectId } : undefined);
-  }
-
   const app = express();
-  const PORT = resolvePort(portOverride ?? process.env.PORT);
+  const activePort = resolvePort(portOverride ?? process.env.PORT);
 
   // 1. Health check route (unauthenticated, vital for Railway deployment readiness)
   app.get('/api/health', (_req, res) => {
@@ -60,56 +53,26 @@ export async function startServer(portOverride?: number) {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-  // 2. Access key & auth gate
+  // 2. Council access key gate (applies to every /api/council route, not /api/health)
   const COUNCIL_ACCESS_KEY = (process.env.COUNCIL_ACCESS_KEY || process.env.COUNCIL_ACCESS_SECRET)?.trim() || '';
 
-  const requireCouncilAuth = async (
+  const requireCouncilAuth = (
     req: express.Request,
     res: express.Response,
     next: express.NextFunction
   ) => {
     if (COUNCIL_ACCESS_KEY) {
-      const clientKey = (
-        req.header('x-council-key') ||
-        req.header('x-council-access-secret') ||
-        req.header('x-council-access-key') ||
-        ''
-      ).trim();
-
+      const clientKey = req.header('x-council-key') || '';
       if (clientKey !== COUNCIL_ACCESS_KEY) {
-        return res.status(401).json({ error: 'Missing or invalid council access key.' });
+        return res.status(401).json({ error: 'Invalid council access key.' });
       }
       return next();
     }
-
-    // Fallback to Firebase ID token verification if key is not configured
-    const authHeader = req.headers['x-firebase-token'];
-    if (!authHeader || typeof authHeader !== 'string') {
-      return res.status(401).json({
-        error: 'Unauthorized: Missing Firebase ID token or Access Key',
-      });
-    }
-
-    try {
-      const decodedToken = await getAuth().verifyIdToken(authHeader);
-      const ownerEmail = process.env.OWNER_EMAIL?.trim();
-      const ownerUid = process.env.OWNER_UID?.trim();
-
-      if (ownerEmail && (!decodedToken.email || decodedToken.email.toLowerCase() !== ownerEmail.toLowerCase())) {
-        return res.status(403).json({ error: 'Forbidden: Email mismatch' });
-      }
-      if (ownerUid && decodedToken.uid !== ownerUid) {
-        return res.status(403).json({ error: 'Forbidden: UID mismatch' });
-      }
-
-      (req as any).user = decodedToken;
-      next();
-    } catch {
-      return res.status(401).json({ error: 'Unauthorized: Invalid Firebase ID token' });
-    }
+    // No key configured — allow (public development mode).
+    return next();
   };
 
-  // 3. Models catalog route with 10-minute cache
+  // 3. Models catalog route with 10-minute in-memory cache + stale fallback
   app.get('/api/council/models', requireCouncilAuth, async (_req, res) => {
     const now = Date.now();
     if (cachedCatalog && now - lastCatalogFetchTime < CATALOG_CACHE_TTL_MS) {
@@ -124,6 +87,7 @@ export async function startServer(portOverride?: number) {
       lastCatalogFetchTime = now;
       return res.json({ data: cachedCatalog, cached: false });
     } catch (err: any) {
+      // Return stale cache on upstream failure with a warning field.
       if (cachedCatalog) {
         return res.json({ data: cachedCatalog, cached: true, warning: 'Stale catalog returned' });
       }
@@ -155,7 +119,7 @@ export async function startServer(portOverride?: number) {
     if (!parseResult.success) {
       return res.status(400).json({
         error: 'Invalid request payload',
-        details: parseResult.error.errors,
+        details: parseResult.error.issues,
       });
     }
 
@@ -165,12 +129,10 @@ export async function startServer(portOverride?: number) {
       return res.status(400).json({ error: `Unsupported model identifier: ${rawModel}` });
     }
 
-    const openrouterKey = process.env.OPENROUTER_API_KEY;
+    const openrouterKey = process.env.OPENROUTER_API_KEY?.trim() || '';
 
     if (budget === 'free' && !openrouterKey) {
-      return res.status(503).json({
-        error: 'Free mode requires an OpenRouter key with access to free models.',
-      });
+      return res.status(503).json({ error: 'Free mode requires an OpenRouter API key.' });
     }
 
     if (!openrouterKey) {
@@ -207,6 +169,15 @@ export async function startServer(portOverride?: number) {
 
       if (!upstreamResp.ok) {
         const errorJson = await upstreamResp.json().catch(() => ({}));
+        // Never fall back to Gemini for a Strict Free request when the provider
+        // rejects the request (401/402/403). Only non-free requests may use
+        // provider fallbacks, and those happen client-side via the policy layer.
+        if (budget === 'free' && [401, 402, 403].includes(upstreamResp.status)) {
+          return res.status(upstreamResp.status).json({
+            error: errorJson.error?.message || `Upstream provider error: HTTP ${upstreamResp.status}`,
+            freeModeBlocked: true,
+          });
+        }
         return res.status(upstreamResp.status).json({
           error: errorJson.error?.message || `Upstream provider error: HTTP ${upstreamResp.status}`,
         });
@@ -242,9 +213,9 @@ export async function startServer(portOverride?: number) {
   });
 
   // Client static assets
-  const clientDist = path.resolve(__dirname, '../dist/client');
+  const clientDist = path.resolve(serverDirname, '.');
   app.use(express.static(clientDist));
-  app.get('*', (_req, res) => {
+  app.use((_req, res) => {
     res.sendFile(path.join(clientDist, 'index.html'), (err) => {
       if (err) res.status(404).send('Not Found');
     });
@@ -256,8 +227,8 @@ export async function startServer(portOverride?: number) {
     res.status(500).json({ error: 'Internal Server Error', message: err.message || String(err) });
   });
 
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Remix-Council] Production server active on port ${PORT}`);
+  const server = app.listen(activePort, '0.0.0.0', () => {
+    console.log(`[Remix-Council] Production server active on port ${activePort}`);
   });
 
   // Graceful Railway shutdown handling
@@ -272,9 +243,9 @@ export async function startServer(portOverride?: number) {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  return { app, server, port: PORT };
+  return { app, server, port: activePort };
 }
 
 if (process.env.NODE_ENV !== 'test') {
-  startServer();
+  startServer(PORT);
 }

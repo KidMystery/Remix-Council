@@ -40,6 +40,12 @@ interface SettingsAdvancedTabProps {
   onExportSessions?: () => void;
   onImportSessions?: (file: File) => void;
   sessionsCount?: number;
+  enableChunking?: boolean;
+  setEnableChunking?: (val: boolean) => void;
+  showConsensusVisualizer?: boolean;
+  setShowConsensusVisualizer?: (val: boolean) => void;
+  enableWeightTuning?: boolean;
+  setEnableWeightTuning?: (val: boolean) => void;
 }
 
 export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
@@ -80,6 +86,12 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
   onExportSessions,
   onImportSessions,
   sessionsCount,
+  enableChunking = false,
+  setEnableChunking,
+  showConsensusVisualizer = false,
+  setShowConsensusVisualizer,
+  enableWeightTuning = false,
+  setEnableWeightTuning,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -495,6 +507,67 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
             </p>
           </div>
         </div>
+      </section>
+
+      {/* Autonomous Deliberation Intelligence Toggles */}
+      <section className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50">
+        <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+          Deliberation Intelligence
+        </h3>
+
+        {/* Auto-chunk large files */}
+        <label className="flex items-start justify-between gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 cursor-pointer hover:border-indigo-400/60 transition-colors">
+          <div className="space-y-1 min-w-0">
+            <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
+              Auto-chunk large files before deliberation
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400 block leading-relaxed">
+              Files over 50,000 characters are automatically summarized in sections before being sent to the council. Preserves all key data. Recommended for CSVs, large PDFs, and full codebases.
+            </span>
+          </div>
+          <input
+            type="checkbox"
+            checked={enableChunking}
+            onChange={(e) => setEnableChunking?.(e.target.checked)}
+            className="mt-1 shrink-0 rounded accent-indigo-600 cursor-pointer"
+          />
+        </label>
+
+        {/* Show Consensus Visualizer */}
+        <label className="flex items-start justify-between gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 cursor-pointer hover:border-indigo-400/60 transition-colors">
+          <div className="space-y-1 min-w-0">
+            <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
+              Show Consensus Visualizer
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400 block leading-relaxed">
+              Displays agreement scores and panelist alignment after each synthesis. Requires the Chair model to support structured output.
+            </span>
+          </div>
+          <input
+            type="checkbox"
+            checked={showConsensusVisualizer}
+            onChange={(e) => setShowConsensusVisualizer?.(e.target.checked)}
+            className="mt-1 shrink-0 rounded accent-indigo-600 cursor-pointer"
+          />
+        </label>
+
+        {/* Enable Synthesis Weight Tuning */}
+        <label className="flex items-start justify-between gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 cursor-pointer hover:border-indigo-400/60 transition-colors">
+          <div className="space-y-1 min-w-0">
+            <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
+              Enable Synthesis Weight Tuning
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400 block leading-relaxed">
+              Adjust how much each panelist's conclusions influence the final synthesis. Available in the Personas tab when enabled.
+            </span>
+          </div>
+          <input
+            type="checkbox"
+            checked={enableWeightTuning}
+            onChange={(e) => setEnableWeightTuning?.(e.target.checked)}
+            className="mt-1 shrink-0 rounded accent-indigo-600 cursor-pointer"
+          />
+        </label>
       </section>
 
       {/* System Prompt Customization for Personas */}
