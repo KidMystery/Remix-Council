@@ -1,4 +1,4 @@
-import type { RawOpenRouterModel } from './presets';
+import type { RawOpenRouterModel } from '../types';
 import { isFreeModel } from './modelMapper';
 
 export type BudgetPolicy = 'free' | 'cheap' | 'quality';

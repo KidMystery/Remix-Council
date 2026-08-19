@@ -1,248 +1,172 @@
-import type { PresetId } from './lib/presets';
-
-export type PersonaId = string;
-
 export type BudgetPolicy = 'free' | 'cheap' | 'quality';
-export type ExecutionDepth = 'quick' | 'full' | 'auto';
-export type WebMode = 'off' | 'auto' | 'always';
-export type ViewMode = 'consensus' | 'full_debate';
 
-export interface GroundingSource {
-  title?: string;
-  url?: string;
+export interface RawOpenRouterModel {
+  id: string;
+  name: string;
+  description?: string;
+  pricing?: {
+    prompt: string | number;
+    completion: string | number;
+  };
+  context_length?: number;
+  architecture?: {
+    modality?: string;
+    tokenizer?: string;
+    instruct_type?: string;
+  };
+  top_provider?: {
+    max_completion_tokens?: number;
+    is_moderated?: boolean;
+  };
+  per_request_limits?: any;
 }
 
-export interface GroundingData {
-  queries?: string[];
-  sources?: GroundingSource[];
-  searchCost?: number;
+export interface PersonaArchetype {
+  id: string;
+  name: string;
+  category: 'security' | 'architecture' | 'strategy' | 'compliance' | 'finance' | 'creative';
+  role: string;
+  systemPrompt: string;
+  recommendedModel: string;
+  iconName: string;
 }
 
-export interface Persona {
-  id: PersonaId;
+export interface CouncilPersona {
+  id: string;
   name: string;
   role: string;
-  avatar: string;
-  model: string;
   systemPrompt: string;
-  color: string;
+  model: string;
   enabled?: boolean;
+  color?: string;
+  icon?: string;
+  archetypeId?: string;
 }
 
-export type StreamStatus = 'idle' | 'streaming' | 'completed' | 'error';
-
-export interface PersonaResponse {
-  personaId: PersonaId;
-  content: string;
-  status: StreamStatus;
-  error?: string;
-  model?: string;
-  actualModel?: string;
-  promptTokens?: number;
-  completionTokens?: number;
-  totalTokens?: number;
-  cost?: number;
-  durationMs?: number;
-  firstTokenMs?: number;
-  retryCount?: number;
-  fallbackChain?: string[];
-  finishReason?: string;
-  truncated?: boolean;
-  grounding?: GroundingData;
-}
-
-export interface DeliberationStage {
-  stage1: Record<PersonaId, PersonaResponse>;
-  stage2: Record<PersonaId, PersonaResponse>;
-}
-
-export type ExecutionMode = 'auto' | 'quick_panel' | 'deep_council';
-export type ResolvedExecutionMode = 'quick_panel' | 'deep_council';
-export type { TaskDomain } from './lib/smartModelSelector';
-
-export type ArchiveEntryStatus = 'included' | 'skipped' | 'binary' | 'ignored' | 'truncated' | 'omitted';
-
-export interface ArchiveManifestEntry {
-  path: string;
-  size: number;
-  type: string;
-  status: ArchiveEntryStatus;
-  reason?: string;
-  extractedChars: number;
-}
-
-export interface AttachedTextFile {
+export interface AttachedFile {
   name: string;
-  type: string;
-  size: number;
   content: string;
-  summary?: string;
-  isArchive?: boolean;
-  archiveManifest?: ArchiveManifestEntry[];
-  isPartial?: boolean;
-  totalEntries?: number;
-  extractedChars?: number;
-  contextCeiling?: number;
-  omittedFiles?: string[];
-  gitHubCommitSha?: string;
-  gitHubRepo?: string;
+  type?: string;
+  size?: number;
 }
 
-export interface RoundRating {
-  score: number; // 1 to 5
-  feedback?: string;
-  tags?: string[];
+export interface CitationAnchor {
+  source: string;
+  quote: string;
+  lineRange?: string;
+}
+
+export interface ConsensusMetric {
+  agreementScore: number; // 0 to 100
+  keyConsensusPoints: string[];
+  keyDisagreements: string[];
+  iterationDelta?: number; // e.g. +15% convergence shift
+  panelistAlignment: Record<string, number>; // personaId -> alignment score (0-100)
+}
+
+export interface ToolExecutionTrace {
+  id: string;
+  toolName: 'web_search' | 'code_sandbox' | 'invariant_checker';
+  input: string;
+  output: string;
+  status: 'running' | 'success' | 'failed';
   timestamp: number;
 }
 
-export interface NotificationPreferences {
-  enableSoundAlerts?: boolean;
-  soundVolume?: number;
-  enableBrowserNotifications?: boolean;
-  notifyOnDeliberationComplete?: boolean;
-  notifyOnError?: boolean;
-  notifyOnCostThreshold?: boolean;
-}
-
-export interface CapabilityFailure {
+export interface Stage1Response {
   personaId: string;
-  personaName: string;
   model: string;
-  stage: 1 | 2 | 3;
-  reason: string;
-  detectedSnippet: string;
+  content: string;
+  status: 'pending' | 'streaming' | 'completed' | 'error';
+  citations?: CitationAnchor[];
+  toolTraces?: ToolExecutionTrace[];
+  cost?: number;
+  tokens?: number;
+  error?: string;
 }
 
-export interface ExecutionPlanSeat {
-  personaId: PersonaId;
-  personaName: string;
-  roleKey: string;
-  modelId: string;
-  fallbackModels: string[];
+export interface Stage2Response {
+  reviewerId: string;
+  model: string;
+  content: string;
+  status: 'pending' | 'streaming' | 'completed' | 'error';
+  citations?: CitationAnchor[];
+  cost?: number;
+  tokens?: number;
+  error?: string;
 }
 
-export interface ExecutionPlan {
-  roundId: string;
-  depth: ResolvedExecutionMode;
-  budget: BudgetPolicy;
-  domain: string;
-  complexity: 'simple' | 'moderate' | 'complex';
-  panelists: ExecutionPlanSeat[];
-  chair: ExecutionPlanSeat;
-  stage1TokenLimit: number;
-  stage2TokenLimit: number;
-  chairTokenLimit: number;
-  maxExpectedCost: number;
-  costCeiling: number;
-  webMode: WebMode;
-  catalogTimestamp: number;
+export interface Stage3Synthesis {
+  model: string;
+  content: string;
+  chairPersonaId?: string;
+  status: 'pending' | 'streaming' | 'completed' | 'error';
+  citations?: CitationAnchor[];
+  consensusMetric?: ConsensusMetric;
+  cost?: number;
+  tokens?: number;
+  error?: string;
+}
+
+export interface CouncilDeliberation {
+  stage1: Record<string, Stage1Response>;
+  stage2: Record<string, Stage2Response>;
+  stage3?: Stage3Synthesis;
 }
 
 export interface CouncilRound {
   id: string;
   userQuery: string;
-  timestamp: number;
-  executionMode?: ExecutionMode;
-  resolvedMode?: ResolvedExecutionMode;
-  budgetPolicy?: BudgetPolicy;
-  isIsolatedRound?: boolean;
-  executionPlan?: ExecutionPlan;
-  accumulatedUsage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-    cost: number;
-  };
-  deliberation: DeliberationStage;
-  synthesis: {
-    content: string;
-    status: StreamStatus;
-    error?: string;
-    model?: string;
-    actualModel?: string;
-    promptTokens?: number;
-    completionTokens?: number;
-    totalTokens?: number;
-    cost?: number;
-    durationMs?: number;
-    firstTokenMs?: number;
-    retryCount?: number;
-    fallbackChain?: string[];
-    finishReason?: string;
-    truncated?: boolean;
-    grounding?: GroundingData;
-  };
-  attachedImages?: { name: string; url: string; type: string }[];
-  attachedTextFiles?: AttachedTextFile[];
-  capabilityFailure?: CapabilityFailure;
-  auditLogId?: string;
-  archivistSummary?: string;
-  rating?: RoundRating;
-  proComparisonData?: {
-    auditLogId: string;
-    proModelId: string;
-    proContent: string;
-    councilLatencyMs: number;
-    proLatencyMs: number;
-    councilCost: number;
-    proCost: number;
-    answerAIsCouncil: boolean;
-  };
+  attachedTextFiles?: AttachedFile[];
+  deliberation: CouncilDeliberation;
+  mode?: 'full' | 'quick_panel' | 'autonomous' | 'nexus_lab';
+  cost?: number;
+  durationMs?: number;
+  createdAt: number;
+  isQuickPanel?: boolean;
+  parentRoundId?: string;
+  branchName?: string;
 }
 
-export interface Session {
+export interface CouncilSession {
   id: string;
   title: string;
   rounds: CouncilRound[];
+  personas: CouncilPersona[];
+  activePresetId?: string;
+  contextSummary?: string;
   createdAt: number;
   updatedAt: number;
-  userId?: string;
-  presetId?: PresetId;
-  budgetPolicy?: BudgetPolicy;
-  personas?: Persona[];
-  synthesizer?: Persona;
-  customModels?: Record<string, string>;
-  synthesizerModel?: string;
-  attachedFiles?: AttachedTextFile[];
 }
 
-export interface Settings {
-  apiKey: string;
-  defaultModels: Record<PersonaId, string>;
-  temperature: number;
-  maxTokens: number;
-  executionMode?: ExecutionMode;
-  budgetPolicy?: BudgetPolicy;
-  webMode?: WebMode;
-  quickPanelMaxTokens?: number;
-  synthesisMaxTokens?: number;
-  panelTimeoutSeconds?: number;
-  disableFallback?: boolean;
-  disableLoadingOverlay?: boolean;
-  maxRoundCostCeiling?: number;
-  stopAfterStage1?: boolean;
-  useSingleModelForSimple?: boolean;
-  archivistRecentRounds?: number;
-  proCompareModelId?: string;
-  enableProCompare?: boolean;
-  notificationPreferences?: NotificationPreferences;
+export interface CostCeilingConfig {
+  maxSpendPerMissionDollars: number;
+  requireApprovalAboveDollars: number;
+  strictHardStop: boolean;
 }
 
-export type ToastType = 'info' | 'success' | 'warning' | 'error';
-
-export interface ToastAction {
-  label: string;
-  onClick: () => void;
-  variant?: 'primary' | 'secondary' | 'danger';
-}
-
-export interface ToastMessage {
+export interface AutonomousMission {
   id: string;
-  type: ToastType;
-  title?: string;
-  message: string;
-  action?: ToastAction;
-  duration?: number;
-  details?: string;
+  goal: string;
+  presetId: string;
+  policyBudget: BudgetPolicy;
+  rotatingChair: boolean;
+  maxIterations: number;
+  currentIteration: number;
+  status: 'idle' | 'running' | 'paused' | 'converged' | 'max_reached' | 'awaiting_approval' | 'error';
+  rounds: CouncilRound[];
+  chairHistory: { roundIndex: number; personaId: string; personaName: string }[];
+  consensusHistory: ConsensusMetric[];
+  estimatedCost: number;
+  actualCost: number;
+  costCeiling: CostCeilingConfig;
 }
 
+export interface FallbackAuditLog {
+  id: string;
+  originalModel: string;
+  attemptedModel: string;
+  error: string;
+  timestamp: number;
+  sessionId?: string;
+}

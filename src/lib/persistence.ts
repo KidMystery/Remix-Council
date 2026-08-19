@@ -1,841 +1,178 @@
-import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
-import {
-  getFirestore,
-  initializeFirestore,
-  doc,
-  setDoc,
-  getDoc,
-  getDocFromServer,
-  collection,
-  query,
-  getDocs,
-  deleteDoc,
-  onSnapshot,
-  Firestore,
-} from 'firebase/firestore';
+import { initializeApp, getApps, type FirebaseApp } from 'firebase/app';
 import {
   getAuth,
   signInWithPopup,
   signInWithRedirect,
   getRedirectResult,
   GoogleAuthProvider,
-  User,
-  Auth,
-  onAuthStateChanged,
-  signOut,
-  setPersistence,
-  browserLocalPersistence,
+  signOut as fbSignOut,
+  type Auth,
+  type User,
 } from 'firebase/auth';
-import config from '../../firebase-applet-config.json';
-import { Session, Settings, Persona, AttachedTextFile, CouncilRound } from '../types';
+import {
+  getFirestore,
+  collection,
+  doc,
+  setDoc,
+  getDocs,
+  getDoc,
+  deleteDoc,
+  query,
+  where,
+  orderBy,
+  limit,
+  type Firestore,
+} from 'firebase/firestore';
+import type { CouncilSession, AutonomousMission, FallbackAuditLog } from '../types';
 
-export enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
+const env = (import.meta as any).env || {};
 
-export interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
-    tenantId?: string | null;
-    providerInfo?: {
-      providerId?: string | null;
-      email?: string | null;
-    }[];
-  };
-}
-
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const currentAuth = getFirebaseAuth();
-  const currentUser = currentAuth?.currentUser;
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: currentUser?.uid,
-      email: currentUser?.email,
-      emailVerified: currentUser?.emailVerified,
-      isAnonymous: currentUser?.isAnonymous,
-      tenantId: currentUser?.tenantId,
-      providerInfo: currentUser?.providerData?.map(provider => ({
-        providerId: provider.providerId,
-        email: provider.email,
-      })) || []
-    },
-    operationType,
-    path
-  };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
-
-/**
- * Deep sanitization function that recursively strips undefined keys and converts non-serializables
- * so Firestore `setDoc` will NEVER fail with "Unsupported field value: undefined".
- */
-export function sanitizeForFirestore<T>(data: T): T {
-  if (data === undefined || data === null) {
-    return null as unknown as T;
-  }
-  if (typeof data !== 'object') {
-    return data;
-  }
-  if (Array.isArray(data)) {
-    return data
-      .filter((item) => item !== undefined)
-      .map((item) => sanitizeForFirestore(item)) as unknown as T;
-  }
-  const clean: Record<string, any> = {};
-  for (const [key, value] of Object.entries(data as Record<string, any>)) {
-    if (value !== undefined) {
-      clean[key] = sanitizeForFirestore(value);
-    }
-  }
-  return clean as T;
-}
-
-export interface PersistedSession {
-  id: string;
-  userId: string;
-  title: string;
-  rounds: any[];
-  settings?: any;
-  createdAt: number;
-  updatedAt: number;
-  shareToken?: string;
-  presetId?: any;
-  personas?: Persona[];
-  synthesizer?: Persona;
-  customModels?: Record<string, string>;
-  synthesizerModel?: string;
-  attachedFiles?: AttachedTextFile[];
-}
-
-export interface UserCloudData {
-  settings?: Settings;
-  personas?: Persona[];
-  synthesizer?: Persona;
-  updatedAt?: number;
-}
-
-export interface AuthErrorInfo {
-  code: string;
-  message: string;
-  hostname: string;
-  origin: string;
-  authDomain: string;
-  projectId: string;
-  durationMs: number;
-  isQuickDismissal: boolean;
-}
-
-export class FirebaseAuthError extends Error {
-  authInfo: AuthErrorInfo;
-
-  constructor(message: string, authInfo: AuthErrorInfo) {
-    super(message);
-    this.name = 'FirebaseAuthError';
-    this.authInfo = authInfo;
-  }
-}
-
-function resolveFirebaseConfig() {
-  const env = import.meta.env;
-
-  const projectId = env.VITE_FIREBASE_PROJECT_ID || config.projectId;
-  const firestoreDatabaseId = env.VITE_FIREBASE_DATABASE_ID || config.firestoreDatabaseId;
-
-  return {
-    apiKey: env.VITE_FIREBASE_API_KEY || config.apiKey,
-    authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || config.authDomain,
-    projectId,
-    storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || config.storageBucket,
-    messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || config.messagingSenderId,
-    appId: env.VITE_FIREBASE_APP_ID || config.appId,
-    firestoreDatabaseId,
-  };
-}
-
-const firebaseConfig = resolveFirebaseConfig();
-
-export function getFirebaseActiveConfig() {
-  return {
-    projectId: firebaseConfig.projectId,
-    authDomain: firebaseConfig.authDomain,
-    storageBucket: firebaseConfig.storageBucket,
-    firestoreDatabaseId: firebaseConfig.firestoreDatabaseId || '(default)',
-    hostname: typeof window !== 'undefined' ? window.location.hostname : 'unknown',
-    origin: typeof window !== 'undefined' ? window.location.origin : 'unknown',
-  };
-}
+const firebaseConfig = {
+  apiKey: env.VITE_FIREBASE_API_KEY || '',
+  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || '',
+  projectId: env.VITE_FIREBASE_PROJECT_ID || '',
+  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || '',
+  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
+  appId: env.VITE_FIREBASE_APP_ID || '',
+};
 
 let app: FirebaseApp | null = null;
-let db: Firestore | null = null;
 let auth: Auth | null = null;
-let persistenceInitialized = false;
-let isLoginInFlight = false;
+let db: Firestore | null = null;
 
-const authListeners = new Set<(user: User | null) => void>();
-let cachedCurrentUser: User | null = null;
-let isAuthReady = false;
-let authStartupBound = false;
-
-export function isOfflineOrUnavailableError(error: unknown): boolean {
-  if (!error) return false;
-  const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-  const code = (error as any)?.code;
-  return (
-    code === 'unavailable' ||
-    code === 'failed-precondition' ||
-    code === 'resource-exhausted' ||
-    msg.includes('offline') ||
-    msg.includes('unavailable') ||
-    msg.includes('client is offline') ||
-    msg.includes('network error') ||
-    msg.includes('closing') ||
-    msg.includes('hidden') ||
-    msg.includes('database is closing') ||
-    msg.includes('database is closing/hidden') ||
-    msg.includes('the database connection is closing') ||
-    msg.includes('indexeddb') ||
-    msg.includes('aborterror') ||
-    msg.includes('operation was aborted')
-  );
+if (firebaseConfig.apiKey && firebaseConfig.projectId) {
+  app = !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];
+  auth = getAuth(app);
+  db = getFirestore(app);
 }
 
-export function bindAuthStartupListener(): void {
-  if (authStartupBound || !auth) return;
-  authStartupBound = true;
-
-  console.log('[FirebaseAuth] Binding Firebase Auth state listener to app startup...');
-  onAuthStateChanged(
-    auth,
-    (user) => {
-      cachedCurrentUser = user;
-      isAuthReady = true;
-      console.log(
-        '[FirebaseAuth] Auth state resolved on startup listener:',
-        user ? `User authenticated: ${user.email || user.uid}` : 'User unauthenticated (guest mode)'
-      );
-      authListeners.forEach((cb) => {
-        try {
-          cb(user);
-        } catch (err) {
-          console.error('[FirebaseAuth] Error executing auth change callback:', err);
-        }
-      });
-    },
-    (error) => {
-      console.error('[FirebaseAuth] Error in startup Firebase Auth state listener:', error);
-    }
-  );
-
-  // Check for pending redirect sign-in result seamlessly during startup
-  handleAuthRedirectResult().catch((err) => {
-    console.warn('[FirebaseAuth] Automatic redirect result check on startup encountered:', err);
-  });
-}
-
-export function initPersistence(): boolean {
-  if (getApps().length === 0) {
-    try {
-      if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
-        console.warn("Firebase configuration incomplete. Persistence will be localStorage-only.");
-        persistenceInitialized = false;
-        return false;
-      }
-      app = initializeApp(firebaseConfig);
-      try {
-        db = initializeFirestore(app, {
-          ignoreUndefinedProperties: true,
-        }, firebaseConfig.firestoreDatabaseId || undefined);
-      } catch {
-        db = firebaseConfig.firestoreDatabaseId ? getFirestore(app, firebaseConfig.firestoreDatabaseId) : getFirestore(app);
-      }
-
-      auth = getAuth(app);
-      try {
-        setPersistence(auth, browserLocalPersistence).catch(() => {});
-      } catch {}
-
-      bindAuthStartupListener();
-
-      persistenceInitialized = true;
-      console.log('Firebase persistence initialized successfully.');
-      console.log('Firebase active project:', firebaseConfig.projectId, 'Database:', firebaseConfig.firestoreDatabaseId || '(default)');
-
-      return true;
-    } catch (e) {
-      console.error("Failed to initialize Firebase:", e);
-      persistenceInitialized = false;
-      return false;
-    }
-  }
-
-  try {
-    app = getApps()[0];
-    if (!db) {
-      try {
-        db = initializeFirestore(app, {
-          ignoreUndefinedProperties: true,
-        }, firebaseConfig.firestoreDatabaseId || undefined);
-      } catch {
-        db = firebaseConfig.firestoreDatabaseId ? getFirestore(app, firebaseConfig.firestoreDatabaseId) : getFirestore(app);
-      }
-    }
-    if (!auth) {
-      auth = getAuth(app);
-      try {
-        setPersistence(auth, browserLocalPersistence).catch(() => {});
-      } catch {}
-    }
-    bindAuthStartupListener();
-    persistenceInitialized = true;
-    return true;
-  } catch (e) {
-    console.error("Failed to retrieve Firebase app references:", e);
-    persistenceInitialized = false;
-    return false;
-  }
-}
-
-export function isPersistenceEnabled(): boolean {
-  if (!persistenceInitialized) {
-    initPersistence();
-  }
-  return persistenceInitialized;
-}
-
-export function getFirebaseAuth(): Auth | null {
-  if (!auth) initPersistence();
-  return auth;
+// Authentication
+export function initPersistence() {
+  return { app, auth, db };
 }
 
 export async function getFirebaseIdToken(): Promise<string | null> {
-  const currentAuth = getFirebaseAuth();
-  if (currentAuth && currentAuth.currentUser) {
-    try {
-      return await currentAuth.currentUser.getIdToken();
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-export function getFirebaseDb(): Firestore | null {
-  if (!db) initPersistence();
-  return db;
-}
-
-export function migrateLocalSession(raw: any): Session {
-  if (!raw || typeof raw !== 'object') {
-    return {
-      id: `session_${Date.now()}`,
-      title: 'New Session',
-      rounds: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-  }
-
-  const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id : `session_${Date.now()}`;
-  const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title : 'Untitled Deliberation';
-  const createdAt = typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now();
-  const updatedAt = typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : createdAt;
-  const rounds: CouncilRound[] = Array.isArray(raw.rounds) ? raw.rounds : [];
-
-  return {
-    id,
-    title,
-    rounds,
-    createdAt,
-    updatedAt,
-    userId: typeof raw.userId === 'string' ? raw.userId : undefined,
-    presetId: raw.presetId,
-    budgetPolicy: raw.budgetPolicy,
-    personas: Array.isArray(raw.personas) ? raw.personas : undefined,
-    synthesizer: raw.synthesizer,
-    customModels: raw.customModels && typeof raw.customModels === 'object' ? raw.customModels : undefined,
-    synthesizerModel: typeof raw.synthesizerModel === 'string' ? raw.synthesizerModel : undefined,
-    attachedFiles: Array.isArray(raw.attachedFiles) ? raw.attachedFiles : undefined,
-  };
-}
-
-const pendingSyncs = new Map<string, { session: PersistedSession, timeout: any, resolve: (val: string) => void, reject: (err: any) => void }>();
-
-export async function syncCouncilSession(session: PersistedSession): Promise<string> {
-  return new Promise((resolve, reject) => {
-    // If a sync is already scheduled, update the payload but do not delay the timer
-    if (pendingSyncs.has(session.id)) {
-      const existing = pendingSyncs.get(session.id)!;
-      existing.session = session; // Update to the latest session data
-      existing.resolve = resolve;
-      existing.reject = reject;
-      return;
-    }
-    
-    // Otherwise, schedule a new sync
-    const timeout = setTimeout(async () => {
-      const pending = pendingSyncs.get(session.id);
-      pendingSyncs.delete(session.id);
-      
-      if (!pending) {
-        resolve(session.shareToken || session.id);
-        return;
-      }
-      
-      try {
-        const result = await _syncCouncilSessionImmediate(pending.session);
-        pending.resolve(result);
-      } catch (err) {
-        pending.reject(err);
-      }
-    }, 2500); // 2.5 second throttle to prevent Firestore quota exhaustion
-
-    pendingSyncs.set(session.id, { session, timeout, resolve, reject });
-  });
-}
-
-async function _syncCouncilSessionImmediate(session: PersistedSession): Promise<string> {
-  if (!db) initPersistence();
-  const sanitized = sanitizeForFirestore(session);
-
+  if (!auth?.currentUser) return null;
   try {
-    localStorage.setItem('council_local_backup_' + session.id, JSON.stringify(sanitized));
-  } catch (e) {
-    console.warn('Failed to store local backup session:', e);
-  }
-
-  if (!db || !session.userId) {
-    return session.shareToken || session.id;
-  }
-
-  try {
-    await setDoc(doc(db, 'users', session.userId, 'sessions', session.id), sanitized, { merge: true });
-    return session.shareToken || session.id;
-  } catch (e: any) {
-    if (isOfflineOrUnavailableError(e)) {
-      console.warn('Firestore offline: session stored in local backup.', session.id);
-      return session.shareToken || session.id;
-    }
-    console.warn('Firestore setDoc failed, retained in local storage:', e);
-    return session.shareToken || session.id;
-  }
-}
-
-export async function loadUserSessions(userId: string): Promise<PersistedSession[]> {
-  if (!db) initPersistence();
-  if (!db || !userId) return [];
-
-  try {
-    const sessionsRef = collection(db, 'users', userId, 'sessions');
-    const q = query(sessionsRef);
-    const querySnapshot = await getDocs(q);
-    const sessions: PersistedSession[] = [];
-    querySnapshot.forEach((doc) => {
-      const data = doc.data() as PersistedSession;
-      if (data && data.id) {
-        sessions.push(data);
-      }
-    });
-    // Sort by updatedAt descending
-    sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    return sessions;
-  } catch (e: any) {
-    if (isOfflineOrUnavailableError(e)) {
-      console.warn('Firestore offline: using local sessions cache.');
-      return [];
-    }
-    console.warn('Could not load user sessions from Firestore:', e);
-    return [];
-  }
-}
-
-export function subscribeToUserSessions(
-  userId: string, 
-  onUpdate: (sessions: PersistedSession[]) => void, 
-  onError?: (err: any) => void
-): () => void {
-  if (!db) initPersistence();
-  if (!db || !userId) return () => {};
-
-  const sessionsRef = collection(db, 'users', userId, 'sessions');
-  const q = query(sessionsRef);
-  
-  return onSnapshot(q, (snapshot) => {
-    const sessions: PersistedSession[] = [];
-    snapshot.forEach((doc) => {
-      const data = doc.data() as PersistedSession;
-      if (data && data.id) {
-        sessions.push(data);
-      }
-    });
-    sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    onUpdate(sessions);
-  }, (error) => {
-    if (isOfflineOrUnavailableError(error)) {
-      console.warn('Firestore offline: session subscription paused.');
-    } else {
-      console.warn('Failed to subscribe to sessions in Firestore', error);
-      if (onError) onError(error);
-    }
-  });
-}
-
-export async function deleteCloudSession(userId: string, sessionId: string): Promise<void> {
-  if (!db) initPersistence();
-  if (!db || !userId || !sessionId) return;
-  try {
-    await deleteDoc(doc(db, 'users', userId, 'sessions', sessionId));
-  } catch (e: any) {
-    if (isOfflineOrUnavailableError(e)) {
-      console.warn('Firestore offline: session deletion deferred.');
-      return;
-    }
-    console.warn('Failed to delete cloud session:', e);
-  }
-}
-
-export async function syncUserSettings(
-  userId: string,
-  settings?: Settings,
-  personas?: Persona[],
-  synthesizer?: Persona
-): Promise<void> {
-  if (!db) initPersistence();
-  if (!userId) return;
-
-  const payload: UserCloudData = {
-    updatedAt: Date.now(),
-  };
-  if (settings) payload.settings = settings;
-  if (personas) payload.personas = personas;
-  if (synthesizer) payload.synthesizer = synthesizer;
-
-  const sanitized = sanitizeForFirestore(payload);
-
-  // Always mirror to local storage
-  try {
-    localStorage.setItem(`council_user_settings_${userId}`, JSON.stringify(sanitized));
-  } catch {}
-
-  if (!db) return;
-
-  try {
-    await setDoc(doc(db, 'users', userId, 'settings', 'global_preferences'), sanitized, { merge: true });
-  } catch (e: any) {
-    if (isOfflineOrUnavailableError(e)) {
-      console.warn('Firestore offline: user settings saved to local storage.');
-      return;
-    }
-    console.warn('Failed to sync user settings to Firestore (saved locally):', e);
-  }
-}
-
-export async function loadUserSettings(userId: string): Promise<UserCloudData | null> {
-  if (!db) initPersistence();
-
-  // Check local cache first as instantaneous fallback
-  let localData: UserCloudData | null = null;
-  try {
-    const raw = localStorage.getItem(`council_user_settings_${userId}`);
-    if (raw) {
-      localData = JSON.parse(raw);
-    }
-  } catch {}
-
-  if (!db || !userId) return localData;
-
-  try {
-    const snap = await getDoc(doc(db, 'users', userId, 'settings', 'global_preferences'));
-    if (snap.exists()) {
-      const data = snap.data() as UserCloudData;
-      // Update local mirror
-      try {
-        localStorage.setItem(`council_user_settings_${userId}`, JSON.stringify(data));
-      } catch {}
-      return data;
-    }
-    return localData;
-  } catch (e: any) {
-    if (isOfflineOrUnavailableError(e)) {
-      console.warn('Firestore offline: loaded user settings from local backup.');
-      return localData;
-    }
-    console.warn('Could not load user settings from Firestore (using local fallback):', e);
-    return localData;
+    return await auth.currentUser.getIdToken();
+  } catch (error) {
+    console.error('[Auth] Error getting ID token:', error);
+    return null;
   }
 }
 
 export async function loginWithGoogle(): Promise<User | null> {
-  if (isLoginInFlight) {
-    console.warn('[FirebaseAuth] A login operation is already in flight.');
+  if (!auth) throw new Error('Firebase Auth is not configured.');
+  const provider = new GoogleAuthProvider();
+  try {
+    const cred = await signInWithPopup(auth, provider);
+    return cred.user;
+  } catch (popupError: any) {
+    console.warn('[Auth] Popup sign-in fallback to redirect:', popupError);
+    await signInWithRedirect(auth, provider);
     return null;
   }
-
-  if (!auth) initPersistence();
-  if (!auth) {
-    const initErr = new Error('[auth/not-initialized] Firebase Auth is not initialized. Please verify Firebase project configuration.');
-    console.error('[FirebaseAuth] Login failed:', initErr);
-    throw initErr;
-  }
-
-  const hostname = typeof window !== 'undefined' ? window.location.hostname : 'unknown';
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'unknown';
-  const startTime = Date.now();
-  isLoginInFlight = true;
-
-  console.log('[FirebaseAuth] Starting Google sign-in process...', {
-    hostname,
-    origin,
-    authDomain: firebaseConfig.authDomain,
-    projectId: firebaseConfig.projectId,
-  });
-
-  const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: 'select_account' });
-
-  try {
-    console.log('[FirebaseAuth] Attempting signInWithPopup...');
-    const result = await signInWithPopup(auth, provider);
-    const durationMs = Date.now() - startTime;
-    console.log('[FirebaseAuth] signInWithPopup succeeded for user:', {
-      user: result?.user?.email || result?.user?.uid,
-      durationMs,
-    });
-    return result?.user || null;
-  } catch (error: any) {
-    const durationMs = Date.now() - startTime;
-    const code = error?.code || 'auth/unknown';
-    const rawMessage = error?.message || 'Google sign-in failed.';
-    const isQuickDismissal = durationMs < 2500;
-
-    const authInfo: AuthErrorInfo = {
-      code,
-      message: rawMessage,
-      hostname,
-      origin,
-      authDomain: firebaseConfig.authDomain,
-      projectId: firebaseConfig.projectId,
-      durationMs,
-      isQuickDismissal,
-    };
-
-    if (code === 'auth/popup-blocked' || (code === 'auth/popup-closed-by-user' && isQuickDismissal) || code === 'auth/cross-origin-opener-policy-failed') {
-      console.warn('[FirebaseAuth] Popup failed, automatically falling back to signInWithRedirect...');
-      try {
-        await signInWithRedirect(auth, provider);
-        const redirectResult = await getRedirectResult(auth);
-        return redirectResult?.user || null;
-      } catch (redirectError: any) {
-        console.error('[FirebaseAuth] Redirect fallback failed:', redirectError);
-        throw new FirebaseAuthError(redirectError.message || 'Redirect sign-in failed', authInfo);
-      }
-    }
-
-    // Diagnostic console logging without printing tokens, secrets, or API keys
-    if (code === 'auth/popup-blocked') {
-      console.warn('[FirebaseAuth] Sign-in popup was blocked by browser or iframe security policy. Surfacing redirect fallback instructions to user:', {
-        code: authInfo.code,
-        message: authInfo.message,
-        hostname: authInfo.hostname,
-        origin: authInfo.origin,
-        authDomain: authInfo.authDomain,
-        projectId: authInfo.projectId,
-        durationMs: authInfo.durationMs,
-        recommendedAction: 'Use signInWithRedirect fallback to authenticate.',
-      });
-    } else if (code === 'auth/popup-closed-by-user' && !isQuickDismissal) {
-      console.info('[FirebaseAuth] User closed sign-in popup:', {
-        code: authInfo.code,
-        durationMs: authInfo.durationMs,
-      });
-    } else {
-      console.warn('[FirebaseAuth] Authentication notice:', {
-        code: authInfo.code,
-        message: authInfo.message,
-        hostname: authInfo.hostname,
-        origin: authInfo.origin,
-        authDomain: authInfo.authDomain,
-        projectId: authInfo.projectId,
-        durationMs: authInfo.durationMs,
-        isQuickDismissal: authInfo.isQuickDismissal,
-      });
-    }
-
-    let customMessage = rawMessage;
-    if (code === 'auth/popup-blocked') {
-      customMessage = `Sign-in popup was blocked by your browser or environment permissions. Please use the redirect fallback ("Continue using redirect") to sign in with your Google account.`;
-    } else if (code === 'auth/unauthorized-domain') {
-      customMessage = `Unauthorized domain '${hostname}'. Please add this exact hostname to Firebase Console → Authentication → Settings → Authorized domains.`;
-    } else if (code === 'auth/operation-not-allowed' || code === 'auth/admin-restricted-operation') {
-      customMessage = `Google Sign-In provider is disabled in Firebase. Enable Google under Firebase Console → Authentication → Sign-in method.`;
-    } else if (code === 'auth/invalid-api-key' || code === 'auth/api-key-not-valid' || code === 'auth/configuration-not-found') {
-      customMessage = `Firebase configuration error for Project ID '${firebaseConfig.projectId}' and Auth Domain '${firebaseConfig.authDomain}'. Please verify your client configuration.`;
-    } else if (code === 'auth/popup-closed-by-user') {
-      if (isQuickDismissal) {
-        customMessage = `Sign-in popup closed immediately before completing login (${durationMs}ms). This is usually caused by iframe restrictions or popup blockers. Please use the redirect fallback ("Continue using redirect").`;
-      } else {
-        customMessage = `Sign-in popup was closed before completing login.`;
-      }
-    } else if (code === 'auth/cancelled-popup-request') {
-      customMessage = `Sign-in popup request was cancelled or superseded by another action. Please use the redirect fallback ("Continue using redirect").`;
-    } else if (code === 'auth/network-request-failed') {
-      customMessage = `Network error connecting to Firebase Authentication. Please check your internet connection or firewall/CORS settings.`;
-    }
-
-    throw new FirebaseAuthError(customMessage, authInfo);
-  } finally {
-    isLoginInFlight = false;
-  }
 }
-
-export async function loginWithGoogleRedirect(): Promise<void> {
-  if (isLoginInFlight) {
-    console.warn('[FirebaseAuth] A login operation is already in flight.');
-    return;
-  }
-
-  if (!auth) initPersistence();
-  if (!auth) {
-    throw new Error('[auth/not-initialized] Firebase Auth is not initialized.');
-  }
-
-  const hostname = typeof window !== 'undefined' ? window.location.hostname : 'unknown';
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'unknown';
-  isLoginInFlight = true;
-
-  console.log('[FirebaseAuth] User initiated direct signInWithRedirect...', {
-    hostname,
-    origin,
-    authDomain: firebaseConfig.authDomain,
-    projectId: firebaseConfig.projectId,
-  });
-
-  const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: 'select_account' });
-
-  try {
-    await signInWithRedirect(auth, provider);
-  } catch (error: any) {
-    isLoginInFlight = false;
-    const code = error?.code || 'auth/unknown';
-    const rawMessage = error?.message || 'Redirect sign-in failed.';
-    console.error('[FirebaseAuth] Direct signInWithRedirect failed:', {
-      code,
-      message: rawMessage,
-      hostname,
-      origin,
-      authDomain: firebaseConfig.authDomain,
-      projectId: firebaseConfig.projectId,
-    });
-    throw new FirebaseAuthError(rawMessage, {
-      code,
-      message: rawMessage,
-      hostname,
-      origin,
-      authDomain: firebaseConfig.authDomain,
-      projectId: firebaseConfig.projectId,
-      durationMs: 0,
-      isQuickDismissal: false,
-    });
-  }
-}
-
-let redirectResultPromise: Promise<User | null> | null = null;
 
 export async function handleAuthRedirectResult(): Promise<User | null> {
-  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-    return null;
+  if (!auth) return null;
+  try {
+    const result = await getRedirectResult(auth);
+    return result?.user || null;
+  } catch (error) {
+    console.error('[Auth] Redirect sign-in error:', error);
+    throw error;
   }
-  if (redirectResultPromise) return redirectResultPromise;
-
-  if (!auth) initPersistence();
-  if (!auth) {
-    console.warn('[FirebaseAuth] Auth not initialized during handleAuthRedirectResult.');
-    return null;
-  }
-
-  redirectResultPromise = (async () => {
-    try {
-      console.log('[FirebaseAuth] Checking for pending redirect authentication result...');
-      const result = await getRedirectResult(auth);
-      if (result?.user) {
-        console.log('[FirebaseAuth] Successfully recovered user from redirect sign-in:', result.user.email || result.user.uid);
-        return result.user;
-      }
-      console.log('[FirebaseAuth] No pending redirect authentication result found.');
-      return null;
-    } catch (error: any) {
-      const errMsg = error?.message || String(error);
-      const code = error?.code || '';
-      if (isOfflineOrUnavailableError(error) || errMsg.includes('closing') || errMsg.includes('hidden')) {
-        console.warn('[FirebaseAuth] Google redirect sign-in skipped: Database is closing/hidden or unavailable.');
-      } else {
-        console.error('[FirebaseAuth] Error resolving redirect authentication result:', {
-          code,
-          message: errMsg,
-          error,
-        });
-      }
-      return null;
-    } finally {
-      setTimeout(() => {
-        redirectResultPromise = null;
-      }, 5000);
-    }
-  })();
-
-  return redirectResultPromise;
 }
 
 export async function logout(): Promise<void> {
-  if (!auth) initPersistence();
-  if (auth) {
-    await signOut(auth);
+  if (auth) await fbSignOut(auth);
+}
+
+export function getFirebaseAuth(): Auth | null {
+  return auth;
+}
+
+export function getFirestoreDB(): Firestore | null {
+  return db;
+}
+
+// Cloud Session Persistence
+export async function saveSessionToFirestore(session: CouncilSession, userId: string = 'global_owner'): Promise<void> {
+  if (!db) return;
+  const sessionRef = doc(db, 'council_sessions', session.id);
+  await setDoc(sessionRef, {
+    ...session,
+    userId,
+    updatedAt: Date.now(),
+  }, { merge: true });
+}
+
+export async function fetchSessionsFromFirestore(userId: string = 'global_owner'): Promise<CouncilSession[]> {
+  if (!db) return [];
+  try {
+    const sessionsCol = collection(db, 'council_sessions');
+    const q = query(sessionsCol, where('userId', '==', userId), orderBy('updatedAt', 'desc'));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map((d) => d.data() as CouncilSession);
+  } catch {
+    try {
+      const sessionsCol = collection(db, 'council_sessions');
+      const q = query(sessionsCol, where('userId', '==', userId));
+      const snapshot = await getDocs(q);
+      const list = snapshot.docs.map((d) => d.data() as CouncilSession);
+      return list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    } catch {
+      return [];
+    }
   }
 }
 
-export function onAuthChange(callback: (user: User | null) => void): () => void {
-  if (!auth) initPersistence();
-  if (!auth) {
-    console.warn("[FirebaseAuth] Firebase Auth not initialized for auth change listener.");
-    return () => {};
-  }
+export async function deleteSessionFromFirestore(sessionId: string): Promise<void> {
+  if (!db) return;
+  const sessionRef = doc(db, 'council_sessions', sessionId);
+  await deleteDoc(sessionRef);
+}
 
-  authListeners.add(callback);
+// Cloud Autonomous Mission Persistence
+export async function saveMissionToFirestore(mission: AutonomousMission, userId: string = 'global_owner'): Promise<void> {
+  if (!db) return;
+  const missionRef = doc(db, 'autonomous_missions', mission.id);
+  await setDoc(missionRef, {
+    ...mission,
+    userId,
+    updatedAt: Date.now(),
+  }, { merge: true });
+}
 
-  // If auth has already completed its startup resolution, immediately trigger with cached state
-  if (isAuthReady || auth.currentUser) {
-    try {
-      callback(cachedCurrentUser || auth.currentUser || null);
-    } catch (err) {
-      console.error('[FirebaseAuth] Error executing immediate auth callback:', err);
+export async function fetchMissionFromFirestore(missionId: string): Promise<AutonomousMission | null> {
+  if (!db) return null;
+  const missionRef = doc(db, 'autonomous_missions', missionId);
+  const snap = await getDoc(missionRef);
+  return snap.exists() ? (snap.data() as AutonomousMission) : null;
+}
+
+// Cloud Audit Log Persistence
+export async function saveAuditLogToFirestore(auditLog: FallbackAuditLog): Promise<void> {
+  if (!db) return;
+  const logRef = doc(db, 'council_audit_logs', auditLog.id);
+  const cleanDoc: Record<string, any> = {};
+  for (const [key, value] of Object.entries(auditLog)) {
+    if (value !== undefined) {
+      cleanDoc[key] = value;
     }
   }
+  await setDoc(logRef, cleanDoc);
+}
 
-  const directUnsubscribe = onAuthStateChanged(auth, (user) => {
-    cachedCurrentUser = user;
-    isAuthReady = true;
-    try {
-      callback(user);
-    } catch (err) {
-      console.error('[FirebaseAuth] Error in onAuthStateChanged listener:', err);
-    }
-  });
-
-  return () => {
-    authListeners.delete(callback);
-    directUnsubscribe();
-  };
+export async function fetchAuditLogsFromFirestore(limitCount: number = 50): Promise<FallbackAuditLog[]> {
+  if (!db) return [];
+  try {
+    const logsCol = collection(db, 'council_audit_logs');
+    const q = query(logsCol, orderBy('timestamp', 'desc'), limit(limitCount));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map((d) => d.data() as FallbackAuditLog);
+  } catch {
+    return [];
+  }
 }

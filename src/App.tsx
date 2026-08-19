@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CouncilChamber } from './components/CouncilChamber';
+import { CouncilApp } from './components/CouncilApp';
 
 export default function App() {
-  return <CouncilChamber />;
+  return <CouncilApp />;
 }
