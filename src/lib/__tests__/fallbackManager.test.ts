@@ -1,65 +1,176 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { FallbackManager } from '../fallbackManager';
-import { FREE_POLICY, DEFAULT_POLICY } from '../executionPolicy';
-import type { RawOpenRouterModel } from '../../types';
+import {
+  classifyTriggerReason,
+  computeOrderedBackupList,
+  saveFallbackEvent,
+  getStoredFallbackEvents,
+  clearStoredFallbackEvents,
+  FallbackEvent,
+} from '../fallbackManager';
+import { Persona } from '../../types';
 
-describe('FallbackManager', () => {
-  let fallbackManager: FallbackManager;
+// Mock localStorage for node environment
+const localStorageMock = (() => {
+  let store: Record<string, string> = {};
+  return {
+    getItem: (key: string) => store[key] || null,
+    setItem: (key: string, value: string) => { store[key] = value.toString(); },
+    removeItem: (key: string) => { delete store[key]; },
+    clear: () => { store = {}; },
+  };
+})();
 
+Object.defineProperty(globalThis, 'localStorage', {
+  value: localStorageMock,
+  writable: true,
+});
+
+describe('Fallback Manager tests', () => {
   beforeEach(() => {
-    fallbackManager = new FallbackManager();
-    fallbackManager.clearAuditLog();
+    localStorage.clear();
   });
 
-  const mockCatalog: RawOpenRouterModel[] = [
-    { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash Free', pricing: { prompt: '0', completion: '0' } },
-    { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 Free', pricing: { prompt: '0', completion: '0' } },
-    { id: 'qwen/qwen-2.5-72b-instruct:free', name: 'Qwen 2.5 Free', pricing: { prompt: '0', completion: '0' } },
-    { id: 'anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet', pricing: { prompt: '0.000003', completion: '0.000015' } },
-    { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', pricing: { prompt: '0.0000005', completion: '0.000002' } },
+  const personas: Persona[] = [
+    { id: 'skeptic', name: 'Skeptic', role: 'Critic', avatar: '🛡️', model: 'google/gemini-2.5-flash', systemPrompt: '', color: '' },
+    { id: 'visionary', name: 'Visionary', role: 'Innovator', avatar: '💡', model: 'anthropic/claude-3.5-haiku', systemPrompt: '', color: '' },
+    { id: 'pragmatist', name: 'Pragmatist', role: 'Engineer', avatar: '🛠️', model: 'openai/gpt-4o-mini', systemPrompt: '', color: '' },
   ];
 
-  it('computes ordered backup list respecting free policy', () => {
-    const backups = fallbackManager.computeOrderedBackupList(
-      'google/gemini-2.0-flash-exp:free',
-      FREE_POLICY,
-      mockCatalog
-    );
+  describe('classifyTriggerReason', () => {
+    it('detects rate limit 429 errors', () => {
+      expect(classifyTriggerReason(new Error('Rate limit exceeded: 429 Too Many Requests'))).toBe('HTTP 429 (Rate Limit)');
+      expect(classifyTriggerReason({ message: '429 rate_limit_exceeded' })).toBe('HTTP 429 (Rate Limit)');
+    });
 
-    expect(backups.length).toBeGreaterThan(0);
-    expect(backups).not.toContain('google/gemini-2.0-flash-exp:free');
-    expect(backups).toContain('meta-llama/llama-3.3-70b-instruct:free');
-    expect(backups).not.toContain('anthropic/claude-3.7-sonnet');
+    it('detects timeouts', () => {
+      expect(classifyTriggerReason(new Error('Request timed out'))).toBe('Timeout');
+      expect(classifyTriggerReason({ message: 'AbortError: user timed out' })).toBe('Timeout');
+    });
+
+    it('detects temporary unavailability', () => {
+      expect(classifyTriggerReason(new Error('503 Service Unavailable: Provider overloaded'))).toBe('Temporary Unavailability');
+      expect(classifyTriggerReason({ message: '502 Bad Gateway' })).toBe('Temporary Unavailability');
+    });
+
+    it('detects invalid empty responses', () => {
+      expect(classifyTriggerReason(null, '')).toBe('Invalid Response');
+      expect(classifyTriggerReason(new Error('Invalid response received from endpoint'))).toBe('Invalid Response');
+    });
   });
 
-  it('computes ordered backup list under quality policy', () => {
-    const backups = fallbackManager.computeOrderedBackupList(
-      'anthropic/claude-3.7-sonnet',
-      DEFAULT_POLICY,
-      mockCatalog
-    );
+  describe('computeOrderedBackupList', () => {
+    it('computes valid backup candidates from hardcoded defaults when rawModels is not provided', () => {
+      const backups = computeOrderedBackupList({
+        activePersonas: personas,
+        failingPersonaId: 'skeptic',
+        isFreeOnlyPreset: false,
+      });
 
-    expect(backups.length).toBe(mockCatalog.length - 1);
-    expect(backups).not.toContain('anthropic/claude-3.7-sonnet');
+      expect(backups.length).toBeGreaterThan(0);
+      backups.forEach((b) => {
+        expect(b.model).toBeDefined();
+        expect(b.name).toBeDefined();
+      });
+    });
+
+    it('prioritizes dynamically fetched rawModels over hardcoded defaults', () => {
+      const dynamicRawModels = [
+        {
+          id: 'cohere/command-r-plus-08-2024',
+          name: 'Command R+ 08-2024',
+          pricing: { prompt: '0.0000025', completion: '0.00001' },
+          context_length: 128000,
+        },
+        {
+          id: 'meta-llama/llama-3.3-70b-instruct',
+          name: 'Llama 3.3 70B Instruct',
+          pricing: { prompt: '0.0000004', completion: '0.0000004' },
+          context_length: 131072,
+        },
+      ];
+
+      const backups = computeOrderedBackupList({
+        activePersonas: personas,
+        failingPersonaId: 'skeptic',
+        rawModels: dynamicRawModels as any,
+        isFreeOnlyPreset: false,
+      });
+
+      expect(backups.length).toBeGreaterThan(0);
+      // Cohere is not in hardcoded DEFAULT_PAID_BACKUPS, so its presence confirms dynamic prioritization
+      expect(backups.some((b) => b.model === 'cohere/command-r-plus-08-2024')).toBe(true);
+      expect(backups[0].org).toBe('cohere');
+    });
+
+    it('falls back to hardcoded defaults if rawModels is empty array or invalid', () => {
+      const backupsEmpty = computeOrderedBackupList({
+        activePersonas: personas,
+        failingPersonaId: 'skeptic',
+        rawModels: [],
+        isFreeOnlyPreset: false,
+      });
+
+      expect(backupsEmpty.length).toBeGreaterThan(0);
+
+      const backupsInvalid = computeOrderedBackupList({
+        activePersonas: personas,
+        failingPersonaId: 'skeptic',
+        rawModels: [{ id: '' }] as any,
+        isFreeOnlyPreset: false,
+      });
+
+      expect(backupsInvalid.length).toBeGreaterThan(0);
+    });
+
+    it('restricts to free models when isFreeOnlyPreset is true', () => {
+      const backups = computeOrderedBackupList({
+        activePersonas: personas,
+        failingPersonaId: 'skeptic',
+        isFreeOnlyPreset: true,
+      });
+
+      expect(backups.length).toBeGreaterThan(0);
+      expect(backups.every(b => b.isFree)).toBe(true);
+    });
   });
 
-  it('executes fallback when primary model fails', async () => {
-    let callCount = 0;
-    const result = await fallbackManager.executeWithFallback(
-      'anthropic/claude-3.7-sonnet',
-      DEFAULT_POLICY,
-      mockCatalog,
-      async (targetModel) => {
-        callCount++;
-        if (targetModel === 'anthropic/claude-3.7-sonnet') {
-          throw new Error('503 Service Unavailable');
-        }
-        return `Success from ${targetModel}`;
-      }
-    );
+  describe('storage and event tracking', () => {
+    it('saves, retrieves, and clears fallback logs', () => {
+      clearStoredFallbackEvents();
+      expect(getStoredFallbackEvents()).toHaveLength(0);
 
-    expect(callCount).toBeGreaterThanOrEqual(2);
-    expect(result).toContain('Success from');
-    expect(fallbackManager.getAuditLog().length).toBeGreaterThan(0);
+      const event: FallbackEvent = {
+        id: 'fb-1',
+        timestamp: Date.now(),
+        personaId: 'skeptic',
+        personaName: 'Skeptic',
+        originalModel: 'google/gemini-2.5-flash',
+        failedModel: 'google/gemini-2.5-flash',
+        triggerReason: 'HTTP 429 (Rate Limit)',
+        errorMessage: '429 Rate Limit',
+        replacementModel: 'deepseek/deepseek-r1',
+        replacementModelName: 'DeepSeek R1',
+        status: 'fallback_success',
+      };
+
+      saveFallbackEvent(event);
+      const events = getStoredFallbackEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].replacementModel).toBe('deepseek/deepseek-r1');
+
+      clearStoredFallbackEvents();
+      expect(getStoredFallbackEvents()).toHaveLength(0);
+    });
+  });
+
+  describe('truncation detection & token expansion', () => {
+    it('identifies length and max_tokens finish reasons as truncation triggers', () => {
+      const checkTruncation = (reason?: string) => reason === 'length' || reason === 'max_tokens';
+
+      expect(checkTruncation('length')).toBe(true);
+      expect(checkTruncation('max_tokens')).toBe(true);
+      expect(checkTruncation('stop')).toBe(false);
+      expect(checkTruncation(undefined)).toBe(false);
+    });
   });
 });

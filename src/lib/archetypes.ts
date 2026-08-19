@@ -48,12 +48,8 @@ export const ARCHETYPE_LIBRARY: PersonaArchetype[] = [
   },
 ];
 
-export const ARCHETYPES = ARCHETYPE_LIBRARY;
-
-export function instantiateArchetype(archetypeOrId: string | PersonaArchetype, customModel?: string): CouncilPersona {
-  const arch = typeof archetypeOrId === 'string'
-    ? (ARCHETYPE_LIBRARY.find((a) => a.id === archetypeOrId) || ARCHETYPE_LIBRARY[0])
-    : archetypeOrId;
+export function instantiateArchetype(archetypeId: string, customModel?: string): CouncilPersona {
+  const arch = ARCHETYPE_LIBRARY.find((a) => a.id === archetypeId) || ARCHETYPE_LIBRARY[0];
   return {
     id: `${arch.id}_${Math.random().toString(36).slice(2, 6)}`,
     name: arch.name,

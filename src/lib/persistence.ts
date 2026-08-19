@@ -47,20 +47,6 @@ if (firebaseConfig.apiKey && firebaseConfig.projectId) {
 }
 
 // Authentication
-export function initPersistence() {
-  return { app, auth, db };
-}
-
-export async function getFirebaseIdToken(): Promise<string | null> {
-  if (!auth?.currentUser) return null;
-  try {
-    return await auth.currentUser.getIdToken();
-  } catch (error) {
-    console.error('[Auth] Error getting ID token:', error);
-    return null;
-  }
-}
-
 export async function loginWithGoogle(): Promise<User | null> {
   if (!auth) throw new Error('Firebase Auth is not configured.');
   const provider = new GoogleAuthProvider();
@@ -156,13 +142,7 @@ export async function fetchMissionFromFirestore(missionId: string): Promise<Auto
 export async function saveAuditLogToFirestore(auditLog: FallbackAuditLog): Promise<void> {
   if (!db) return;
   const logRef = doc(db, 'council_audit_logs', auditLog.id);
-  const cleanDoc: Record<string, any> = {};
-  for (const [key, value] of Object.entries(auditLog)) {
-    if (value !== undefined) {
-      cleanDoc[key] = value;
-    }
-  }
-  await setDoc(logRef, cleanDoc);
+  await setDoc(logRef, auditLog);
 }
 
 export async function fetchAuditLogsFromFirestore(limitCount: number = 50): Promise<FallbackAuditLog[]> {

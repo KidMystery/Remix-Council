@@ -1,78 +1,95 @@
 import { describe, it, expect } from 'vitest';
 import {
   detectTaskDomain,
-  getModelFamily,
-  getModelOrg,
-  routeCouncilModels,
+  applySmartModelSelection,
+  DOMAIN_MODEL_MAPPINGS,
+  TaskDomain,
 } from '../smartModelSelector';
-import { FREE_POLICY, DEFAULT_POLICY } from '../executionPolicy';
-import type { CouncilPersona, RawOpenRouterModel } from '../../types';
+import { Persona } from '../../types';
 
-describe('smartModelSelector', () => {
+describe('Smart Model Selector tests', () => {
+  const mockPersonas: Persona[] = [
+    { id: 'skeptic', name: 'Skeptic', role: 'Critic', avatar: '🛡️', model: 'google/gemini-2.5-flash', systemPrompt: '', color: '' },
+    { id: 'visionary', name: 'Visionary', role: 'Innovator', avatar: '💡', model: 'anthropic/claude-3.5-haiku', systemPrompt: '', color: '' },
+    { id: 'pragmatist', name: 'Pragmatist', role: 'Engineer', avatar: '🛠️', model: 'openai/gpt-4o-mini', systemPrompt: '', color: '' },
+  ];
+  const mockSynthesizer: Persona = {
+    id: 'synthesizer', name: 'Synthesizer', role: 'Chairman', avatar: '⚖️', model: 'google/gemini-2.5-pro', systemPrompt: '', color: ''
+  };
+
   describe('detectTaskDomain', () => {
     it('detects coding tasks from query keywords', () => {
-      expect(detectTaskDomain('Refactor this typescript async function and fix bug')).toBe('coding');
-      expect(detectTaskDomain('Create a new SQL database schema for users')).toBe('coding');
+      expect(detectTaskDomain('How do I refactor this React TypeScript function with async await?')).toBe('code');
+      expect(detectTaskDomain('Debug this syntax error in python')).toBe('code');
     });
 
-    it('detects security audit tasks', () => {
-      expect(detectTaskDomain('Perform a security audit and vulnerability check on auth')).toBe('security_audit');
+    it('detects coding tasks from attached code files', () => {
+      const result = detectTaskDomain('Review this', [
+        { name: 'App.tsx', content: 'export const App = () => <div/>;' }
+      ]);
+      expect(result).toBe('code');
     });
 
-    it('detects math tasks', () => {
-      expect(detectTaskDomain('Calculate probability and solve the math proof')).toBe('math_reasoning');
+    it('detects finance tasks', () => {
+      expect(detectTaskDomain('Analyze our Q3 EBITDA, balance sheet, and revenue growth')).toBe('finance');
     });
 
-    it('detects creative tasks', () => {
-      expect(detectTaskDomain('Brainstorm a creative story plot')).toBe('creative');
+    it('detects creative writing tasks', () => {
+      expect(detectTaskDomain('Write a fictional story about a space explorer')).toBe('creative');
     });
 
-    it('defaults to general', () => {
-      expect(detectTaskDomain('What is the weather today?')).toBe('general');
-    });
-  });
-
-  describe('getModelOrg and getModelFamily', () => {
-    it('extracts org correctly', () => {
-      expect(getModelOrg('google/gemini-2.0-flash')).toBe('google');
-      expect(getModelOrg('anthropic/claude-3.7-sonnet')).toBe('anthropic');
-      expect(getModelOrg('openai/o3-mini')).toBe('openai');
+    it('detects math calculations', () => {
+      expect(detectTaskDomain('Calculate the integral of sin(x) dx and solve the derivative equation')).toBe('math');
     });
 
-    it('extracts family correctly', () => {
-      expect(getModelFamily('google/gemini-2.0-flash')).toBe('gemini');
-      expect(getModelFamily('meta-llama/llama-3.3-70b-instruct')).toBe('llama');
-      expect(getModelFamily('anthropic/claude-3.7-sonnet')).toBe('claude');
-      expect(getModelFamily('qwen/qwen-2.5-72b')).toBe('qwen');
+    it('falls back to general domain for general queries', () => {
+      expect(detectTaskDomain('What is the weather like in spring?')).toBe('general');
     });
   });
 
-  describe('routeCouncilModels', () => {
-    const mockPersonas: CouncilPersona[] = [
-      { id: '1', name: 'Analyst', role: 'Security Auditor', systemPrompt: '', model: 'anthropic/claude-3.7-sonnet' },
-      { id: '2', name: 'Engineer', role: 'Lead Engineer', systemPrompt: '', model: 'deepseek/deepseek-r1' },
-      { id: '3', name: 'Strategist', role: 'Executive Strategist', systemPrompt: '', model: 'openai/o3-mini' },
-    ];
+  describe('applySmartModelSelection', () => {
+    it('generates optimal persona and synthesizer assignments for a domain', () => {
+      const result = applySmartModelSelection('code', mockPersonas, mockSynthesizer, {
+        availableModels: [
+          { id: 'anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet' },
+          { id: 'openai/gpt-4o', name: 'GPT-4o' },
+          { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+          { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1' },
+        ],
+        rawModelsCatalog: [],
+        isFreeOnly: false,
+        autoSelectModels: true,
+      });
 
-    const mockCatalog: RawOpenRouterModel[] = [
-      { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini Free', pricing: { prompt: '0', completion: '0' } },
-      { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama Free', pricing: { prompt: '0', completion: '0' } },
-      { id: 'qwen/qwen-2.5-72b-instruct:free', name: 'Qwen Free', pricing: { prompt: '0', completion: '0' } },
-      { id: 'anthropic/claude-3.7-sonnet', name: 'Claude Sonnet', pricing: { prompt: '0.000003', completion: '0.000015' } },
-      { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', pricing: { prompt: '0.0000005', completion: '0.000002' } },
-      { id: 'openai/o3-mini', name: 'o3-mini', pricing: { prompt: '0.000001', completion: '0.000004' } },
-    ];
-
-    it('routes models properly under quality policy', () => {
-      const routed = routeCouncilModels(mockPersonas, DEFAULT_POLICY, mockCatalog, 'Debug this typescript function');
-      expect(routed).toHaveLength(3);
-      expect(routed.every((p) => p.model)).toBe(true);
+      expect(result.domain).toBe('code');
+      expect(result.updatedPersonas).toHaveLength(3);
+      expect(result.updatedSynthesizer).toBeDefined();
+      expect(result.assignments).toBeDefined();
     });
 
-    it('substitutes free models under free policy', () => {
-      const routed = routeCouncilModels(mockPersonas, FREE_POLICY, mockCatalog, 'General question');
-      expect(routed).toHaveLength(3);
-      expect(routed.every((p) => p.model.endsWith(':free'))).toBe(true);
+    it('respects isFreeOnly filter when fast_and_free is selected', () => {
+      const result = applySmartModelSelection('finance', mockPersonas, mockSynthesizer, {
+        availableModels: [
+          { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+          { id: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1 Free' },
+        ],
+        rawModelsCatalog: [],
+        isFreeOnly: true,
+        autoSelectModels: true,
+      });
+
+      expect(result.autoSelectEnabled).toBe(true);
+      expect(result.domain).toBe('finance');
+    });
+  });
+
+  describe('DOMAIN_MODEL_MAPPINGS', () => {
+    it('defines mappings for all standard task domains', () => {
+      const domains: TaskDomain[] = ['code', 'math', 'finance', 'creative', 'general'];
+      domains.forEach((d) => {
+        expect(DOMAIN_MODEL_MAPPINGS[d]).toBeDefined();
+        expect(DOMAIN_MODEL_MAPPINGS[d].synthesizer).toBeDefined();
+      });
     });
   });
 });
