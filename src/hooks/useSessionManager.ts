@@ -56,6 +56,10 @@ export function useSessionManager() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const [saveDestination, setSaveDestination] = useState<'cloud' | 'local' | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const sessionsRef = useRef<Session[]>([]);
   sessionsRef.current = sessions;
@@ -66,12 +70,24 @@ export function useSessionManager() {
 
   const writeLocalThrottled = useCallback((next: Session[]) => {
     pendingLocalRef.current = next;
+    setIsSaving(true);
     if (localTimerRef.current) return;
     localTimerRef.current = setTimeout(() => {
       localTimerRef.current = null;
       if (pendingLocalRef.current) {
-        persistToLocalStorage(pendingLocalRef.current);
-        pendingLocalRef.current = null;
+        try {
+          persistToLocalStorage(pendingLocalRef.current);
+          setLastSavedAt(Date.now());
+          setSaveDestination(isGoogleSignedIn() ? 'cloud' : 'local');
+          setSaveError(null);
+        } catch (err: any) {
+          setSaveError(err?.message || 'Failed to save to local storage');
+        } finally {
+          setIsSaving(false);
+          pendingLocalRef.current = null;
+        }
+      } else {
+        setIsSaving(false);
       }
     }, LOCAL_WRITE_THROTTLE_MS);
   }, []);
@@ -91,14 +107,22 @@ export function useSessionManager() {
         pendingDriveRef.current = null;
         setIsSyncing(true);
         saveSessionsToDrive(payload)
-          .catch((err) => console.warn('[SessionManager] Drive throttled write error:', err))
+          .then(() => {
+            setLastSavedAt(Date.now());
+            setSaveDestination('cloud');
+            setSaveError(null);
+          })
+          .catch((err) => {
+            console.warn('[SessionManager] Drive throttled write error:', err);
+            setSaveError('Drive sync error');
+          })
           .finally(() => setIsSyncing(false));
       }
     }, DRIVE_WRITE_THROTTLE_MS);
   }, []);
 
   // ---- Immediate flush to both localStorage and Drive ----
-  const flushNow = useCallback(() => {
+  const flushNow = useCallback(async () => {
     const current = sessionsRef.current;
     if (localTimerRef.current) {
       clearTimeout(localTimerRef.current);
@@ -110,17 +134,29 @@ export function useSessionManager() {
     }
     pendingLocalRef.current = null;
     pendingDriveRef.current = null;
+    setIsSaving(true);
 
-    if (current.length > 0) {
-      persistToLocalStorage(current);
+    try {
+      if (current.length > 0) {
+        persistToLocalStorage(current);
+        setLastSavedAt(Date.now());
+        setSaveDestination(isGoogleSignedIn() ? 'cloud' : 'local');
+        setSaveError(null);
+      }
+      if (isGoogleSignedIn() && current.length > 0) {
+        setIsSyncing(true);
+        await saveSessionsToDrive(current);
+        setLastSavedAt(Date.now());
+        setSaveDestination('cloud');
+        setSaveError(null);
+      }
+    } catch (err: any) {
+      console.warn('[SessionManager] Flush error:', err);
+      setSaveError(err?.message || 'Error flushing session save');
+    } finally {
+      setIsSaving(false);
+      setIsSyncing(false);
     }
-    if (isGoogleSignedIn() && current.length > 0) {
-      setIsSyncing(true);
-      return saveSessionsToDrive(current)
-        .catch((err) => console.warn('[SessionManager] Drive flush error:', err))
-        .finally(() => setIsSyncing(false));
-    }
-    return Promise.resolve();
   }, []);
 
   // ---- Load: Drive first when signed in, else localStorage ----
@@ -129,12 +165,16 @@ export function useSessionManager() {
     async function load() {
       setIsLoading(true);
       let loaded: Session[] | null = null;
+      let loadedFromCloud = false;
 
       if (isGoogleSignedIn()) {
         setIsSyncing(true);
         try {
           const driveSessions = await loadSessionsFromDrive();
-          if (driveSessions.length > 0) loaded = driveSessions;
+          if (driveSessions.length > 0) {
+            loaded = driveSessions;
+            loadedFromCloud = true;
+          }
         } catch (err) {
           console.warn('[SessionManager] Drive load failed; falling back to local cache:', err);
         } finally {
@@ -144,14 +184,20 @@ export function useSessionManager() {
 
       if (loaded === null) {
         loaded = loadFromLocalStorage();
+        loadedFromCloud = false;
       }
 
       if (isMounted) {
         setSessions(loaded);
         if (loaded.length > 0) {
           setActiveSessionId((prev) => prev && loaded.some((s) => s.id === prev) ? prev : loaded[0].id);
+          const newestTime = loaded.reduce((max, s) => Math.max(max, s.updatedAt || 0), 0);
+          setLastSavedAt(newestTime > 0 ? newestTime : Date.now());
+          setSaveDestination(loadedFromCloud ? 'cloud' : 'local');
         } else {
           setActiveSessionId(null);
+          setLastSavedAt(Date.now());
+          setSaveDestination('local');
         }
       }
     }
@@ -375,6 +421,17 @@ export function useSessionManager() {
     signIn,
     signOut,
     isSyncing,
+    isSaving,
+    lastSavedAt,
+    saveDestination,
+    saveError,
+    autoSaveState: {
+      lastSavedAt,
+      isSaving,
+      isSyncing,
+      destination: saveDestination,
+      error: saveError,
+    },
     flushNow,
     isLoading,
   };

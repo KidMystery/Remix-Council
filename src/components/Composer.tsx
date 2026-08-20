@@ -1,6 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Paperclip, ChevronDown, ChevronUp, FileCode, CornerDownLeft, Sparkles } from 'lucide-react';
+import {
+  Send,
+  Paperclip,
+  ChevronDown,
+  ChevronUp,
+  FileCode,
+  FileText,
+  Archive,
+  Sparkles,
+  Loader2,
+  X,
+} from 'lucide-react';
 import type { AttachedFile } from '../types';
+import { extractCodeFromArchive } from '../lib/zipReader';
+import { extractTextFromPDF } from '../lib/pdfUtils';
 
 export interface ComposerProps {
   onSend: (query: string, attachedFiles: AttachedFile[], isFollowUp: boolean) => void;
@@ -17,6 +30,8 @@ export const Composer: React.FC<ComposerProps> = ({
 }) => {
   const [query, setQuery] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [topicMode, setTopicMode] = useState<'fresh' | 'followup'>('fresh');
   const [showMobileDetails, setShowMobileDetails] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -33,7 +48,7 @@ export const Composer: React.FC<ComposerProps> = ({
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!query.trim() && attachedFiles.length === 0) return;
-    if (isDeliberating) return;
+    if (isDeliberating || isExtracting) return;
 
     onSend(query.trim(), attachedFiles, topicMode === 'followup');
     setQuery('');
@@ -50,92 +65,177 @@ export const Composer: React.FC<ComposerProps> = ({
     }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
+  const processIncomingFiles = async (files: FileList | File[]) => {
     if (!files || files.length === 0) return;
+    setIsExtracting(true);
+    const newFiles: AttachedFile[] = [];
 
-    Array.from(files).forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const content = event.target?.result as string;
-        setAttachedFiles((prev) => [
-          ...prev,
-          { name: file.name, content, size: file.size, type: file.type },
-        ]);
-      };
-      reader.readAsText(file);
-    });
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const name = file.name;
+      const lower = name.toLowerCase();
 
+      try {
+        if (lower.endsWith('.zip') || lower.endsWith('.rar') || lower.endsWith('.tar') || lower.endsWith('.gz')) {
+          const result = await extractCodeFromArchive(file);
+          newFiles.push({
+            name,
+            content: result.formattedContext,
+            size: file.size,
+            type: result.archiveType,
+          });
+        } else if (lower.endsWith('.pdf')) {
+          const text = await extractTextFromPDF(file);
+          newFiles.push({
+            name,
+            content: text,
+            size: file.size,
+            type: 'pdf',
+          });
+        } else {
+          const text = await file.text();
+          newFiles.push({
+            name,
+            content: text,
+            size: file.size,
+            type: file.type || 'text/plain',
+          });
+        }
+      } catch (err: any) {
+        console.error(`Failed to process file ${name}:`, err);
+      }
+    }
+
+    setAttachedFiles((prev) => [...prev, ...newFiles]);
+    setIsExtracting(false);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
   };
 
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      processIncomingFiles(e.target.files);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isDraggingOver) setIsDraggingOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      processIncomingFiles(e.dataTransfer.files);
+    }
+  };
+
   return (
-    <div className="sticky bottom-3 z-30 w-full max-w-4xl mx-auto px-2">
+    <div className="sticky bottom-2 sm:bottom-3 z-30 w-full max-w-4xl mx-auto px-2 sm:px-3">
       <form
         onSubmit={handleSubmit}
-        className="w-full bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-2xl p-3 shadow-2xl transition-all ring-1 ring-white/5"
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className={`w-full bg-slate-900/95 backdrop-blur-md border rounded-2xl p-2.5 sm:p-3 shadow-2xl transition-all ring-1 ring-white/5 ${
+          isDraggingOver ? 'border-cyan-400 ring-2 ring-cyan-400/40 bg-cyan-950/20' : 'border-slate-700/80'
+        }`}
       >
         {/* Attached Files Carousel */}
         {attachedFiles.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-2.5 max-h-24 overflow-y-auto">
-            {attachedFiles.map((f, i) => (
-              <div
-                key={i}
-                className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-800/90 rounded-lg text-xs text-slate-200 border border-slate-700 shadow-sm"
-              >
-                <FileCode size={12} className="text-cyan-400 shrink-0" />
-                <span className="truncate max-w-[130px] font-mono text-[11px]">{f.name}</span>
-                <button
-                  type="button"
-                  onClick={() => setAttachedFiles((prev) => prev.filter((_, idx) => idx !== i))}
-                  className="text-slate-400 hover:text-red-400 ml-1 font-bold"
-                  title="Remove attachment"
+          <div className="flex flex-wrap gap-1.5 mb-2 max-h-28 overflow-y-auto">
+            {attachedFiles.map((f, i) => {
+              const isArchive = f.type === 'zip' || f.type === 'rar' || f.name.endsWith('.zip');
+              const isPdf = f.type === 'pdf' || f.name.endsWith('.pdf');
+              return (
+                <div
+                  key={i}
+                  className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-800/90 rounded-lg text-xs text-slate-200 border border-slate-700 shadow-sm"
                 >
-                  ×
-                </button>
-              </div>
-            ))}
+                  {isArchive ? (
+                    <Archive size={12} className="text-purple-400 shrink-0" />
+                  ) : isPdf ? (
+                    <FileText size={12} className="text-red-400 shrink-0" />
+                  ) : (
+                    <FileCode size={12} className="text-cyan-400 shrink-0" />
+                  )}
+                  <span className="truncate max-w-[120px] sm:max-w-[180px] font-mono text-[11px]">{f.name}</span>
+                  {f.size && (
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      ({(f.size / 1024).toFixed(0)} KB)
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setAttachedFiles((prev) => prev.filter((_, idx) => idx !== i))}
+                    className="text-slate-400 hover:text-red-400 ml-1 p-0.5 rounded cursor-pointer min-w-[20px] min-h-[20px] flex items-center justify-center"
+                    title="Remove attachment"
+                    aria-label={`Remove attachment ${f.name}`}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
         {/* Text Input Area */}
-        <textarea
-          ref={textareaRef}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Ask the Council anything... (Press ⌘+Enter to send)"
-          rows={2}
-          className="w-full bg-slate-950/70 text-slate-100 placeholder-slate-500 text-sm p-3 rounded-xl border border-slate-800 focus:outline-none focus:border-cyan-500/70 resize-none transition-all"
-        />
+        <div className="relative">
+          <textarea
+            ref={textareaRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Ask the Council anything... (Press ⌘+Enter to deliberate)"
+            rows={2}
+            className="w-full bg-slate-950/70 text-slate-100 placeholder-slate-500 text-xs sm:text-sm p-3 rounded-xl border border-slate-800 focus:outline-none focus:border-cyan-500/70 resize-none transition-all leading-relaxed"
+          />
+          {isExtracting && (
+            <div className="absolute right-3 top-3 flex items-center gap-1.5 text-xs text-cyan-400 font-mono bg-slate-950/90 px-2 py-1 rounded-md border border-cyan-500/30">
+              <Loader2 size={12} className="animate-spin" />
+              <span>Unpacking...</span>
+            </div>
+          )}
+        </div>
 
         {/* Control Bar */}
         <div className="flex flex-wrap items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-800/80">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <input
               type="file"
               ref={fileInputRef}
               onChange={handleFileUpload}
               multiple
+              accept=".ts,.tsx,.js,.jsx,.py,.json,.sql,.rs,.go,.java,.cpp,.c,.md,.txt,.yaml,.yml,.csv,.pdf,.zip,.rar,.tar,.gz"
               className="hidden"
             />
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center gap-1.5 text-xs text-slate-300 hover:text-slate-100 bg-slate-800/80 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700 transition-colors shadow-sm"
+              disabled={isExtracting}
+              className="inline-flex items-center gap-1.5 text-xs text-slate-300 hover:text-slate-100 bg-slate-800/80 hover:bg-slate-700 px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-700 transition-colors shadow-sm cursor-pointer min-h-[38px]"
             >
-              <Paperclip size={12} className="text-slate-400" />
-              <span>Attach</span>
+              <Paperclip size={13} className="text-slate-400" />
+              <span className="text-[11px] sm:text-xs">Attach</span>
             </button>
 
             {/* Desktop Fresh/Followup switcher */}
-            <div className="hidden sm:flex items-center bg-slate-950 rounded-lg p-0.5 border border-slate-800 text-xs">
+            <div className="hidden sm:flex items-center bg-slate-950 rounded-xl p-0.5 border border-slate-800 text-xs">
               <button
                 type="button"
                 onClick={() => setTopicMode('fresh')}
-                className={`px-2.5 py-1 rounded-md transition-colors ${
+                className={`px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer ${
                   topicMode === 'fresh' ? 'bg-cyan-600 text-slate-950 font-bold' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -144,7 +244,7 @@ export const Composer: React.FC<ComposerProps> = ({
               <button
                 type="button"
                 onClick={() => setTopicMode('followup')}
-                className={`px-2.5 py-1 rounded-md transition-colors ${
+                className={`px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer ${
                   topicMode === 'followup' ? 'bg-cyan-600 text-slate-950 font-bold' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -156,34 +256,35 @@ export const Composer: React.FC<ComposerProps> = ({
             <select
               value={topicMode}
               onChange={(e) => setTopicMode(e.target.value as any)}
-              className="sm:hidden text-xs bg-slate-950 text-slate-300 rounded-lg px-2.5 py-1.5 border border-slate-800"
+              className="sm:hidden text-xs bg-slate-950 text-slate-300 rounded-xl px-2.5 py-1.5 border border-slate-800 min-h-[38px]"
             >
               <option value="fresh">Fresh</option>
               <option value="followup">Follow-up</option>
             </select>
           </div>
 
-          <div className="flex items-center gap-2.5">
-            {/* Mobile Cost Dropdown Toggle */}
+          <div className="flex items-center gap-2">
+            {/* Mobile Cost Toggle */}
             <button
               type="button"
               onClick={() => setShowMobileDetails(!showMobileDetails)}
-              className="sm:hidden text-xs text-slate-400 flex items-center gap-0.5"
+              className="sm:hidden text-xs text-slate-400 flex items-center gap-0.5 p-1 rounded-lg min-h-[36px]"
+              aria-label="Toggle token estimation info"
             >
               <span>Info</span>
-              {showMobileDetails ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+              {showMobileDetails ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
             </button>
 
             <div className={`${showMobileDetails ? 'flex' : 'hidden'} sm:flex items-center gap-2 text-[11px] font-mono text-slate-400`}>
-              <span>~{estimatedTokens} tokens</span>
-              <span className="text-slate-500">|</span>
+              <span>~{estimatedTokens} tok</span>
+              <span className="text-slate-600">•</span>
               <span>${estimatedCost.toFixed(4)}</span>
             </div>
 
             <button
               type="submit"
-              disabled={isDeliberating || (!query.trim() && attachedFiles.length === 0)}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 disabled:opacity-50 text-slate-950 font-bold rounded-xl transition-all shadow-md text-xs cursor-pointer"
+              disabled={isDeliberating || isExtracting || (!query.trim() && attachedFiles.length === 0)}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 sm:px-4 py-2 bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 disabled:opacity-50 text-slate-950 font-bold rounded-xl transition-all shadow-md text-xs cursor-pointer min-h-[38px]"
             >
               {isDeliberating ? (
                 <>

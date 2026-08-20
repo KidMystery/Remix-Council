@@ -316,3 +316,11 @@ export interface ZipArchiveResult {
   warnings: string[];
   formattedContext: string;
 }
+
+export interface AutoSaveState {
+  lastSavedAt: number | null;
+  isSaving: boolean;
+  isSyncing: boolean;
+  destination: 'cloud' | 'local' | null;
+  error?: string | null;
+}

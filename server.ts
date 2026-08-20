@@ -212,14 +212,21 @@ export async function startServer(portOverride?: number) {
     }
   });
 
-  // Client static assets
-  const clientDist = path.resolve(serverDirname, '.');
-  app.use(express.static(clientDist));
-  app.use((_req, res) => {
-    res.sendFile(path.join(clientDist, 'index.html'), (err) => {
-      if (err) res.status(404).send('Not Found');
+  // 6. Client assets handling (Vite middleware in dev, static dist in production)
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
     });
-  });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*all', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
 
   // Structured Error Middleware
   app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

@@ -17,6 +17,13 @@ import {
   Cpu,
   FileDown,
   Printer,
+  Paperclip,
+  FileCode,
+  FileText,
+  Archive,
+  X,
+  Eye,
+  Loader2,
 } from 'lucide-react';
 import type {
   Persona,
@@ -24,9 +31,14 @@ import type {
   CouncilRound,
   CostCeilingConfig,
   ConsensusMetric,
+  AttachedTextFile,
+  ZipArchiveResult,
 } from '../types';
 import { policyForPreset, type ExecutionPolicy } from '../lib/executionPolicy';
 import { streamPersonaWithFallback } from '../lib/fallbackManager';
+import { extractCodeFromArchive } from '../lib/zipReader';
+import { extractTextFromPDF } from '../lib/pdfUtils';
+import { ZipFilesModal } from './ZipFilesModal';
 import { MessageMarkdown } from './MessageMarkdown';
 import { ConsensusVisualizer } from './ConsensusVisualizer';
 
@@ -52,12 +64,20 @@ interface PersistedMission {
   rounds: CouncilRound[];
   consensusMetrics: ConsensusMetric[];
   estimatedCost: number;
+  attachedFiles?: AttachedTextFile[];
   updatedAt: number;
 }
 
 function sanitizeMissionForStorage(mission: PersistedMission): PersistedMission {
   return {
     ...mission,
+    attachedFiles: (mission.attachedFiles || []).map((f) => ({
+      ...f,
+      content:
+        f.content && f.content.length > MAX_STORED_CONTENT_CHARS
+          ? f.content.slice(0, MAX_STORED_CONTENT_CHARS)
+          : f.content || '',
+    })),
     rounds: mission.rounds.map((r) => ({
       ...r,
       attachedTextFiles: (r.attachedTextFiles || []).map((f) => ({
@@ -138,6 +158,13 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [enableWebGrounding, setEnableWebGrounding] = useState(true);
   const [enableCodeSandbox, setEnableCodeSandbox] = useState(true);
 
+  const [attachedFiles, setAttachedFiles] = useState<AttachedTextFile[]>([]);
+  const [isProcessingFiles, setIsProcessingFiles] = useState(false);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [activeZipResult, setActiveZipResult] = useState<ZipArchiveResult | null>(null);
+  const [isZipModalOpen, setIsZipModalOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   const [isRunning, setIsRunning] = useState(false);
   const [currentIteration, setCurrentIteration] = useState(0);
   const [rounds, setRounds] = useState<CouncilRound[]>([]);
@@ -163,11 +190,104 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       setConsensusMetrics(persisted.consensusMetrics);
       setMissionStatus(persisted.status);
       setEstimatedMissionCost(persisted.estimatedCost);
+      if (persisted.attachedFiles && Array.isArray(persisted.attachedFiles)) {
+        setAttachedFiles(persisted.attachedFiles);
+      }
     }
   }, []);
 
   const addLog = (msg: string) => {
     setTerminalLogs((prev) => [...prev.slice(-30), `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  };
+
+  const processFiles = async (filesList: FileList | File[]) => {
+    if (!filesList || filesList.length === 0) return;
+
+    setIsProcessingFiles(true);
+    const newAttachments: AttachedTextFile[] = [];
+    const filesArray = Array.from(filesList);
+
+    for (let i = 0; i < filesArray.length; i++) {
+      const file = filesArray[i];
+      const name = file.name;
+      const lower = name.toLowerCase();
+
+      try {
+        if (lower.endsWith('.zip') || lower.endsWith('.rar') || lower.endsWith('.tar') || lower.endsWith('.gz')) {
+          addLog(`📦 Extracting archive: ${name}...`);
+          const result = await extractCodeFromArchive(file);
+          setActiveZipResult(result);
+          newAttachments.push({
+            name,
+            content: result.formattedContext,
+            size: file.size,
+            type: result.archiveType,
+          });
+          addLog(`✓ Archive ${name} processed: ${result.extractedCodeFilesCount} code files loaded.`);
+        } else if (lower.endsWith('.pdf')) {
+          addLog(`📄 Extracting text from PDF: ${name}...`);
+          const text = await extractTextFromPDF(file);
+          newAttachments.push({
+            name,
+            content: text,
+            size: file.size,
+            type: 'pdf',
+          });
+          addLog(`✓ PDF ${name} text extracted.`);
+        } else {
+          const text = await file.text();
+          newAttachments.push({
+            name,
+            content: text,
+            size: file.size,
+            type: file.type || 'text/plain',
+          });
+          addLog(`✓ Attached file: ${name}`);
+        }
+      } catch (err: any) {
+        addLog(`❌ Error loading file ${name}: ${err.message}`);
+      }
+    }
+
+    setAttachedFiles((prev) => [...prev, ...newAttachments]);
+    setIsProcessingFiles(false);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      processFiles(e.target.files);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isRunning && !isDraggingOver) {
+      setIsDraggingOver(true);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+    if (isRunning) return;
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      processFiles(e.dataTransfer.files);
+    }
+  };
+
+  const handleRemoveFile = (index: number) => {
+    setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
   const getEstimatedCost = (): number => {
@@ -177,7 +297,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   };
 
   const handlePreLaunchCheck = () => {
-    if (!missionGoal.trim()) return;
+    if (!missionGoal.trim() && attachedFiles.length === 0) return;
 
     const estCost = getEstimatedCost();
     setEstimatedMissionCost(estCost);
@@ -202,6 +322,15 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     let accumulatedRounds: CouncilRound[] = [...rounds];
     let accumulatedMetrics: ConsensusMetric[] = [...consensusMetrics];
 
+    // Format attached files for insertion into cycles
+    const attachmentContext =
+      attachedFiles.length > 0
+        ? `\n\n[Attached Reference & Codebase Files]:\n` +
+          attachedFiles
+            .map((f) => `--- File: ${f.name} ---\n${f.content}`)
+            .join('\n\n')
+        : '';
+
     let iter = currentIteration;
     while (iter < maxIterations && !pauseRequestedRef.current) {
       iter++;
@@ -209,13 +338,14 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       addLog(`⚡ Cycle ${iter}/${maxIterations}: Selecting presiding chair and generating parallel proposals...`);
 
       const chair = activePersonas[(iter - 1) % activePersonas.length] || activePersonas[0];
-      const cycleQuery = `[Nexus Lab Cycle ${iter}/${maxIterations}]:\nDirective: ${missionGoal}\nPresiding Chair: ${chair.name}`;
+      const cycleQuery = `[Nexus Lab Cycle ${iter}/${maxIterations}]:\nDirective: ${missionGoal}${attachmentContext}\nPresiding Chair: ${chair.name}`;
 
       const newRound: CouncilRound = {
         id: `nexus_round_${Date.now()}_${iter}`,
         userQuery: cycleQuery,
         timestamp: Date.now(),
         mode: 'nexus_lab',
+        attachedTextFiles: [...attachedFiles],
         deliberation: { stage1: {}, stage2: {} },
         synthesis: { content: '', status: 'idle' },
       };
@@ -347,6 +477,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         rounds: accumulatedRounds,
         consensusMetrics: accumulatedMetrics,
         estimatedCost: getEstimatedCost(),
+        attachedFiles,
         updatedAt: Date.now(),
       });
 
@@ -372,6 +503,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       rounds: accumulatedRounds,
       consensusMetrics: finalMetrics,
       estimatedCost: getEstimatedCost(),
+      attachedFiles,
       updatedAt: Date.now(),
     });
   };
@@ -390,6 +522,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setRounds([]);
     setConsensusMetrics([]);
     setTerminalLogs([]);
+    setAttachedFiles([]);
     setMissionStatus('idle');
     setShowDossier(false);
     persistMission(null);
@@ -407,6 +540,14 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     lines.push(`**Iterations Run:** ${currentIteration}/${maxIterations}`);
     lines.push(`**Status:** ${missionStatus === 'converged' ? 'Converged' : 'Max Iterations Reached'}`);
     lines.push('');
+
+    if (attachedFiles.length > 0) {
+      lines.push(`### Attached Context Files (${attachedFiles.length})`);
+      attachedFiles.forEach((f) => {
+        lines.push(`- **${f.name}** ${f.size ? `(${Math.round(f.size / 1024)} KB)` : ''}`);
+      });
+      lines.push('');
+    }
 
     rounds.forEach((r, idx) => {
       lines.push(`## Cycle ${idx + 1}`);
@@ -555,19 +696,148 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         {/* Left Column: Command & Tools (4 cols) */}
         <div className="lg:col-span-4 space-y-4">
           <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-5 shadow-xl space-y-4">
-            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-emerald-400">
-              <Zap size={15} />
-              <span>Research Objective</span>
-            </div>
+            {/* Research Objective with Drag and Drop */}
+            <div
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={`space-y-3 p-1 rounded-2xl transition-all ${
+                isDraggingOver ? 'ring-2 ring-emerald-400 bg-emerald-950/20' : ''
+              }`}
+            >
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                  <Zap size={15} />
+                  <span>Research Objective</span>
+                </span>
+                {isDraggingOver && (
+                  <span className="text-[11px] font-mono text-emerald-300 animate-pulse">
+                    Drop files to attach
+                  </span>
+                )}
+              </div>
 
-            <textarea
-              value={missionGoal}
-              onChange={(e) => setMissionGoal(e.target.value)}
-              placeholder="e.g. Perform rigorous formal verification and attack simulation on a decentralized cross-chain bridge..."
-              rows={4}
-              disabled={isRunning}
-              className="w-full bg-slate-950 text-slate-100 text-xs p-3.5 rounded-2xl border border-slate-800 focus:outline-none focus:border-emerald-500 transition-all resize-none shadow-inner"
-            />
+              <textarea
+                value={missionGoal}
+                onChange={(e) => setMissionGoal(e.target.value)}
+                placeholder="e.g. Perform rigorous formal verification and attack simulation on a decentralized cross-chain bridge..."
+                rows={4}
+                disabled={isRunning}
+                className="w-full bg-slate-950 text-slate-100 text-xs sm:text-sm p-3.5 rounded-2xl border border-slate-800 focus:outline-none focus:border-emerald-500 transition-all resize-none shadow-inner leading-relaxed"
+              />
+
+              {/* Prominent File Attachment Dropzone */}
+              <div className="space-y-2">
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileUpload}
+                  multiple
+                  accept=".ts,.tsx,.js,.jsx,.py,.json,.sql,.rs,.go,.java,.cpp,.c,.md,.txt,.yaml,.yml,.csv,.pdf,.zip,.rar,.tar,.gz"
+                  className="hidden"
+                />
+
+                <div
+                  onClick={() => {
+                    if (!isRunning && !isProcessingFiles) {
+                      fileInputRef.current?.click();
+                    }
+                  }}
+                  className={`border-2 border-dashed rounded-2xl p-3 sm:p-4 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-1.5 ${
+                    isDraggingOver
+                      ? 'border-emerald-400 bg-emerald-950/40 text-emerald-200'
+                      : 'border-slate-800 hover:border-emerald-500/50 bg-slate-950/60 hover:bg-slate-950 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                      <Paperclip size={16} />
+                    </div>
+                    <div className="text-left">
+                      <div className="text-xs font-bold text-slate-200">
+                        {isProcessingFiles
+                          ? 'Extracting context...'
+                          : 'Attach Reference Files, PDFs, or Codebase ZIPs'}
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        Drag &amp; drop or click to upload (.zip, .pdf, .ts, .py, .md, .json)
+                      </div>
+                    </div>
+                  </div>
+
+                  {isProcessingFiles && (
+                    <div className="flex items-center gap-1.5 text-[11px] text-emerald-400 font-mono mt-1">
+                      <Loader2 size={12} className="animate-spin" />
+                      <span>Unpacking files &amp; parsing AST...</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Attached Files List */}
+                {attachedFiles.length > 0 && (
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                    <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wider flex items-center justify-between px-1">
+                      <span>Attached Context ({attachedFiles.length})</span>
+                      <span>
+                        {(attachedFiles.reduce((acc, f) => acc + (f.size || 0), 0) / 1024).toFixed(1)} KB Total
+                      </span>
+                    </div>
+                    {attachedFiles.map((file, idx) => {
+                      const isArchive = file.type === 'zip' || file.type === 'rar' || file.name.endsWith('.zip') || file.name.endsWith('.rar');
+                      const isPdf = file.type === 'pdf' || file.name.endsWith('.pdf');
+                      return (
+                        <div
+                          key={idx}
+                          className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs shadow-xs"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            {isArchive ? (
+                              <Archive size={14} className="text-purple-400 shrink-0" />
+                            ) : isPdf ? (
+                              <FileText size={14} className="text-red-400 shrink-0" />
+                            ) : (
+                              <FileCode size={14} className="text-emerald-400 shrink-0" />
+                            )}
+                            <div className="min-w-0">
+                              <div className="truncate text-slate-200 font-mono text-[11px] font-medium" title={file.name}>
+                                {file.name}
+                              </div>
+                              {file.size && (
+                                <div className="text-[10px] text-slate-500 font-mono">
+                                  {(file.size / 1024).toFixed(0)} KB
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1">
+                            {isArchive && activeZipResult && (
+                              <button
+                                type="button"
+                                onClick={() => setIsZipModalOpen(true)}
+                                className="p-1.5 text-slate-400 hover:text-purple-300 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer min-w-[28px] min-h-[28px] flex items-center justify-center"
+                                title="Inspect extracted archive files"
+                              >
+                                <Eye size={12} />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveFile(idx)}
+                              disabled={isRunning}
+                              className="p-1.5 text-slate-500 hover:text-red-400 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer font-bold min-w-[28px] min-h-[28px] flex items-center justify-center"
+                              title="Remove attachment"
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
 
             {/* Iterations and Preset */}
             <div className="grid grid-cols-2 gap-3 pt-1">
@@ -773,6 +1043,12 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
           </div>
         </div>
       )}
+      {/* Archive Inspection Modal */}
+      <ZipFilesModal
+        zipResult={activeZipResult}
+        isOpen={isZipModalOpen}
+        onClose={() => setIsZipModalOpen(false)}
+      />
     </div>
   );
 };

@@ -21,6 +21,8 @@ interface CouncilSidebarProps {
   isSyncing?: boolean;
   onSyncWithCloud?: () => Promise<void> | void;
   lastSyncedAt?: number | null;
+  isSignedIn?: boolean;
+  onOpenStorageSync?: () => void;
 }
 
 export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
@@ -41,6 +43,8 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
   isSyncing,
   onSyncWithCloud,
   lastSyncedAt,
+  isSignedIn,
+  onOpenStorageSync,
 }) => {
   const currentSession = activeSession || sessions.find((s) => s.id === activeSessionId);
   const activeHasRounds = Boolean(currentSession && currentSession.rounds && currentSession.rounds.length > 0);
@@ -216,12 +220,28 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
         </nav>
 
         {/* Sidebar Footer */}
-        {sessions.length > 0 && (
-          <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/60 flex flex-col gap-1.5">
+        <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/60 flex flex-col gap-2">
+          {onOpenStorageSync && (
+            <button
+              type="button"
+              onClick={onOpenStorageSync}
+              className="w-full py-2 px-3 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 text-xs flex items-center justify-between transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-1.5 font-medium">
+                <Cloud size={13} className={isSignedIn ? 'text-emerald-400' : 'text-cyan-400'} />
+                <span>Storage &amp; Sync</span>
+              </div>
+              <span className="text-[10px] font-mono text-slate-400">
+                {isSignedIn ? 'Cloud' : 'Local'}
+              </span>
+            </button>
+          )}
+
+          {sessions.length > 0 && (
             <ConfirmButton
               disabled={isDeliberating}
               onConfirm={onClearAllSessions}
-              className="w-full text-center text-xs text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 py-2 px-3 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors flex items-center justify-center gap-1.5 font-medium cursor-pointer disabled:opacity-40"
+              className="w-full text-center text-xs text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 py-1.5 px-3 rounded-xl hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors flex items-center justify-center gap-1.5 font-medium cursor-pointer disabled:opacity-40"
               confirmPrompt="Click again to delete all"
               idleChildren={
                 <>
@@ -229,8 +249,8 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
                 </>
               }
             />
-          </div>
-        )}
+          )}
+        </div>
       </aside>
     </>
   );

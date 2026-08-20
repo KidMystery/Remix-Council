@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Settings, Wallet, Menu, Orbit, MessagesSquare, Loader2, LogOut } from 'lucide-react';
+import { Shield, Settings, Wallet, Menu, Orbit, MessagesSquare, Loader2, LogOut, HardDrive } from 'lucide-react';
 import { getCurrentUserEmail } from '../../lib/drivePersistence';
+import { AutoSaveIndicator } from '../AutoSaveIndicator';
+import type { AutoSaveState } from '../../types';
 
 export type AppViewMode = 'chamber' | 'nexus';
 
@@ -11,9 +13,15 @@ export interface CouncilHeaderProps {
   activePresetName?: string;
   sessionCost?: number;
   onOpenSettings?: () => void;
+  onOpenStorageSync?: () => void;
   onToggleMobileDrawer?: () => void;
   isSignedIn?: boolean;
   isSyncing?: boolean;
+  isSaving?: boolean;
+  lastSavedAt?: number | null;
+  saveDestination?: 'cloud' | 'local' | null;
+  autoSaveState?: AutoSaveState;
+  onSaveNow?: () => void | Promise<void>;
   onSignIn?: () => void;
   onSignOut?: () => void;
 }
@@ -31,9 +39,15 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
   activePresetName = 'Deep Council',
   sessionCost,
   onOpenSettings,
+  onOpenStorageSync,
   onToggleMobileDrawer,
   isSignedIn = false,
   isSyncing = false,
+  isSaving = false,
+  lastSavedAt,
+  saveDestination,
+  autoSaveState,
+  onSaveNow,
   onSignIn,
   onSignOut,
 }) => {
@@ -68,24 +82,25 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
   }, []);
 
   return (
-    <header className="flex items-center justify-between px-3 sm:px-6 py-2.5 border-b border-slate-800 bg-slate-900/90 backdrop-blur-md sticky top-0 z-40">
+    <header className="flex items-center justify-between px-2.5 sm:px-5 py-2 sm:py-2.5 border-b border-slate-800 bg-slate-900/95 backdrop-blur-md sticky top-0 z-40">
       {/* Brand & Mode Switcher */}
-      <div className="flex items-center gap-3 sm:gap-5">
+      <div className="flex items-center gap-1.5 sm:gap-4 min-w-0">
         {onToggleMobileDrawer && (
           <button
             onClick={onToggleMobileDrawer}
-            className="sm:hidden text-slate-400 hover:text-slate-100 p-1 rounded-md cursor-pointer"
+            className="sm:hidden text-slate-400 hover:text-slate-100 p-2 rounded-xl cursor-pointer min-w-[36px] min-h-[36px] flex items-center justify-center"
             title="Toggle Sessions Menu"
+            aria-label="Toggle sessions navigation drawer"
           >
             <Menu size={18} />
           </button>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <div className="p-1.5 bg-gradient-to-tr from-cyan-600 to-blue-500 rounded-xl shadow-sm">
             <Shield size={16} className="text-slate-950" />
           </div>
-          <div>
+          <div className="hidden md:block">
             <h1 className="text-xs sm:text-sm font-bold text-slate-100 tracking-wide flex items-center gap-1.5">
               <span>Remix Council</span>
             </h1>
@@ -97,69 +112,79 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
           <button
             type="button"
             onClick={() => onNavigate('chamber')}
-            className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
+            className={`inline-flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg transition-all cursor-pointer min-h-[32px] ${
               currentView === 'chamber'
                 ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <MessagesSquare size={13} />
-            <span>Chamber</span>
+            <span className="text-[11px] sm:text-xs">Chamber</span>
           </button>
 
           <button
             type="button"
             onClick={() => onNavigate('nexus')}
-            className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg transition-all cursor-pointer ${
+            className={`inline-flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg transition-all cursor-pointer min-h-[32px] ${
               currentView === 'nexus'
                 ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 font-bold shadow-md shadow-emerald-950/40'
                 : 'text-emerald-400/90 hover:text-emerald-300'
             }`}
           >
             <Orbit size={13} />
-            <span>Nexus Lab</span>
+            <span className="text-[11px] sm:text-xs">Nexus Lab</span>
           </button>
         </nav>
       </div>
 
       {/* Right Controls */}
-      <div className="flex items-center gap-2 sm:gap-3">
-        {/* Google Drive Sync Controls */}
+      <div className="flex items-center gap-1.5 sm:gap-2.5">
+        {/* Auto-save Status Indicator (Clickable to open Storage & Sync Center) */}
+        <AutoSaveIndicator
+          autoSaveState={autoSaveState}
+          lastSavedAt={lastSavedAt}
+          isSaving={isSaving}
+          isSyncing={isSyncing}
+          destination={isSignedIn ? 'cloud' : saveDestination || 'local'}
+          onSaveNow={onSaveNow}
+          onClick={onOpenStorageSync}
+          variant="header"
+        />
+
+        {/* Google Drive / Cloud Sync Action */}
         {isSignedIn ? (
-          <div className="hidden sm:flex items-center gap-2 text-[11px] font-mono text-emerald-300 bg-emerald-950/70 px-2.5 py-1.5 rounded-lg border border-emerald-700/60">
-            <DriveIcon className="text-emerald-400" />
+          <button
+            type="button"
+            onClick={onOpenStorageSync || onSignOut}
+            className="inline-flex items-center gap-1.5 text-[11px] font-mono text-emerald-300 bg-emerald-950/70 hover:bg-emerald-900/80 px-2 sm:px-2.5 py-1.5 rounded-xl border border-emerald-700/60 transition-colors cursor-pointer min-h-[32px]"
+            title={`Connected: ${userEmail || 'Google Drive'}. Click to manage.`}
+          >
+            <DriveIcon className="text-emerald-400 shrink-0" />
             {isSyncing && <Loader2 size={12} className="animate-spin text-emerald-300" />}
-            {userEmail && (
-              <span className="max-w-[140px] truncate" title={userEmail}>
+            {userEmail ? (
+              <span className="hidden lg:inline max-w-[100px] truncate" title={userEmail}>
                 {userEmail}
               </span>
+            ) : (
+              <span className="hidden sm:inline">Drive</span>
             )}
-            <button
-              type="button"
-              onClick={onSignOut}
-              className="inline-flex items-center gap-1 text-emerald-200 hover:text-white font-bold transition-colors cursor-pointer"
-              title="Sign out of Google Drive sync"
-            >
-              <LogOut size={11} />
-              <span>Sign Out</span>
-            </button>
-          </div>
+          </button>
         ) : (
           <button
             type="button"
-            onClick={onSignIn}
-            className="inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-400 bg-slate-800 hover:bg-slate-700 hover:text-slate-200 px-2.5 py-1.5 rounded-lg border border-slate-700 transition-colors cursor-pointer"
-            title="Sync sessions to Google Drive"
+            onClick={onOpenStorageSync || onSignIn}
+            className="inline-flex items-center gap-1 text-[11px] font-mono text-slate-300 bg-slate-800/80 hover:bg-slate-700 px-2 sm:px-2.5 py-1.5 rounded-xl border border-slate-700 transition-colors cursor-pointer min-h-[32px]"
+            title="Where is data saved? Click for Storage & Cloud Sync"
           >
-            <DriveIcon className="text-slate-400" />
-            <span>Sync to Drive</span>
+            <DriveIcon className="text-slate-400 shrink-0" />
+            <span className="text-[10px] sm:text-[11px]">Sync</span>
           </button>
         )}
 
         {/* OpenRouter Balance Badge */}
         {accountBalance && (
           <div
-            className="hidden sm:inline-flex items-center gap-1 text-[11px] font-mono text-cyan-300 bg-cyan-950/80 px-2.5 py-1 rounded-lg border border-cyan-500/30 shadow-sm"
+            className="hidden md:inline-flex items-center gap-1 text-[11px] font-mono text-cyan-300 bg-cyan-950/80 px-2.5 py-1 rounded-xl border border-cyan-500/30 shadow-sm"
             title="Remaining OpenRouter Balance"
           >
             <Wallet size={12} className="text-cyan-400" />
@@ -172,10 +197,10 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
         {onOpenSettings && (
           <button
             onClick={onOpenSettings}
-            className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors shadow-sm cursor-pointer"
+            className="inline-flex items-center gap-1.5 text-xs px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors shadow-sm cursor-pointer min-h-[32px]"
             title="Council Settings & Safeguards"
           >
-            <Settings size={13} />
+            <Settings size={14} />
             <span className="hidden sm:inline font-medium">Settings</span>
           </button>
         )}

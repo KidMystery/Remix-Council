@@ -1,9 +1,10 @@
 import React from 'react';
 import { ShieldCheck, Coins, Zap, Clock, Sparkles, SlidersHorizontal } from 'lucide-react';
-import { Persona } from '../types';
+import { Persona, AutoSaveState } from '../types';
 import { RawOpenRouterModel, PresetId, cleanModelName, MODEL_PRESETS } from '../lib/presets';
 import { getAuthorOrganization, estimatedCost } from '../lib/modelMapper';
 import { formatUpdateTime } from '../lib/modelCache';
+import { AutoSaveIndicator } from './AutoSaveIndicator';
 
 interface CouncilSummaryBarProps {
   presetId?: PresetId | string;
@@ -13,6 +14,12 @@ interface CouncilSummaryBarProps {
   synthesizer?: Persona;
   rawModels?: RawOpenRouterModel[] | null;
   updatedAt?: number;
+  autoSaveState?: AutoSaveState;
+  lastSavedAt?: number | null;
+  isSaving?: boolean;
+  isSyncing?: boolean;
+  saveDestination?: 'cloud' | 'local' | null;
+  onSaveNow?: () => void | Promise<void>;
   onOpenSettings?: () => void;
   className?: string;
 }
@@ -25,6 +32,12 @@ export function CouncilSummaryBar({
   synthesizer,
   rawModels,
   updatedAt = Date.now(),
+  autoSaveState,
+  lastSavedAt,
+  isSaving,
+  isSyncing,
+  saveDestination,
+  onSaveNow,
   onOpenSettings,
   className = '',
 }: CouncilSummaryBarProps) {
@@ -182,6 +195,17 @@ export function CouncilSummaryBar({
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
+          {/* Auto-save Status Indicator */}
+          <AutoSaveIndicator
+            autoSaveState={autoSaveState}
+            lastSavedAt={lastSavedAt}
+            isSaving={isSaving}
+            isSyncing={isSyncing}
+            destination={saveDestination}
+            onSaveNow={onSaveNow}
+            variant="bar"
+          />
+
           {/* Est. Cost */}
           <div className="flex items-center gap-1 font-mono">
             <Coins size={13} className="text-amber-500 shrink-0" />

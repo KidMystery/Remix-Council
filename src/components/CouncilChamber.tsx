@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, AlertTriangle } from 'lucide-react';
-import type { Persona, CouncilRound, AttachedTextFile, ConsensusMetric, PersonaId } from '../types';
+import type { Persona, CouncilRound, AttachedTextFile, ConsensusMetric, PersonaId, AutoSaveState } from '../types';
 import { policyForPreset } from '../lib/executionPolicy';
 import { streamPersonaWithFallback } from '../lib/fallbackManager';
 import { resolveExecutionMode } from '../lib/modeClassifier';
@@ -9,6 +9,7 @@ import { preprocessLargeAttachment } from '../lib/chunkProcessor';
 import { useCouncilReducer } from '../hooks/useCouncilReducer';
 import { CouncilRoundView } from './CouncilRoundView';
 import { Composer } from './Composer';
+import { CouncilSummaryBar } from './CouncilSummaryBar';
 import { CHAIRMAN_PROMPT } from '../data';
 
 export interface CouncilSettings {
@@ -29,6 +30,12 @@ export interface CouncilChamberProps {
   rawModelsCatalog?: any[];
   settings?: Partial<CouncilSettings>;
   executionMode?: 'auto' | 'quick_panel' | 'deep_council';
+  autoSaveState?: AutoSaveState;
+  lastSavedAt?: number | null;
+  isSaving?: boolean;
+  isSyncing?: boolean;
+  saveDestination?: 'cloud' | 'local' | null;
+  onOpenSettings?: () => void;
   showToast?: (message: string, type?: 'info' | 'success' | 'error' | 'warning') => void;
 }
 
@@ -122,6 +129,12 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   rawModelsCatalog,
   settings = {},
   executionMode = 'auto',
+  autoSaveState,
+  lastSavedAt,
+  isSaving,
+  isSyncing,
+  saveDestination,
+  onOpenSettings,
   showToast,
 }) => {
   const [isDeliberating, setIsDeliberating] = useState(false);
@@ -754,6 +767,23 @@ If the question contains code, documents, or attached files, treat them as avail
           </div>
         );
       })()}
+
+      {/* Council Formation & Metric Summary Bar */}
+      <CouncilSummaryBar
+        presetId={activePresetId}
+        answerMode={executionMode}
+        personas={personas}
+        synthesizer={synthesizer}
+        rawModels={rawModelsCatalog}
+        updatedAt={Date.now()}
+        autoSaveState={autoSaveState}
+        lastSavedAt={lastSavedAt}
+        isSaving={isSaving}
+        isSyncing={isSyncing}
+        saveDestination={saveDestination}
+        onSaveNow={flushNow}
+        onOpenSettings={onOpenSettings}
+      />
 
       {/* Mode View Switcher */}
       <div className="flex items-center justify-between pb-2 border-b border-slate-800">

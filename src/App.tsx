@@ -18,6 +18,7 @@ import { CouncilChamber, type CouncilSettings } from './components/CouncilChambe
 import { NexusLabView } from './components/NexusLabView';
 import { CouncilSidebar } from './components/council/CouncilSidebar';
 import { SettingsPanel } from './components/SettingsPanel';
+import { StorageSyncModal } from './components/StorageSyncModal';
 import { UnifiedToast } from './components/UnifiedToast';
 
 const SETTINGS_KEYS = {
@@ -37,6 +38,7 @@ function loadBooleanSetting(key: string): boolean {
 export default function App() {
   const [view, setView] = useState<AppViewMode>('chamber');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isStorageSyncOpen, setIsStorageSyncOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [sessionSearchQuery, setSessionSearchQuery] = useState('');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -122,6 +124,10 @@ export default function App() {
     signIn,
     signOut,
     isSyncing,
+    isSaving,
+    lastSavedAt,
+    saveDestination,
+    autoSaveState,
     flushNow,
   } = useSessionManager();
 
@@ -222,9 +228,15 @@ export default function App() {
         sessionTitle={activeSession?.title}
         activePresetName={activePresetId === 'fast_and_free' ? 'Fast & Free' : 'Deep Council'}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenStorageSync={() => setIsStorageSyncOpen(true)}
         onToggleMobileDrawer={() => setIsSidebarOpen(true)}
         isSignedIn={isSignedIn}
         isSyncing={isSyncing}
+        isSaving={isSaving}
+        lastSavedAt={lastSavedAt}
+        saveDestination={saveDestination}
+        autoSaveState={autoSaveState}
+        onSaveNow={flushNow}
         onSignIn={handleSignIn}
         onSignOut={handleSignOut}
       />
@@ -252,8 +264,10 @@ export default function App() {
           onClearActiveHistory={() => clearSessionHistory()}
           isDeliberating={false}
           isSyncing={isSyncing}
+          isSignedIn={isSignedIn}
+          onOpenStorageSync={() => setIsStorageSyncOpen(true)}
           onSyncWithCloud={handleSignIn}
-          lastSyncedAt={activeSession?.updatedAt || null}
+          lastSyncedAt={lastSavedAt || activeSession?.updatedAt || null}
         />
 
         <main className="flex-1 w-full min-w-0">
@@ -270,6 +284,12 @@ export default function App() {
               rawModelsCatalog={catalog}
               settings={settings}
               executionMode={executionMode}
+              autoSaveState={autoSaveState}
+              lastSavedAt={lastSavedAt}
+              isSaving={isSaving}
+              isSyncing={isSyncing}
+              saveDestination={saveDestination}
+              onOpenSettings={() => setIsSettingsOpen(true)}
               showToast={showToast}
             />
           ) : (
@@ -347,6 +367,21 @@ export default function App() {
         setShowConsensusVisualizer={setShowConsensusVisualizer}
         enableWeightTuning={enableWeightTuning}
         setEnableWeightTuning={setEnableWeightTuning}
+      />
+
+      {/* Storage & Cloud Sync Center Modal */}
+      <StorageSyncModal
+        isOpen={isStorageSyncOpen}
+        onClose={() => setIsStorageSyncOpen(false)}
+        autoSaveState={autoSaveState}
+        isSignedIn={isSignedIn}
+        isSyncing={isSyncing}
+        onSignIn={handleSignIn}
+        onSignOut={handleSignOut}
+        onExportSessions={handleExportSessions}
+        onImportSessions={handleImportSessions}
+        onFlushNow={flushNow}
+        sessionsCount={sessions.length}
       />
 
       <UnifiedToast toasts={toasts} onDismiss={dismissToast} />

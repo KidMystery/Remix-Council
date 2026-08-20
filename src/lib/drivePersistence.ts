@@ -1,4 +1,5 @@
 import type { Session } from '../types';
+import firebaseConfig from '../../firebase-applet-config.json';
 
 /**
  * Google Drive persistence layer using the Drive REST API with tokens from
@@ -6,7 +7,14 @@ import type { Session } from '../types';
  * variable ONLY — it is never written to localStorage or sessionStorage.
  */
 
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+export const DRIVE_SCOPES = [
+  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/drive.appdata',
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
+];
+
+const DRIVE_SCOPE_STRING = DRIVE_SCOPES.join(' ');
 const SESSION_FILE_NAME = 'council-sessions.json';
 
 const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3';
@@ -16,9 +24,12 @@ let accessToken: string | null = null;
 let currentUserEmail: string | null = null;
 
 function getClientId(): string {
-  const clientId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || '';
+  const envId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || '';
+  const firebaseId = (firebaseConfig as any)?.oAuthClientId || '';
+  const customId = typeof window !== 'undefined' ? localStorage.getItem('council_custom_google_client_id') || '' : '';
+  const clientId = (envId && envId !== 'YOUR_GOOGLE_OAUTH_CLIENT_ID') ? envId : (firebaseId || customId);
   if (!clientId) {
-    throw new Error('Google Drive sync is not configured. Set VITE_GOOGLE_CLIENT_ID to enable it.');
+    throw new Error('Google Drive Cloud Sync requires a Google OAuth Client ID. You can enter one in Storage & Cloud Sync settings, or your data is already safely saved in Local Storage.');
   }
   return clientId;
 }
@@ -42,7 +53,7 @@ export function signInWithGoogle(): Promise<string> {
 
       const tokenClient = oauth2.initTokenClient({
         client_id: clientId,
-        scope: DRIVE_SCOPE,
+        scope: DRIVE_SCOPE_STRING,
         callback: (response: any) => {
           if (response?.error) {
             reject(new Error(response.error_description || response.error || 'Google sign-in failed.'));
