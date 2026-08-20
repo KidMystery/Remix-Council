@@ -1,5 +1,4 @@
-import { ArchiveManifestEntry } from '../types';
-import { ExtractedZipFile } from './zipReader';
+import type { ArchiveManifestEntry, ExtractedZipFile } from '../types';
 
 export const MAX_EXTRACTED_FILES = 200;
 export const MAX_FILE_CHARS = 150_000;

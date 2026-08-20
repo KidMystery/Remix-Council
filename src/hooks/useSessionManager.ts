@@ -292,25 +292,26 @@ export function useSessionManager() {
         } else {
           nextRounds.push(updatedRound);
         }
-        const updatedSession = {
+        return {
           ...s,
           rounds: nextRounds,
           updatedAt: Date.now(),
         };
-        if (throttle) {
-          writeLocalThrottled(next);
-          writeDriveThrottled(next);
-        } else {
-          persistToLocalStorage(next);
-          if (isGoogleSignedIn()) {
-            setIsSyncing(true);
-            saveSessionsToDrive(next)
-              .catch((err) => console.warn('[SessionManager] Drive immediate write error:', err))
-              .finally(() => setIsSyncing(false));
-          }
-        }
-        return updatedSession;
       });
+
+      if (throttle) {
+        writeLocalThrottled(next);
+        writeDriveThrottled(next);
+      } else {
+        persistToLocalStorage(next);
+        if (isGoogleSignedIn()) {
+          setIsSyncing(true);
+          saveSessionsToDrive(next)
+            .catch((err) => console.warn('[SessionManager] Drive immediate write error:', err))
+            .finally(() => setIsSyncing(false));
+        }
+      }
+
       return next;
     });
   }, [writeLocalThrottled, writeDriveThrottled]);
