@@ -202,32 +202,46 @@ export const StorageSyncModal: React.FC<StorageSyncModalProps> = ({
             </div>
 
             {isSignedIn ? (
-              <div className="p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/30 flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold text-emerald-200 truncate">
-                      {userEmail || 'Google Account Connected'}
-                    </div>
-                    <div className="text-[10px] text-emerald-400/80 font-mono">
-                      Real-time Drive cloud synchronization active
+              <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-emerald-200 truncate">
+                        {userEmail || 'Google Account Connected'}
+                      </div>
+                      <div className="text-[10px] text-emerald-400/80 font-mono">
+                        Real-time Drive cloud synchronization active
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-2">
+
                   <button
                     type="button"
                     onClick={handleManualSync}
                     disabled={isSyncing || isFlushing}
-                    className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-emerald-900/60 hover:bg-emerald-800 text-emerald-200 border border-emerald-600/40 transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-emerald-900/60 hover:bg-emerald-800 text-emerald-200 border border-emerald-600/40 transition-colors cursor-pointer shrink-0"
                   >
                     <RefreshCw size={12} className={isSyncing || isFlushing ? 'animate-spin' : ''} />
                     <span>Sync Now</span>
                   </button>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-emerald-800/40">
+                  <button
+                    type="button"
+                    onClick={handleSignInClick}
+                    disabled={isSigningIn}
+                    className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer"
+                    title="Choose a different Google Account"
+                  >
+                    <LogIn size={12} className="text-cyan-400" />
+                    <span>Switch Account</span>
+                  </button>
                   <button
                     type="button"
                     onClick={onSignOut}
-                    className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-red-950/40 hover:text-red-300 text-slate-300 border border-slate-700 hover:border-red-800/40 transition-colors cursor-pointer"
                   >
                     <LogOut size={12} />
                     <span>Sign Out</span>
@@ -246,12 +260,12 @@ export const StorageSyncModal: React.FC<StorageSyncModalProps> = ({
                     {isSigningIn ? (
                       <>
                         <Loader2 size={15} className="animate-spin" />
-                        <span>Connecting to Google...</span>
+                        <span>Opening Google Sign-In...</span>
                       </>
                     ) : (
                       <>
                         <LogIn size={15} />
-                        <span>Sign In with Google</span>
+                        <span>Sign In &amp; Choose Google Account</span>
                       </>
                     )}
                   </button>

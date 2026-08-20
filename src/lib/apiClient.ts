@@ -1,14 +1,15 @@
 function getCouncilAccessKey(): string {
   try {
-    const fromImportMeta = (import.meta as any).env?.VITE_COUNCIL_ACCESS_KEY;
-    if (fromImportMeta) return fromImportMeta;
+    if (typeof process !== 'undefined' && (process.env as any)?.VITE_COUNCIL_ACCESS_KEY !== undefined) {
+      const fromProcess = (process.env as any).VITE_COUNCIL_ACCESS_KEY;
+      if (fromProcess) return fromProcess;
+    }
   } catch {
     // ignore
   }
   try {
-    if (typeof process !== 'undefined') {
-      return (process.env as any)?.VITE_COUNCIL_ACCESS_KEY || '';
-    }
+    const fromImportMeta = (import.meta as any).env?.VITE_COUNCIL_ACCESS_KEY;
+    if (fromImportMeta) return fromImportMeta;
   } catch {
     // ignore
   }

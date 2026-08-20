@@ -23,6 +23,10 @@ const DRIVE_UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
 let accessToken: string | null = null;
 let currentUserEmail: string | null = null;
 
+export interface SignInOptions {
+  prompt?: 'select_account' | 'consent' | 'consent select_account' | '';
+}
+
 function getClientId(): string {
   const envId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || '';
   const firebaseId = (firebaseConfig as any)?.oAuthClientId || '';
@@ -34,44 +38,84 @@ function getClientId(): string {
   return clientId;
 }
 
-function getGisClient(): any {
-  const google = (window as any).google;
-  if (!google?.accounts?.oauth2) {
-    throw new Error('Google Identity Services is not loaded. Check the GIS script tag in index.html.');
+function getGisClientAsync(): Promise<any> {
+  if (typeof window === 'undefined') {
+    return Promise.reject(new Error('Window environment is not available.'));
   }
-  return google.accounts.oauth2;
+  if ((window as any).google?.accounts?.oauth2) {
+    return Promise.resolve((window as any).google.accounts.oauth2);
+  }
+  return new Promise((resolve, reject) => {
+    let elapsed = 0;
+    const interval = setInterval(() => {
+      elapsed += 100;
+      if ((window as any).google?.accounts?.oauth2) {
+        clearInterval(interval);
+        resolve((window as any).google.accounts.oauth2);
+      } else if (elapsed >= 5000) {
+        clearInterval(interval);
+        reject(new Error('Google Identity Services client took too long to load. Please check your internet connection or reload the page.'));
+      }
+    }, 100);
+  });
 }
 
 /**
  * Signs in with Google via GIS token client and resolves with the access token.
+ * Explicitly uses prompt: 'select_account' so the user is presented with the Google
+ * account selector and login screen rather than silently picking a predetermined profile.
  */
-export function signInWithGoogle(): Promise<string> {
+export async function signInWithGoogle(options: SignInOptions = { prompt: 'select_account' }): Promise<string> {
+  const clientId = getClientId();
+  const oauth2 = await getGisClientAsync();
+
   return new Promise<string>((resolve, reject) => {
     try {
-      const clientId = getClientId();
-      const oauth2 = getGisClient();
-
       const tokenClient = oauth2.initTokenClient({
         client_id: clientId,
         scope: DRIVE_SCOPE_STRING,
-        callback: (response: any) => {
+        callback: async (response: any) => {
           if (response?.error) {
+            if (response.error === 'popup_closed_by_user') {
+              reject(new Error('Google sign-in popup was closed before completing.'));
+              return;
+            }
             reject(new Error(response.error_description || response.error || 'Google sign-in failed.'));
             return;
           }
+
           if (response?.access_token) {
             accessToken = response.access_token;
-            if (response.email) {
-              currentUserEmail = response.email;
+
+            // Fetch user email/profile from Drive About endpoint
+            try {
+              const userRes = await fetch(`${DRIVE_API_BASE}/about?fields=user`, {
+                headers: { Authorization: `Bearer ${accessToken}` },
+              });
+              if (userRes.ok) {
+                const data = await userRes.json();
+                if (data?.user?.emailAddress) {
+                  currentUserEmail = data.user.emailAddress;
+                } else if (data?.user?.displayName) {
+                  currentUserEmail = data.user.displayName;
+                }
+              }
+            } catch (err) {
+              console.warn('[DrivePersistence] Could not fetch user profile details:', err);
             }
+
             resolve(response.access_token);
             return;
           }
+
           reject(new Error('Google sign-in did not return an access token.'));
         },
       });
 
-      tokenClient.requestAccessToken();
+      // Always request with prompt: 'select_account' so the user gets the Google account picker
+      tokenClient.requestAccessToken({
+        prompt: options.prompt !== undefined ? options.prompt : 'select_account',
+      });
     } catch (err: any) {
       reject(err instanceof Error ? err : new Error(err?.message || 'Google sign-in failed.'));
     }
@@ -84,7 +128,14 @@ export function signInWithGoogle(): Promise<string> {
 export async function signOutGoogle(): Promise<void> {
   if (accessToken) {
     try {
-      await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(accessToken)}`);
+      const google = typeof window !== 'undefined' ? (window as any).google : null;
+      if (google?.accounts?.oauth2?.revoke) {
+        await new Promise<void>((resolve) => {
+          google.accounts.oauth2.revoke(accessToken, () => resolve());
+        });
+      } else {
+        await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(accessToken)}`);
+      }
     } catch (err) {
       console.warn('[DrivePersistence] Token revocation failed:', err);
     }
