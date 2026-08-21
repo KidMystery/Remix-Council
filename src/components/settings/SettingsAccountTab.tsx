@@ -3,7 +3,7 @@ import { RefreshCw, LogIn, LogOut } from 'lucide-react';
 import { getCurrentUserEmail } from '../../lib/drivePersistence';
 
 interface SettingsAccountTabProps {
-  usageData: { usage: number; limit: number | null } | null;
+  usageData: { usage: number; limit: number | null; remaining?: number | null } | null;
   onRefresh?: () => void;
   isSignedIn?: boolean;
   onSignIn?: () => void;
@@ -17,7 +17,12 @@ export const SettingsAccountTab: React.FC<SettingsAccountTabProps> = ({
   onSignIn,
   onSignOut,
 }) => {
-  const remaining = usageData && usageData.limit !== null ? Math.max(0, usageData.limit - usageData.usage) : null;
+  const remaining =
+    usageData && usageData.remaining != null
+      ? Math.max(0, usageData.remaining)
+      : usageData && usageData.limit !== null
+        ? Math.max(0, usageData.limit - usageData.usage)
+        : null;
   const pct = usageData && usageData.limit ? Math.min(100, (usageData.usage / usageData.limit) * 100) : null;
   const email = getCurrentUserEmail();
 
@@ -89,13 +94,20 @@ export const SettingsAccountTab: React.FC<SettingsAccountTabProps> = ({
           <p className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">OpenRouter Credits</p>
           {usageData ? (
             <div className="text-center w-full">
-              <p className="text-4xl font-black text-slate-800 dark:text-white">
-                ${(remaining ?? usageData.usage).toFixed(2)}
-                <span className="text-base font-semibold text-slate-500 dark:text-slate-400"> remaining</span>
-              </p>
+              {remaining !== null ? (
+                <p className="text-4xl font-black text-slate-800 dark:text-white">
+                  ${remaining.toFixed(2)}
+                  <span className="text-base font-semibold text-slate-500 dark:text-slate-400"> left</span>
+                </p>
+              ) : (
+                <p className="text-4xl font-black text-slate-800 dark:text-white">
+                  ${usageData.usage.toFixed(2)}
+                  <span className="text-base font-semibold text-slate-500 dark:text-slate-400"> spent</span>
+                </p>
+              )}
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                 Used ${usageData.usage.toFixed(4)}
-                {usageData.limit !== null ? ` of $${usageData.limit.toFixed(2)} limit` : ' (no hard limit reported)'}
+                {usageData.limit !== null ? ` of $${usageData.limit.toFixed(2)} credit` : ' (credit total not reported by OpenRouter)'}
               </p>
 
               {pct !== null && (
