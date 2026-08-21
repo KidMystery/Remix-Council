@@ -13,12 +13,15 @@ import {
   Check,
   RotateCw,
   AlertTriangle,
+  Trash2,
 } from 'lucide-react';
 import type { CouncilRound, Persona } from '../types';
 import { useSpeech } from '../hooks/useSpeech';
 import { copyToClipboard } from '../lib/clipboard';
+import { countRoundCost, formatCost } from '../lib/archivist';
 import { MessageMarkdown } from './MessageMarkdown';
 import { SynthesisCard } from './SynthesisCard';
+import { ConfirmButton } from './ConfirmButton';
 
 export interface CouncilRoundViewProps {
   round: CouncilRound;
@@ -31,6 +34,7 @@ export interface CouncilRoundViewProps {
   onReSynthesize?: (round: CouncilRound, personas: Persona[]) => void;
   onRegeneratePersona?: (personaId: string, roundId: string) => void;
   onForkBranch?: (branchName: string) => void;
+  onDeleteRound?: (roundId: string) => void;
   isDeliberating?: boolean;
   showConsensusVisualizer?: boolean;
 }
@@ -192,6 +196,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
   onReSynthesize,
   onRegeneratePersona,
   onForkBranch,
+  onDeleteRound,
   isDeliberating = false,
   showConsensusVisualizer = false,
 }) => {
@@ -264,6 +269,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
 
   const stage1Completed = activePersonas.filter((p) => stage1[p.id]?.status === 'completed').length;
   const stage2Completed = activePersonas.filter((p) => stage2[p.id]?.status === 'completed').length;
+  const roundCost = countRoundCost(round).totalCost;
 
   const handleCopy = (id: string, text: string) => {
     copyToClipboard(text);
@@ -373,6 +379,8 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
             </span>
             <span>•</span>
             <span className="text-cyan-400 font-sans">{activePersonas.length} Panelists</span>
+            <span>•</span>
+            <span className="text-emerald-400 font-sans" title="Estimated round cost">{formatCost(roundCost)}</span>
             {round.branchName && (
               <>
                 <span>•</span>
@@ -419,6 +427,16 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
                   <RefreshCw size={11} />
                   <span>Re-run</span>
                 </button>
+              )}
+              {onDeleteRound && (
+                <ConfirmButton
+                  onConfirm={() => onDeleteRound(round.id)}
+                  disabled={isDeliberating}
+                  className="inline-flex items-center gap-1 text-xs font-mono text-slate-400 hover:text-red-300 bg-slate-800 hover:bg-slate-700 p-1.5 rounded-lg border border-slate-700 transition-colors disabled:opacity-50 cursor-pointer"
+                  title="Delete round"
+                  confirmPrompt={<Trash2 size={12} />}
+                  idleChildren={<Trash2 size={12} />}
+                />
               )}
             </>
           )}

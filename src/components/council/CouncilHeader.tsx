@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { Shield, Settings, Wallet, Menu, Orbit, MessagesSquare, Loader2, LogOut, HardDrive } from 'lucide-react';
+import React, { useEffect } from 'react';
+import { Shield, Settings, Wallet, Menu, Orbit, MessagesSquare, Loader2, LogOut, HardDrive, BookOpen } from 'lucide-react';
 import { getCurrentUserEmail } from '../../lib/drivePersistence';
+import { useOpenRouterCredits } from '../../hooks/useOpenRouterCredits';
 import { AutoSaveIndicator } from '../AutoSaveIndicator';
 import type { AutoSaveState } from '../../types';
 
-export type AppViewMode = 'chamber' | 'nexus';
+export type AppViewMode = 'chamber' | 'nexus' | 'oracle';
 
 export interface CouncilHeaderProps {
   currentView: AppViewMode;
@@ -51,35 +52,8 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
   onSignIn,
   onSignOut,
 }) => {
-  const [accountBalance, setAccountBalance] = useState<string | null>(null);
   const userEmail = getCurrentUserEmail();
-
-  useEffect(() => {
-    let isMounted = true;
-    const fetchBalance = async () => {
-      try {
-        const secret = (import.meta as any).env?.VITE_COUNCIL_ACCESS_KEY || '';
-        const res = await fetch('/api/council/account', {
-          headers: { 'x-council-key': secret },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (isMounted && data?.data?.limit !== null && data?.data?.usage !== undefined) {
-          const remaining = Math.max(0, data.data.limit - data.data.usage);
-          setAccountBalance(`$${remaining.toFixed(2)}`);
-        }
-      } catch {
-        if (isMounted) setAccountBalance(null);
-      }
-    };
-
-    fetchBalance();
-    const interval = setInterval(fetchBalance, 5 * 60 * 1000);
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
-  }, []);
+  const { credits, refresh: refreshCredits } = useOpenRouterCredits();
 
   return (
     <header className="flex items-center justify-between px-2.5 sm:px-5 py-2 sm:py-2.5 border-b border-slate-800 bg-slate-900/95 backdrop-blur-md sticky top-0 z-40">
@@ -134,6 +108,19 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
             <Orbit size={13} />
             <span className="text-[11px] sm:text-xs">Nexus Lab</span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => onNavigate('oracle')}
+            className={`inline-flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg transition-all cursor-pointer min-h-[32px] ${
+              currentView === 'oracle'
+                ? 'bg-gradient-to-r from-indigo-500 to-fuchsia-500 text-slate-950 font-bold shadow-md shadow-indigo-950/40'
+                : 'text-indigo-400/90 hover:text-indigo-300'
+            }`}
+          >
+            <BookOpen size={13} />
+            <span className="text-[11px] sm:text-xs">Oracle</span>
+          </button>
         </nav>
       </div>
 
@@ -181,17 +168,27 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
           </button>
         )}
 
-        {/* OpenRouter Balance Badge */}
-        {accountBalance && (
-          <div
-            className="hidden md:inline-flex items-center gap-1 text-[11px] font-mono text-cyan-300 bg-cyan-950/80 px-2.5 py-1 rounded-xl border border-cyan-500/30 shadow-sm"
-            title="Remaining OpenRouter Balance"
-          >
-            <Wallet size={12} className="text-cyan-400" />
-            <span className="text-cyan-500 font-sans text-[10px]">Bal:</span>
-            <strong>{accountBalance}</strong>
-          </div>
-        )}
+        {/* OpenRouter Credits Badge (server-side key — click to refresh) */}
+        <button
+          type="button"
+          onClick={refreshCredits}
+          className="hidden md:inline-flex items-center gap-1 text-[11px] font-mono text-cyan-300 bg-cyan-950/80 px-2.5 py-1 rounded-xl border border-cyan-500/30 shadow-sm cursor-pointer hover:bg-cyan-900/60"
+          title={
+            credits.limit !== null
+              ? `OpenRouter credits — used $${credits.usage.toFixed(2)} of $${credits.limit.toFixed(2)}. Click to refresh.`
+              : 'OpenRouter credits (click to refresh)'
+          }
+        >
+          <Wallet size={12} className="text-cyan-400" />
+          <span className="text-cyan-500 font-sans text-[10px]">Credits:</span>
+          {credits.limit !== null ? (
+            <strong>${credits.remaining?.toFixed(2)}</strong>
+          ) : credits.loading ? (
+            <strong>…</strong>
+          ) : (
+            <strong>—</strong>
+          )}
+        </button>
 
         {/* Settings Button */}
         {onOpenSettings && (

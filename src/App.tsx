@@ -16,6 +16,7 @@ import type {
 import { CouncilHeader, type AppViewMode } from './components/council/CouncilHeader';
 import { CouncilChamber, type CouncilSettings } from './components/CouncilChamber';
 import { NexusLabView } from './components/NexusLabView';
+import { OracleView } from './components/OracleView';
 import { CouncilSidebar } from './components/council/CouncilSidebar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { StorageSyncModal } from './components/StorageSyncModal';
@@ -113,6 +114,7 @@ export default function App() {
     activeSessionId,
     createSession,
     selectSession,
+    renameSession,
     deleteSession,
     clearSessionHistory,
     clearAllSessions,
@@ -242,7 +244,8 @@ export default function App() {
       />
 
       <div className="flex flex-1 w-full">
-        <CouncilSidebar
+        {view !== 'oracle' && (
+          <CouncilSidebar
           isOpen={isSidebarOpen}
           onClose={() => setIsSidebarOpen(false)}
           sessions={sessions}
@@ -260,6 +263,7 @@ export default function App() {
             setIsSidebarOpen(false);
           }}
           onDeleteSession={(id) => deleteSession(id)}
+          onRenameSession={(id, title) => renameSession(id, title)}
           onClearAllSessions={clearAllSessions}
           onClearActiveHistory={() => clearSessionHistory()}
           isDeliberating={false}
@@ -269,6 +273,7 @@ export default function App() {
           onSyncWithCloud={handleSignIn}
           lastSyncedAt={lastSavedAt || activeSession?.updatedAt || null}
         />
+        )}
 
         <main className="flex-1 w-full min-w-0">
           {view === 'chamber' ? (
@@ -280,10 +285,19 @@ export default function App() {
               activeSessionId={activeSessionId}
               onUpdateRound={updateRoundInActiveSession}
               onCompleteRound={updateRoundInActiveSession}
+              onDeleteRound={deleteRoundFromActiveSession}
               flushNow={flushNow}
               rawModelsCatalog={catalog}
               settings={settings}
               executionMode={executionMode}
+              webMode={webMode}
+              autoSelectModels={autoSelectModels}
+              maxTokens={maxTokens}
+              quickPanelMaxTokens={quickPanelMaxTokens}
+              synthesisMaxTokens={synthesisMaxTokens}
+              panelTimeoutSeconds={panelTimeoutSeconds}
+              stopAfterStage1={stopAfterStage1}
+              maxRoundCostCeiling={maxRoundCostCeiling}
               autoSaveState={autoSaveState}
               lastSavedAt={lastSavedAt}
               isSaving={isSaving}
@@ -292,7 +306,7 @@ export default function App() {
               onOpenSettings={() => setIsSettingsOpen(true)}
               showToast={showToast}
             />
-          ) : (
+          ) : view === 'nexus' ? (
             <NexusLabView
               personas={personas}
               synthesizer={synthesizer}
@@ -301,6 +315,8 @@ export default function App() {
               activeSessionId={activeSessionId}
               costCeiling={costCeiling}
             />
+          ) : (
+            <OracleView isSignedIn={isSignedIn} />
           )}
         </main>
       </div>
@@ -361,6 +377,9 @@ export default function App() {
         onExportSessions={handleExportSessions}
         onImportSessions={handleImportSessions}
         sessionsCount={sessions.length}
+        isSignedIn={isSignedIn}
+        onSignIn={handleSignIn}
+        onSignOut={handleSignOut}
         enableChunking={enableChunking}
         setEnableChunking={setEnableChunking}
         showConsensusVisualizer={showConsensusVisualizer}

@@ -5,6 +5,7 @@ import { Persona, NotificationPreferences } from '../types';
 import { applyPreset, PresetId } from '../lib/presets';
 import { CouncilPreset } from '../lib/councilPresets';
 import { useModelRecommendations } from '../hooks/useModelRecommendations';
+import { useOpenRouterCredits } from '../hooks/useOpenRouterCredits';
 import { CreatePersonalityModal } from './CreatePersonalityModal';
 import { SettingsPersonasTab } from './settings/SettingsPersonasTab';
 import { SettingsPresetsTab } from './settings/SettingsPresetsTab';
@@ -69,6 +70,9 @@ interface SettingsPanelProps {
   onExportSessions?: () => void;
   onImportSessions?: (file: File) => void;
   sessionsCount?: number;
+  isSignedIn?: boolean;
+  onSignIn?: () => void;
+  onSignOut?: () => void;
   enableChunking?: boolean;
   setEnableChunking?: (val: boolean) => void;
   showConsensusVisualizer?: boolean;
@@ -132,6 +136,9 @@ export function SettingsPanel({
   onExportSessions,
   onImportSessions,
   sessionsCount,
+  isSignedIn = false,
+  onSignIn,
+  onSignOut,
   enableChunking = false,
   setEnableChunking,
   showConsensusVisualizer = false,
@@ -143,6 +150,14 @@ export function SettingsPanel({
   const [usageData, setUsageData] = useState<{ usage: number; limit: number | null } | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editingPersona, setEditingPersona] = useState<Persona | null>(null);
+
+  const { credits, refresh: refreshCredits } = useOpenRouterCredits();
+
+  useEffect(() => {
+    if (credits.limit !== null) {
+      setUsageData({ usage: credits.usage, limit: credits.limit });
+    }
+  }, [credits]);
 
   const hookRecs = useModelRecommendations();
 
@@ -341,6 +356,10 @@ export function SettingsPanel({
           {activeTab === 'account' && (
             <SettingsAccountTab
               usageData={usageData}
+              onRefresh={refreshCredits}
+              isSignedIn={isSignedIn}
+              onSignIn={onSignIn}
+              onSignOut={onSignOut}
             />
           )}
         </div>

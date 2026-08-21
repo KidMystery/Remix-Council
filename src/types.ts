@@ -176,6 +176,7 @@ export interface CouncilRound {
   resolvedMode?: ResolvedExecutionMode;
   mode?: 'full' | 'quick_panel' | 'autonomous' | 'nexus_lab';
   isQuickPanel?: boolean;
+  isFollowUp?: boolean;
   parentRoundId?: string;
   branchName?: string;
   cost?: number;

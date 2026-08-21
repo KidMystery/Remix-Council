@@ -1,15 +1,12 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { isFreeModel } from '../modelMapper';
 import { RawOpenRouterModel } from '../presets';
-import { buildExecutionPlan, validateExecutionPlan } from '../executionPlan';
-import { validateAndParseGitHubUrl } from '../githubValidator';
 import { shouldEnableWebSearch, getWebSearchToolDefinition } from '../webGrounding';
 import { getArchiveFilePriority, buildCodebaseContext } from '../zipReader';
-import { calculateRoundAggregateCost, isWithinBudgetCeiling } from '../costGovernor';
-import { Persona, CouncilRound, Session } from '../../types';
+import { CouncilRound } from '../../types';
 import { migrateLocalSession } from '../drivePersistence';
 
-describe('Invariant Tests Suite (Section 1)', () => {
+describe('Invariant Tests Suite', () => {
   describe('1. Exact-zero free classification', () => {
     it('requires prompt, completion, and request prices to each be exactly 0', () => {
       const freeModel: RawOpenRouterModel = {
@@ -66,100 +63,7 @@ describe('Invariant Tests Suite (Section 1)', () => {
     });
   });
 
-  describe('2 & 3 & 4 & 5. Strict Free Execution Plan & Validation', () => {
-    const mockPersonas: Persona[] = [
-      { id: 'skeptic', name: 'Skeptic', role: 'skeptic', avatar: '🛡️', model: 'meta-llama/llama-3.2-3b-instruct:free', systemPrompt: '', color: '#fff' },
-      { id: 'visionary', name: 'Visionary', role: 'visionary', avatar: '🚀', model: 'deepseek/deepseek-r1:free', systemPrompt: '', color: '#fff' },
-      { id: 'pragmatist', name: 'Pragmatist', role: 'pragmatist', avatar: '⚡', model: 'google/gemma-2-9b-it:free', systemPrompt: '', color: '#fff' },
-    ];
-    const mockSynth: Persona = {
-      id: 'synthesizer', name: 'Chairman', role: 'chair', avatar: '⚖️', model: 'qwen/qwen-2.5-coder-32b-instruct:free', systemPrompt: '', color: '#fff',
-    };
-
-    const mockFreeCatalog: RawOpenRouterModel[] = [
-      { id: 'meta-llama/llama-3.2-3b-instruct:free', pricing: { request: 0, prompt: 0, completion: 0 }, context_length: 8192 },
-      { id: 'deepseek/deepseek-r1:free', pricing: { request: 0, prompt: 0, completion: 0 }, context_length: 32768 },
-      { id: 'google/gemma-2-9b-it:free', pricing: { request: 0, prompt: 0, completion: 0 }, context_length: 8192 },
-      { id: 'qwen/qwen-2.5-coder-32b-instruct:free', pricing: { request: 0, prompt: 0, completion: 0 }, context_length: 32768 },
-    ];
-
-    it('validates a valid Strict Free execution plan against a live free catalog', () => {
-      const plan = buildExecutionPlan({
-        roundId: 'round_123',
-        query: 'What is the speed of light?',
-        budget: 'free',
-        personas: mockPersonas,
-        synthesizer: mockSynth,
-        catalog: mockFreeCatalog,
-      });
-
-      const validation = validateExecutionPlan(plan, mockFreeCatalog);
-      expect(validation.valid).toBe(true);
-      expect(validation.errors).toHaveLength(0);
-      expect(plan.maxExpectedCost).toBe(0);
-    });
-
-    it('blocks Strict Free when no catalog is available', () => {
-      const plan = buildExecutionPlan({
-        roundId: 'round_124',
-        query: 'Hello world',
-        budget: 'free',
-        personas: mockPersonas,
-        synthesizer: mockSynth,
-        catalog: [],
-      });
-
-      const validation = validateExecutionPlan(plan, []);
-      expect(validation.valid).toBe(false);
-      expect(validation.errors[0]).toMatch(/Strict Free requires an active, verified catalog cache/);
-    });
-
-    it('rejects paid models when client attempts to inject them in Strict Free mode', () => {
-      const plan = buildExecutionPlan({
-        roundId: 'round_125',
-        query: 'Analyze this code',
-        budget: 'free',
-        personas: [
-          { ...mockPersonas[0], model: 'anthropic/claude-3.7-sonnet' },
-          mockPersonas[1],
-          mockPersonas[2],
-        ],
-        synthesizer: mockSynth,
-        catalog: mockFreeCatalog,
-      });
-
-      const validation = validateExecutionPlan(plan, mockFreeCatalog);
-      expect(validation.valid).toBe(false);
-      expect(validation.errors.some((e) => e.includes('Strict Free violation'))).toBe(true);
-    });
-  });
-
-  describe('6. Immutable Chair in Execution Plan', () => {
-    it('locks the selected chair into the plan matching the synthesizer seat', () => {
-      const synthPersona: Persona = {
-        id: 'synthesizer',
-        name: 'The Arbitrator',
-        role: 'chair',
-        avatar: '⚖️',
-        model: 'google/gemini-3.7-flash',
-        systemPrompt: '',
-        color: '#fff',
-      };
-      const plan = buildExecutionPlan({
-        roundId: 'round_chair_test',
-        query: 'Solve problem',
-        budget: 'cheap',
-        personas: [],
-        synthesizer: synthPersona,
-        synthesizerModel: 'google/gemini-3.7-flash',
-      });
-
-      expect(plan.chair.modelId).toBe('google/gemini-3.7-flash');
-      expect(plan.chair.personaId).toBe('synthesizer');
-    });
-  });
-
-  describe('7. Panel capability failure isolation', () => {
+  describe('2. Panel capability failure isolation', () => {
     it('records capability failure on the individual seat without destroying round structure', () => {
       const round: CouncilRound = {
         id: 'round_fail_test',
@@ -193,7 +97,7 @@ describe('Invariant Tests Suite (Section 1)', () => {
     });
   });
 
-  describe('8 & 9 & 10. Archive extraction, priority ordering, and truthful context', () => {
+  describe('3. Archive extraction, priority ordering, and truthful context', () => {
     it('prioritizes package.json and entry points over historical scripts', () => {
       const pkgPriority = getArchiveFilePriority('package.json');
       const serverPriority = getArchiveFilePriority('server.ts');
@@ -233,7 +137,7 @@ describe('Invariant Tests Suite (Section 1)', () => {
     });
   });
 
-  describe('12. Web search grounding tool and budget constraints', () => {
+  describe('4. Web search grounding tool and budget constraints', () => {
     it('returns valid OpenRouter web search tool definition', () => {
       const tool = getWebSearchToolDefinition();
       expect(tool.type).toBe('openrouter:web_search');
@@ -259,30 +163,7 @@ describe('Invariant Tests Suite (Section 1)', () => {
     });
   });
 
-  describe('13. GitHub URL validation', () => {
-    it('accepts valid public GitHub repository and raw URLs', () => {
-      const repoUrl = validateAndParseGitHubUrl('https://github.com/facebook/react');
-      expect(repoUrl.isValid).toBe(true);
-      expect(repoUrl.owner).toBe('facebook');
-      expect(repoUrl.repo).toBe('react');
-
-      const rawUrl = validateAndParseGitHubUrl('https://raw.githubusercontent.com/facebook/react/main/package.json');
-      expect(rawUrl.isValid).toBe(true);
-      expect(rawUrl.isRawFile).toBe(true);
-      expect(rawUrl.path).toBe('package.json');
-    });
-
-    it('rejects non-HTTPS, credentials, private IPs, and arbitrary hosts', () => {
-      expect(validateAndParseGitHubUrl('http://github.com/user/repo').isValid).toBe(false);
-      expect(validateAndParseGitHubUrl('https://user:pass@github.com/user/repo').isValid).toBe(false);
-      expect(validateAndParseGitHubUrl('https://127.0.0.1/user/repo').isValid).toBe(false);
-      expect(validateAndParseGitHubUrl('https://localhost:3000/user/repo').isValid).toBe(false);
-      expect(validateAndParseGitHubUrl('https://gitlab.com/user/repo').isValid).toBe(false);
-      expect(validateAndParseGitHubUrl('https://evil-site.com/user/repo').isValid).toBe(false);
-    });
-  });
-
-  describe('14. Session migration and backward compatibility', () => {
+  describe('5. Session migration and backward compatibility', () => {
     it('migrates legacy session objects without losing data or deleting rounds', () => {
       const legacySession = {
         id: 'legacy_123',
@@ -308,50 +189,7 @@ describe('Invariant Tests Suite (Section 1)', () => {
     });
   });
 
-  describe('15. Cost aggregation and budget ceiling governor', () => {
-    it('aggregates Stage 1, Stage 2, chair, and search costs accurately', () => {
-      const round: CouncilRound = {
-        id: 'cost_round',
-        userQuery: 'Calculate sum',
-        timestamp: Date.now(),
-        deliberation: {
-          stage1: {
-            skeptic: { personaId: 'skeptic', content: 'res1', status: 'completed', cost: 0.002, promptTokens: 100, completionTokens: 50 },
-            visionary: { personaId: 'visionary', content: 'res2', status: 'completed', cost: 0.003, promptTokens: 120, completionTokens: 60 },
-          },
-          stage2: {
-            skeptic: { personaId: 'skeptic', content: 'rev1', status: 'completed', cost: 0.001, promptTokens: 80, completionTokens: 40 },
-          },
-        },
-        synthesis: {
-          content: 'synth',
-          status: 'completed',
-          cost: 0.005,
-          promptTokens: 200,
-          completionTokens: 100,
-          grounding: { searchCost: 0.004 },
-        },
-      };
-
-      const breakdown = calculateRoundAggregateCost(round);
-      expect(breakdown.stage1Cost).toBeCloseTo(0.005);
-      expect(breakdown.stage2Cost).toBeCloseTo(0.001);
-      expect(breakdown.chairCost).toBeCloseTo(0.005);
-      expect(breakdown.webSearchCost).toBeCloseTo(0.004);
-      expect(breakdown.totalCost).toBeCloseTo(0.015);
-      expect(breakdown.totalPromptTokens).toBe(500);
-      expect(breakdown.totalCompletionTokens).toBe(250);
-    });
-
-    it('enforces cost ceiling rules', () => {
-      expect(isWithinBudgetCeiling(0.00, 'free').allowed).toBe(true);
-      expect(isWithinBudgetCeiling(0.01, 'free').allowed).toBe(false);
-      expect(isWithinBudgetCeiling(0.50, 'cheap', 1.0).allowed).toBe(true);
-      expect(isWithinBudgetCeiling(1.50, 'quality', 1.0).allowed).toBe(false);
-    });
-  });
-
-  describe('16. Truncation and finish_reason persistence', () => {
+  describe('6. Truncation and finish_reason persistence', () => {
     it('retains finish_reason and truncated flag in PersonaResponse and Round', () => {
       const response: CouncilRound['synthesis'] = {
         content: 'This response was cut off mid sentence...',

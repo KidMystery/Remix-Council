@@ -4,6 +4,7 @@ import { CouncilRound, PersonaId, PersonaResponse, RoundRating } from '../types'
 export type CouncilAction =
   | { type: 'SET_ROUNDS'; payload: CouncilRound[] }
   | { type: 'ADD_ROUND'; payload: CouncilRound }
+  | { type: 'UPSERT_ROUND'; payload: CouncilRound }
   | { type: 'DELETE_ROUND'; payload: { roundId: string } }
   | { type: 'SET_ROUND_RATING'; payload: { roundId: string; rating: RoundRating } }
   | { type: 'START_STAGE1'; payload: { roundId: string; initialStage1: Record<PersonaId, PersonaResponse> } }
@@ -79,6 +80,16 @@ export function councilReducer(state: CouncilRound[], action: CouncilAction): Co
 
     case 'ADD_ROUND':
       return [...state, action.payload];
+
+    case 'UPSERT_ROUND': {
+      const idx = state.findIndex((r) => r.id === action.payload.id);
+      if (idx >= 0) {
+        const next = state.slice();
+        next[idx] = action.payload;
+        return next;
+      }
+      return [...state, action.payload];
+    }
 
     case 'DELETE_ROUND': {
       return state.filter((r) => r.id !== action.payload.roundId);

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { Session, CouncilRound, Persona } from '../types';
+import { summarizeTitle } from '../lib/titleUtils';
 import {
   saveSessionsToDrive,
   loadSessionsFromDrive,
@@ -224,13 +225,11 @@ export function useSessionManager() {
       updatedAt: Date.now(),
     };
 
-    setSessions((prev) => {
-      const next = [newSession, ...prev];
-      writeLocalThrottled(next);
-      writeDriveThrottled(next);
-      return next;
-    });
+    const next = [newSession, ...sessionsRef.current];
+    setSessions(next);
     setActiveSessionId(newSession.id);
+    writeLocalThrottled(next);
+    writeDriveThrottled(next);
     return newSession;
   }, [writeLocalThrottled, writeDriveThrottled]);
 
@@ -238,36 +237,41 @@ export function useSessionManager() {
     setActiveSessionId(sessionId);
   }, []);
 
+  const renameSession = useCallback((sessionId: string, title: string) => {
+    const clean = (title || '').trim();
+    if (!clean) return;
+    const next = sessionsRef.current.map((s) =>
+      s.id === sessionId ? { ...s, title: clean, updatedAt: Date.now() } : s
+    );
+    setSessions(next);
+    writeLocalThrottled(next);
+    writeDriveThrottled(next);
+  }, [writeLocalThrottled, writeDriveThrottled]);
+
   const deleteSession = useCallback((sessionId: string) => {
-    setSessions((prev) => {
-      const next = prev.filter((s) => s.id !== sessionId);
-      if (activeSessionId === sessionId) {
-        setActiveSessionId(next[0]?.id || null);
-      }
-      writeLocalThrottled(next);
-      writeDriveThrottled(next);
-      return next;
-    });
+    const next = sessionsRef.current.filter((s) => s.id !== sessionId);
+    setSessions(next);
+    setActiveSessionId((prev) => (prev === sessionId ? next[0]?.id || null : prev));
+    writeLocalThrottled(next);
+    writeDriveThrottled(next);
     if (isGoogleSignedIn()) {
       setIsSyncing(true);
       deleteSessionFromDrive(sessionId)
         .catch((err) => console.warn('[SessionManager] Drive delete error:', err))
         .finally(() => setIsSyncing(false));
     }
-  }, [activeSessionId, writeLocalThrottled, writeDriveThrottled]);
+  }, [writeLocalThrottled, writeDriveThrottled]);
 
   /** Clears the round history of a session (defaults to the active session). */
   const clearSessionHistory = useCallback((sessionId?: string) => {
     const targetId = sessionId || activeSessionId;
     if (!targetId) return;
-    setSessions((prev) => {
-      const next = prev.map((s) =>
-        s.id === targetId ? { ...s, rounds: [], updatedAt: Date.now() } : s
-      );
-      writeLocalThrottled(next);
-      writeDriveThrottled(next);
-      return next;
-    });
+    const next = sessionsRef.current.map((s) =>
+      s.id === targetId ? { ...s, rounds: [], updatedAt: Date.now() } : s
+    );
+    setSessions(next);
+    writeLocalThrottled(next);
+    writeDriveThrottled(next);
   }, [activeSessionId, writeLocalThrottled, writeDriveThrottled]);
 
   const clearAllSessions = useCallback(() => {
@@ -282,38 +286,44 @@ export function useSessionManager() {
     updatedRound: CouncilRound,
     throttle: boolean
   ) => {
-    setSessions((prev) => {
-      const next = prev.map((s) => {
-        if (s.id !== sessionId) return s;
-        const roundIdx = s.rounds.findIndex((r) => r.id === updatedRound.id);
-        const nextRounds = [...s.rounds];
-        if (roundIdx >= 0) {
-          nextRounds[roundIdx] = updatedRound;
-        } else {
-          nextRounds.push(updatedRound);
-        }
-        return {
-          ...s,
-          rounds: nextRounds,
-          updatedAt: Date.now(),
-        };
-      });
-
-      if (throttle) {
-        writeLocalThrottled(next);
-        writeDriveThrottled(next);
+    const next = sessionsRef.current.map((s) => {
+      if (s.id !== sessionId) return s;
+      const roundIdx = s.rounds.findIndex((r) => r.id === updatedRound.id);
+      const nextRounds = [...s.rounds];
+      if (roundIdx >= 0) {
+        nextRounds[roundIdx] = updatedRound;
       } else {
-        persistToLocalStorage(next);
-        if (isGoogleSignedIn()) {
-          setIsSyncing(true);
-          saveSessionsToDrive(next)
-            .catch((err) => console.warn('[SessionManager] Drive immediate write error:', err))
-            .finally(() => setIsSyncing(false));
-        }
+        nextRounds.push(updatedRound);
       }
-
-      return next;
+      const isDefaultTitle =
+        !s.title ||
+        s.title.trim() === '' ||
+        s.title === 'New Deliberation' ||
+        s.title === 'Untitled Session';
+      return {
+        ...s,
+        rounds: nextRounds,
+        title: isDefaultTitle && nextRounds.length === 1
+          ? summarizeTitle(nextRounds[0]?.userQuery)
+          : s.title,
+        updatedAt: Date.now(),
+      };
     });
+
+    setSessions(next);
+
+    if (throttle) {
+      writeLocalThrottled(next);
+      writeDriveThrottled(next);
+    } else {
+      persistToLocalStorage(next);
+      if (isGoogleSignedIn()) {
+        setIsSyncing(true);
+        saveSessionsToDrive(next)
+          .catch((err) => console.warn('[SessionManager] Drive immediate write error:', err))
+          .finally(() => setIsSyncing(false));
+      }
+    }
   }, [writeLocalThrottled, writeDriveThrottled]);
 
   /** Adds a round to the active session (streaming-time updates are throttled). */
@@ -329,16 +339,14 @@ export function useSessionManager() {
 
   const deleteRoundFromActiveSession = useCallback((roundId: string) => {
     if (!activeSessionId) return;
-    setSessions((prev) => {
-      const next = prev.map((s) =>
-        s.id === activeSessionId
-          ? { ...s, rounds: s.rounds.filter((r) => r.id !== roundId), updatedAt: Date.now() }
-          : s
-      );
-      writeLocalThrottled(next);
-      writeDriveThrottled(next);
-      return next;
-    });
+    const next = sessionsRef.current.map((s) =>
+      s.id === activeSessionId
+        ? { ...s, rounds: s.rounds.filter((r) => r.id !== roundId), updatedAt: Date.now() }
+        : s
+    );
+    setSessions(next);
+    writeLocalThrottled(next);
+    writeDriveThrottled(next);
   }, [activeSessionId, writeLocalThrottled, writeDriveThrottled]);
 
   const exportSessionsJSON = useCallback((): string => {
@@ -410,6 +418,7 @@ export function useSessionManager() {
     activeSessionId,
     createSession,
     selectSession,
+    renameSession,
     deleteSession,
     clearSessionHistory,
     clearAllSessions,

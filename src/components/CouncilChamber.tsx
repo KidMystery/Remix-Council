@@ -6,6 +6,9 @@ import { streamPersonaWithFallback } from '../lib/fallbackManager';
 import { resolveExecutionMode } from '../lib/modeClassifier';
 import { compressSessionContext } from '../lib/contextCompressor';
 import { preprocessLargeAttachment } from '../lib/chunkProcessor';
+import { shouldEnableWebSearch } from '../lib/webGrounding';
+import { detectTaskDomain, applySmartModelSelection } from '../lib/smartModelSelector';
+import { countRoundCost, formatCost } from '../lib/archivist';
 import { useCouncilReducer } from '../hooks/useCouncilReducer';
 import { CouncilRoundView } from './CouncilRoundView';
 import { Composer } from './Composer';
@@ -26,10 +29,19 @@ export interface CouncilChamberProps {
   activeSessionId?: string | null;
   onUpdateRound: (sessionId: string, round: CouncilRound) => void;
   onCompleteRound: (sessionId: string, round: CouncilRound) => void;
+  onDeleteRound?: (roundId: string) => void;
   flushNow: () => void;
   rawModelsCatalog?: any[];
   settings?: Partial<CouncilSettings>;
   executionMode?: 'auto' | 'quick_panel' | 'deep_council';
+  webMode?: 'off' | 'auto' | 'always';
+  autoSelectModels?: boolean;
+  maxTokens?: number;
+  quickPanelMaxTokens?: number;
+  synthesisMaxTokens?: number;
+  panelTimeoutSeconds?: number;
+  stopAfterStage1?: boolean;
+  maxRoundCostCeiling?: number;
   autoSaveState?: AutoSaveState;
   lastSavedAt?: number | null;
   isSaving?: boolean;
@@ -37,6 +49,19 @@ export interface CouncilChamberProps {
   saveDestination?: 'cloud' | 'local' | null;
   onOpenSettings?: () => void;
   showToast?: (message: string, type?: 'info' | 'success' | 'error' | 'warning') => void;
+}
+
+/** Deep-clones a round so in-flight streaming never mutates props/session state. */
+function cloneRound(round: CouncilRound): CouncilRound {
+  return {
+    ...round,
+    deliberation: {
+      stage1: { ...(round.deliberation?.stage1 || {}) },
+      stage2: { ...(round.deliberation?.stage2 || {}) },
+      ...(round.deliberation?.stage3 ? { stage3: round.deliberation.stage3 } : {}),
+    },
+    synthesis: round.synthesis ? { ...round.synthesis } : { content: '', status: 'idle' },
+  };
 }
 
 export function buildFullQueryWithAttachments(round: CouncilRound): string {
@@ -125,10 +150,19 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   activeSessionId,
   onUpdateRound,
   onCompleteRound,
+  onDeleteRound,
   flushNow,
   rawModelsCatalog,
   settings = {},
   executionMode = 'auto',
+  webMode = 'auto',
+  autoSelectModels = true,
+  maxTokens = 4000,
+  quickPanelMaxTokens = 350,
+  synthesisMaxTokens = 500,
+  panelTimeoutSeconds = 120,
+  stopAfterStage1 = false,
+  maxRoundCostCeiling = 0,
   autoSaveState,
   lastSavedAt,
   isSaving,
@@ -139,6 +173,29 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 }) => {
   const [isDeliberating, setIsDeliberating] = useState(false);
   const [basicMode, setBasicMode] = useState(false);
+  const [lastDomain, setLastDomain] = useState<string | undefined>(undefined);
+
+  /** Human-readable error text (AbortError => clean "Stopped" message). */
+  const friendlyError = (err: any): string =>
+    err?.name === 'AbortError' ? 'Stopped by user' : (err?.message || String(err));
+
+  /** Builds a per-call AbortController that follows the run signal + per-call timeout. */
+  const makeCallController = (timeoutMs: number) => {
+    const ctrl = new AbortController();
+    const runSignal = abortRef.current?.signal;
+    const onAbort = () => ctrl.abort();
+    if (runSignal) runSignal.addEventListener('abort', onAbort);
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    return {
+      signal: ctrl.signal,
+      cleanup: () => {
+        clearTimeout(t);
+        if (runSignal) runSignal.removeEventListener('abort', onAbort);
+      },
+    };
+  };
+
+  const isRunAborted = () => abortRef.current?.signal.aborted === true;
 
   // Local streaming UI state (fast reducer updates; persistence flows through the session manager).
   const { rounds: localRounds, dispatch, setRounds } = useCouncilReducer(rounds);
@@ -149,6 +206,16 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId]);
 
+  // Handle external clears (e.g. "Clear History" from the sidebar) that don't
+  // change the active session id — re-seed to empty when the session is empty
+  // and no deliberation is running.
+  useEffect(() => {
+    if (rounds.length === 0 && localRounds.length > 0 && !deliberationLockRef.current) {
+      setRounds([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rounds.length]);
+
   const effectiveSettings: CouncilSettings = {
     enableChunking: settings.enableChunking ?? false,
     showConsensusVisualizer: settings.showConsensusVisualizer ?? false,
@@ -157,6 +224,9 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 
   // Concurrency Lock Reference
   const deliberationLockRef = useRef(false);
+
+  // Abort controller for the currently-running deliberation (Stop button).
+  const abortRef = useRef<AbortController | null>(null);
 
   const acquireDeliberationLock = (): boolean => {
     if (deliberationLockRef.current) return false;
@@ -167,7 +237,15 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 
   const releaseDeliberationLock = () => {
     deliberationLockRef.current = false;
+    abortRef.current = null;
     setIsDeliberating(false);
+  };
+
+  const handleStop = () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      showToast?.('Stopping deliberation…', 'warning');
+    }
   };
 
   const policy = policyForPreset(activePresetId);
@@ -267,20 +345,28 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
         role: synthesizer.role || 'Consensus Builder',
       };
 
-      const res = await streamPersonaWithFallback({
-        persona: chairPersona,
-        messages: [
-          { role: 'system', content: CHAIRMAN_PROMPT },
-          { role: 'user', content: synthPrompt },
-        ],
-        policy,
-        rawModels: rawModelsCatalog,
-        sessionId: activeSessionId ?? undefined,
-        onToken: (chunk) => {
-          fullSynthesis += chunk;
-          dispatch({ type: 'UPDATE_SYNTHESIS_TOKEN', payload: { roundId: roundToSynthesize.id, chunk } });
-        },
-      });
+      const call = makeCallController((panelTimeoutSeconds || 120) * 1000);
+      let res: Awaited<ReturnType<typeof streamPersonaWithFallback>>;
+      try {
+        res = await streamPersonaWithFallback({
+          persona: chairPersona,
+          messages: [
+            { role: 'system', content: CHAIRMAN_PROMPT },
+            { role: 'user', content: synthPrompt },
+          ],
+          policy,
+          rawModels: rawModelsCatalog,
+          sessionId: activeSessionId ?? undefined,
+          signal: call.signal,
+          maxTokens: synthesisMaxTokens,
+          onToken: (chunk) => {
+            fullSynthesis += chunk;
+            dispatch({ type: 'UPDATE_SYNTHESIS_TOKEN', payload: { roundId: roundToSynthesize.id, chunk } });
+          },
+        });
+      } finally {
+        call.cleanup();
+      }
 
       fullSynthesis = res.content;
       finishReason = res.finishReason;
@@ -340,15 +426,16 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
         },
       });
     } catch (err: any) {
+      const msg = friendlyError(err);
       roundToSynthesize.synthesis = {
         model: synthesisModel,
-        content: `[Synthesis Error: ${err.message}]`,
+        content: `[Synthesis ${err?.name === 'AbortError' ? 'stopped' : 'error'}: ${msg}]`,
         status: 'error',
-        error: err.message,
+        error: msg,
       };
       dispatch({
         type: 'ERROR_SYNTHESIS',
-        payload: { roundId: roundToSynthesize.id, error: err.message },
+        payload: { roundId: roundToSynthesize.id, error: msg },
       });
     }
 
@@ -361,8 +448,9 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     if (!acquireDeliberationLock()) return;
 
     try {
-      activeRoundRef.current = roundToSynthesize;
-      const stage1 = roundToSynthesize.deliberation?.stage1 || {};
+      abortRef.current = new AbortController();
+      activeRoundRef.current = cloneRound(roundToSynthesize);
+      const stage1 = activeRoundRef.current.deliberation?.stage1 || {};
       const stage2 = roundToSynthesize.deliberation?.stage2 || {};
       await runSynthesisPhase(stage1, stage2);
     } finally {
@@ -374,8 +462,16 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   const runRoundExecution = async (roundToRun: CouncilRound, preparedQuery?: string) => {
     if (!activeSessionId) return;
 
-    const currentRoundState: CouncilRound = { ...roundToRun };
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    const currentRoundState: CouncilRound = cloneRound(roundToRun);
     activeRoundRef.current = currentRoundState;
+
+    // Ensure the live render list has this round and persist it immediately so
+    // an interrupted run can be resumed after a reload.
+    dispatch({ type: 'UPSERT_ROUND', payload: currentRoundState });
+    onUpdateRound(activeSessionId, { ...currentRoundState });
 
     let contextSummary = '';
     if (rounds.length >= 3) {
@@ -391,110 +487,201 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       fullQuery = `[Prior Council Consensus Memory]:\n${contextSummary}\n\n[Active Topic Query]:\n${fullQuery}`;
     }
 
+    // Follow-up mode: explicitly carry the prior round's consensus forward.
+    if (roundToRun.isFollowUp) {
+      const prior =
+        rounds[rounds.length - 1]?.synthesis?.content ||
+        rounds[rounds.length - 1]?.deliberation?.stage3?.content;
+      if (prior) {
+        fullQuery = `[Follow-up to previous deliberation — prior consensus]:\n${prior}\n\n[Follow-up question]:\n${fullQuery}`;
+      }
+    }
+
     const activePersonas = personas.filter((p) => p.enabled !== false);
     const letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+    const letterFor = (id: string) => {
+      const idx = activePersonas.findIndex((p) => p.id === id);
+      return letters[idx] || `P${idx + 1}`;
+    };
     const isQuickPanel = Boolean(roundToRun.isQuickPanel) || activePersonas.length <= 1;
+    const stageTokenLimit = isQuickPanel ? (quickPanelMaxTokens || 350) : (maxTokens || 4000);
+    const webEnabled = shouldEnableWebSearch(currentRoundState.userQuery, webMode, policy.budget).enabled;
 
-    // Stage 1: Parallel proposals
-    const initialStage1: Record<PersonaId, any> = {};
-    activePersonas.forEach((p) => {
-      initialStage1[p.id] = { personaId: p.id, content: '', status: 'streaming' };
-    });
-    dispatch({ type: 'START_STAGE1', payload: { roundId: currentRoundState.id, initialStage1 } });
-
-    const s1Promises = activePersonas.map(async (persona) => {
-      let accumulated = '';
+    // Task-domain detection + smart model recommendations (applied when enabled).
+    const domain = detectTaskDomain(
+      currentRoundState.userQuery,
+      (currentRoundState.attachedTextFiles || []) as any
+    );
+    setLastDomain(domain);
+    const modelOverrides: Record<string, string> = {};
+    if (autoSelectModels) {
       try {
-        const res = await streamPersonaWithFallback({
-          persona,
-          messages: [
-            { role: 'system', content: persona.systemPrompt },
-            { role: 'user', content: fullQuery },
-          ],
-          policy,
-          rawModels: rawModelsCatalog,
-          sessionId: activeSessionId ?? undefined,
-          onToken: (chunk) => {
-            accumulated += chunk;
-            dispatch({ type: 'UPDATE_STAGE1_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
-          },
+        const selection = applySmartModelSelection(domain, activePersonas, synthesizer, {
+          rawModelsCatalog: rawModelsCatalog || [],
+          autoSelectModels: true,
         });
+        selection.updatedPersonas.forEach((p) => {
+          modelOverrides[p.id] = p.model;
+        });
+      } catch {
+        // fall back to each persona's configured model
+      }
+    }
+    const modelFor = (id: string) =>
+      modelOverrides[id] || activePersonas.find((p) => p.id === id)?.model || '';
 
-        currentRoundState.deliberation.stage1[persona.id] = {
-          personaId: persona.id,
-          model: persona.model,
-          actualModel: res.actualModel,
-          content: res.content || accumulated,
-          status: 'completed',
-          finishReason: res.finishReason,
-          promptTokens: res.usage?.promptTokens,
-          completionTokens: res.usage?.completionTokens,
-          totalTokens: res.usage?.totalTokens,
-          cost: res.cost,
-        };
-        dispatch({
-          type: 'FINISH_STAGE1_PERSONA',
-          payload: {
-            roundId: currentRoundState.id,
+    const stage1 = currentRoundState.deliberation.stage1 || {};
+    const stage2 = currentRoundState.deliberation.stage2 || {};
+    const existingSynthesis = currentRoundState.deliberation.stage3 || currentRoundState.synthesis;
+
+    const missingStage1 = activePersonas.filter((p) => stage1[p.id]?.status !== 'completed');
+    const needStage1 = missingStage1.length > 0;
+
+    // ---- Stage 1: Parallel proposals (only missing personas) ----
+    if (needStage1) {
+      const initialStage1: Record<PersonaId, any> = {};
+      activePersonas.forEach((p) => {
+        const existing = stage1[p.id];
+        initialStage1[p.id] =
+          existing?.status === 'completed'
+            ? existing
+            : { personaId: p.id, content: existing?.content || '', status: 'streaming' };
+      });
+      dispatch({ type: 'START_STAGE1', payload: { roundId: currentRoundState.id, initialStage1 } });
+
+      const s1Promises = missingStage1.map(async (persona) => {
+        const call = makeCallController((panelTimeoutSeconds || 120) * 1000);
+        const runPersona = { ...persona, model: modelFor(persona.id) || persona.model };
+        let accumulated = '';
+        try {
+          const res = await streamPersonaWithFallback({
+            persona: runPersona,
+            messages: [
+              { role: 'system', content: persona.systemPrompt },
+              { role: 'user', content: fullQuery },
+            ],
+            policy,
+            rawModels: rawModelsCatalog,
+            sessionId: activeSessionId ?? undefined,
+            signal: call.signal,
+            maxTokens: stageTokenLimit,
+            webSearch: webEnabled,
+            onToken: (chunk) => {
+              accumulated += chunk;
+              dispatch({ type: 'UPDATE_STAGE1_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
+            },
+          });
+
+          currentRoundState.deliberation.stage1[persona.id] = {
             personaId: persona.id,
-            content: res.content || accumulated,
-            model: persona.model,
+            model: runPersona.model,
             actualModel: res.actualModel,
+            content: res.content || accumulated,
+            status: 'completed',
             finishReason: res.finishReason,
             promptTokens: res.usage?.promptTokens,
             completionTokens: res.usage?.completionTokens,
             totalTokens: res.usage?.totalTokens,
             cost: res.cost,
-          },
-        });
-      } catch (err: any) {
-        currentRoundState.deliberation.stage1[persona.id] = {
-          personaId: persona.id,
-          model: persona.model,
-          content: `[Deliberation Error: ${err.message}]`,
-          status: 'error',
-          error: err.message,
-        };
-        dispatch({
-          type: 'ERROR_STAGE1_PERSONA',
-          payload: { roundId: currentRoundState.id, personaId: persona.id, error: err.message },
-        });
-      }
-    });
+          };
+          dispatch({
+            type: 'FINISH_STAGE1_PERSONA',
+            payload: {
+              roundId: currentRoundState.id,
+              personaId: persona.id,
+              content: res.content || accumulated,
+              model: runPersona.model,
+              actualModel: res.actualModel,
+              finishReason: res.finishReason,
+              promptTokens: res.usage?.promptTokens,
+              completionTokens: res.usage?.completionTokens,
+              totalTokens: res.usage?.totalTokens,
+              cost: res.cost,
+            },
+          });
+        } catch (err: any) {
+          const msg = friendlyError(err);
+          currentRoundState.deliberation.stage1[persona.id] = {
+            personaId: persona.id,
+            model: persona.model,
+            content: `[Deliberation ${err?.name === 'AbortError' ? 'stopped' : 'error'}: ${msg}]`,
+            status: 'error',
+            error: msg,
+          };
+          dispatch({
+            type: 'ERROR_STAGE1_PERSONA',
+            payload: { roundId: currentRoundState.id, personaId: persona.id, error: msg },
+          });
+        } finally {
+          call.cleanup();
+        }
+      });
 
-    await Promise.allSettled(s1Promises);
-    onUpdateRound(activeSessionId, { ...currentRoundState });
+      await Promise.allSettled(s1Promises);
+      onUpdateRound(activeSessionId, { ...currentRoundState });
+    }
 
-    // Quick panel: after Stage 1 completes do not return early — synthesize with
-    // the Stage 1 outputs and an empty Stage 2 map.
+    if (isRunAborted()) return;
+
+    // Cost ceiling enforcement: skip further stages once the round's estimated
+    // spend exceeds the user's per-round cap.
+    const overCeiling =
+      maxRoundCostCeiling > 0 &&
+      countRoundCost(currentRoundState).totalCost > maxRoundCostCeiling;
+    const skipRemaining = stopAfterStage1 || overCeiling;
+
+    // Quick panel: synthesize from Stage 1 outputs only.
     if (isQuickPanel) {
-      await runSynthesisPhase(currentRoundState.deliberation.stage1, {});
+      if (existingSynthesis?.status !== 'completed') {
+        await runSynthesisPhase(currentRoundState.deliberation.stage1, {});
+      }
       return;
     }
 
-    // Stage 2: Peer Review & Critique
+    // Optional early exit: Stop After Stage 1 or cost ceiling reached.
+    if (skipRemaining) {
+      const reason = overCeiling
+        ? `Stage 2 & Synthesis skipped (estimated round cost ${formatCost(countRoundCost(currentRoundState).totalCost)} exceeded the $${maxRoundCostCeiling.toFixed(2)} ceiling).`
+        : 'Stage 2 & Synthesis skipped (Stop After Stage 1 is enabled).';
+      currentRoundState.synthesis = { model: synthesizer.model, content: reason, status: 'completed' };
+      currentRoundState.deliberation.stage3 = { model: synthesizer.model, content: reason, status: 'completed' };
+      dispatch({
+        type: 'FINISH_SYNTHESIS',
+        payload: { roundId: currentRoundState.id, content: reason, model: synthesizer.model },
+      });
+      onCompleteRound(activeSessionId, { ...currentRoundState });
+      flushNow();
+      return;
+    }
+
+    // ---- Stage 2: Peer Review & Critique (only missing personas) ----
     const s1Outputs = currentRoundState.deliberation.stage1;
-    const initialStage2: Record<PersonaId, any> = {};
-    activePersonas.forEach((p) => {
-      initialStage2[p.id] = { personaId: p.id, content: '', status: 'streaming' };
-    });
-    dispatch({ type: 'START_STAGE2', payload: { roundId: currentRoundState.id, initialStage2 } });
+    const missingStage2 = activePersonas.filter((p) => stage2[p.id]?.status !== 'completed');
+    if (missingStage2.length > 0) {
+      const initialStage2: Record<PersonaId, any> = {};
+      activePersonas.forEach((p) => {
+        const existing = stage2[p.id];
+        initialStage2[p.id] =
+          existing?.status === 'completed'
+            ? existing
+            : { personaId: p.id, content: existing?.content || '', status: 'streaming' };
+      });
+      dispatch({ type: 'START_STAGE2', payload: { roundId: currentRoundState.id, initialStage2 } });
 
-    const s2Promises = activePersonas.map(async (persona, idx) => {
-      const myLetter = letters[activePersonas.findIndex((p) => p.id === persona.id)] || `P${idx + 1}`;
+      const s2Promises = missingStage2.map(async (persona) => {
+        const call = makeCallController((panelTimeoutSeconds || 120) * 1000);
+        const runPersona = { ...persona, model: modelFor(persona.id) || persona.model };
+        const myLetter = letterFor(persona.id);
 
-      let letterIdx = 0;
-      const peerProposals = activePersonas
-        .map((p) => {
-          if (p.id === persona.id) return null;
-          const resp = s1Outputs[p.id];
-          const letter = letters[letterIdx++] || `P${letterIdx}`;
-          return `### Panelist ${letter} (${p.role}):\n${resp?.content || '[No proposal]'}`;
-        })
-        .filter(Boolean)
-        .join('\n\n');
+        const peerProposals = activePersonas
+          .filter((p) => p.id !== persona.id)
+          .map((p) => {
+            const resp = s1Outputs[p.id];
+            return `### Panelist ${letterFor(p.id)} (${p.role}):\n${resp?.content || '[No proposal]'}`;
+          })
+          .join('\n\n');
 
-      const stage2Prompt = `You are Panelist ${myLetter}. Critically evaluate your peers' proposals below.
+        const stage2Prompt = `You are Panelist ${myLetter}. Critically evaluate your peers' proposals below.
 
 Original User Query:
 ${fullQuery}
@@ -505,70 +692,80 @@ ${peerProposals}
 Please provide your rigorous critique, cross-examination, points of consensus, and key disagreements.
 If the question contains code, documents, or attached files, treat them as available and reference specific sections directly. Do not claim content is missing unless the source genuinely omits it.`;
 
-      let accumulated = '';
-      try {
-        const res = await streamPersonaWithFallback({
-          persona,
-          messages: [
-            { role: 'system', content: persona.systemPrompt },
-            { role: 'user', content: stage2Prompt },
-          ],
-          policy,
-          rawModels: rawModelsCatalog,
-          sessionId: activeSessionId ?? undefined,
-          onToken: (chunk) => {
-            accumulated += chunk;
-            dispatch({ type: 'UPDATE_STAGE2_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
-          },
-        });
+        let accumulated = '';
+        try {
+          const res = await streamPersonaWithFallback({
+            persona: runPersona,
+            messages: [
+              { role: 'system', content: persona.systemPrompt },
+              { role: 'user', content: stage2Prompt },
+            ],
+            policy,
+            rawModels: rawModelsCatalog,
+            sessionId: activeSessionId ?? undefined,
+            signal: call.signal,
+            maxTokens: stageTokenLimit,
+            onToken: (chunk) => {
+              accumulated += chunk;
+              dispatch({ type: 'UPDATE_STAGE2_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
+            },
+          });
 
-        currentRoundState.deliberation.stage2[persona.id] = {
-          personaId: persona.id,
-          model: persona.model,
-          actualModel: res.actualModel,
-          content: res.content || accumulated,
-          status: 'completed',
-          finishReason: res.finishReason,
-          promptTokens: res.usage?.promptTokens,
-          completionTokens: res.usage?.completionTokens,
-          totalTokens: res.usage?.totalTokens,
-          cost: res.cost,
-        };
-        dispatch({
-          type: 'FINISH_STAGE2_PERSONA',
-          payload: {
-            roundId: currentRoundState.id,
+          currentRoundState.deliberation.stage2[persona.id] = {
             personaId: persona.id,
-            content: res.content || accumulated,
-            model: persona.model,
+            model: runPersona.model,
             actualModel: res.actualModel,
+            content: res.content || accumulated,
+            status: 'completed',
             finishReason: res.finishReason,
             promptTokens: res.usage?.promptTokens,
             completionTokens: res.usage?.completionTokens,
             totalTokens: res.usage?.totalTokens,
             cost: res.cost,
-          },
-        });
-      } catch (err: any) {
-        currentRoundState.deliberation.stage2[persona.id] = {
-          personaId: persona.id,
-          model: persona.model,
-          content: `[Peer Review Error: ${err.message}]`,
-          status: 'error',
-          error: err.message,
-        };
-        dispatch({
-          type: 'ERROR_STAGE2_PERSONA',
-          payload: { roundId: currentRoundState.id, personaId: persona.id, error: err.message },
-        });
-      }
-    });
+          };
+          dispatch({
+            type: 'FINISH_STAGE2_PERSONA',
+            payload: {
+              roundId: currentRoundState.id,
+              personaId: persona.id,
+              content: res.content || accumulated,
+              model: runPersona.model,
+              actualModel: res.actualModel,
+              finishReason: res.finishReason,
+              promptTokens: res.usage?.promptTokens,
+              completionTokens: res.usage?.completionTokens,
+              totalTokens: res.usage?.totalTokens,
+              cost: res.cost,
+            },
+          });
+        } catch (err: any) {
+          const msg = friendlyError(err);
+          currentRoundState.deliberation.stage2[persona.id] = {
+            personaId: persona.id,
+            model: persona.model,
+            content: `[Peer Review ${err?.name === 'AbortError' ? 'stopped' : 'error'}: ${msg}]`,
+            status: 'error',
+            error: msg,
+          };
+          dispatch({
+            type: 'ERROR_STAGE2_PERSONA',
+            payload: { roundId: currentRoundState.id, personaId: persona.id, error: msg },
+          });
+        } finally {
+          call.cleanup();
+        }
+      });
 
-    await Promise.allSettled(s2Promises);
-    onUpdateRound(activeSessionId, { ...currentRoundState });
+      await Promise.allSettled(s2Promises);
+      onUpdateRound(activeSessionId, { ...currentRoundState });
+    }
 
-    // Stage 3: Authoritative Executive Synthesis
-    await runSynthesisPhase(currentRoundState.deliberation.stage1, currentRoundState.deliberation.stage2);
+    if (isRunAborted()) return;
+
+    // ---- Stage 3: Authoritative Executive Synthesis ----
+    if (existingSynthesis?.status !== 'completed') {
+      await runSynthesisPhase(currentRoundState.deliberation.stage1, currentRoundState.deliberation.stage2);
+    }
   };
 
   const handleDeliberate = async (query: string, attachedFiles: AttachedTextFile[], isFollowUp: boolean) => {
@@ -584,6 +781,7 @@ If the question contains code, documents, or attached files, treat them as avail
         mode: resolvedMode === 'quick_panel' ? 'quick_panel' : 'full',
         resolvedMode,
         isQuickPanel: resolvedMode === 'quick_panel',
+        isFollowUp,
         deliberation: {
           stage1: {},
           stage2: {},
@@ -668,15 +866,18 @@ If the question contains code, documents, or attached files, treat them as avail
       const persona = personas.find((p) => p.id === personaId);
       if (!persona) return;
 
-      const currentRoundState: CouncilRound = { ...round };
+      const currentRoundState: CouncilRound = cloneRound(round);
+      abortRef.current = new AbortController();
       activeRoundRef.current = currentRoundState;
       const fullQuery = await prepareQuery(round);
+      const webEnabled = shouldEnableWebSearch(currentRoundState.userQuery, webMode, policy.budget).enabled;
 
       dispatch({
         type: 'START_STAGE1',
         payload: { roundId: currentRoundState.id, initialStage1: { ...currentRoundState.deliberation.stage1 } },
       });
 
+      const call = makeCallController((panelTimeoutSeconds || 120) * 1000);
       try {
         const res = await streamPersonaWithFallback({
           persona,
@@ -687,6 +888,9 @@ If the question contains code, documents, or attached files, treat them as avail
           policy,
           rawModels: rawModelsCatalog,
           sessionId: activeSessionId ?? undefined,
+          signal: call.signal,
+          maxTokens: maxTokens || 4000,
+          webSearch: webEnabled,
           onToken: (chunk) => {
             dispatch({ type: 'UPDATE_STAGE1_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
           },
@@ -720,17 +924,20 @@ If the question contains code, documents, or attached files, treat them as avail
           },
         });
       } catch (err: any) {
+        const msg = friendlyError(err);
         currentRoundState.deliberation.stage1[persona.id] = {
           personaId: persona.id,
           model: persona.model,
-          content: `[Deliberation Error: ${err.message}]`,
+          content: `[Deliberation ${err?.name === 'AbortError' ? 'stopped' : 'error'}: ${msg}]`,
           status: 'error',
-          error: err.message,
+          error: msg,
         };
         dispatch({
           type: 'ERROR_STAGE1_PERSONA',
-          payload: { roundId: currentRoundState.id, personaId: persona.id, error: err.message },
+          payload: { roundId: currentRoundState.id, personaId: persona.id, error: msg },
         });
+      } finally {
+        call.cleanup();
       }
 
       onUpdateRound(activeSessionId, { ...currentRoundState });
@@ -772,6 +979,7 @@ If the question contains code, documents, or attached files, treat them as avail
       <CouncilSummaryBar
         presetId={activePresetId}
         answerMode={executionMode}
+        taskDomain={lastDomain}
         personas={personas}
         synthesizer={synthesizer}
         rawModels={rawModelsCatalog}
@@ -826,6 +1034,10 @@ If the question contains code, documents, or attached files, treat them as avail
             onReSynthesize={runQuickPanelSynthesis}
             onRegeneratePersona={handleRegeneratePersona}
             onForkBranch={(branchName) => handleForkBranch(round.id, branchName)}
+            onDeleteRound={onDeleteRound ? (roundId) => {
+              dispatch({ type: 'DELETE_ROUND', payload: { roundId } });
+              onDeleteRound(roundId);
+            } : undefined}
             isDeliberating={isDeliberating}
             showConsensusVisualizer={effectiveSettings.showConsensusVisualizer}
           />
@@ -833,7 +1045,7 @@ If the question contains code, documents, or attached files, treat them as avail
       </div>
 
       {/* Input Composer */}
-      <Composer onSend={handleDeliberate} isDeliberating={isDeliberating} />
+      <Composer onSend={handleDeliberate} isDeliberating={isDeliberating} onStop={handleStop} />
     </div>
   );
 };

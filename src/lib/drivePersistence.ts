@@ -149,6 +149,15 @@ export function isGoogleSignedIn(): boolean {
   return Boolean(accessToken && accessToken.length > 0);
 }
 
+/**
+ * Returns the in-memory Google access token, if present. Used by the API client
+ * to prove identity to the server (owner gate) on same-origin requests only.
+ * Never persisted to storage.
+ */
+export function getGoogleAccessToken(): string | null {
+  return accessToken;
+}
+
 /** Returns the email from the GIS credential response if available. */
 export function getCurrentUserEmail(): string | null {
   return currentUserEmail;
@@ -161,8 +170,8 @@ function requireToken(): string {
   return accessToken as string;
 }
 
-async function findSessionsFile(token: string): Promise<string | null> {
-  const url = `${DRIVE_API_BASE}/files?spaces=appDataFolder&fields=files(id,name)&q=${encodeURIComponent(`name='${SESSION_FILE_NAME}'`)}`;
+async function findSessionsFile(token: string, fileName: string = SESSION_FILE_NAME): Promise<string | null> {
+  const url = `${DRIVE_API_BASE}/files?spaces=appDataFolder&fields=files(id,name)&q=${encodeURIComponent(`name='${fileName}'`)}`;
   const resp = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -176,7 +185,7 @@ async function findSessionsFile(token: string): Promise<string | null> {
 
   const data = await resp.json();
   const files: Array<{ id: string; name: string }> = data.files || [];
-  return files.find((f) => f.name === SESSION_FILE_NAME)?.id || null;
+  return files.find((f) => f.name === fileName)?.id || null;
 }
 
 class AuthError extends Error {
@@ -209,9 +218,14 @@ function sanitizeForDrive(sessions: Session[]): Session[] {
   }));
 }
 
-async function uploadSessionsMultipart(token: string, sessions: Session[], fileId?: string): Promise<void> {
+async function uploadSessionsMultipart(
+  token: string,
+  sessions: Session[],
+  fileId?: string,
+  fileName: string = SESSION_FILE_NAME
+): Promise<void> {
   const metadata = {
-    name: SESSION_FILE_NAME,
+    name: fileName,
     parents: ['appDataFolder'],
     mimeType: 'application/json',
   };
@@ -305,6 +319,66 @@ export async function deleteSessionFromDrive(sessionId: string): Promise<void> {
   const sessions = await loadSessionsFromDrive();
   const remaining = sessions.filter((s) => s.id !== sessionId);
   await saveSessionsToDrive(remaining);
+}
+
+// ---------------------------------------------------------------------------
+// Oracle (living assistant) Drive sync — threads + Bibles in the appDataFolder.
+// ---------------------------------------------------------------------------
+
+const ORACLE_FILE_NAME = 'council-oracle.json';
+
+export interface OracleDrivePayload {
+  version: number;
+  updatedAt: number;
+  threads: any[];
+  globalBible: any;
+}
+
+export async function saveOracleToDrive(threads: any[], globalBible: any): Promise<void> {
+  const token = requireToken();
+  const payload: OracleDrivePayload = {
+    version: 1,
+    updatedAt: Date.now(),
+    threads,
+    globalBible,
+  };
+
+  try {
+    const fileId = await findSessionsFile(token, ORACLE_FILE_NAME);
+    await uploadSessionsMultipart(token, payload as any, fileId || undefined, ORACLE_FILE_NAME);
+  } catch (err: any) {
+    if (err instanceof AuthError) {
+      await signInWithGoogle();
+      const freshToken = requireToken();
+      const fileId = await findSessionsFile(freshToken, ORACLE_FILE_NAME);
+      await uploadSessionsMultipart(freshToken, payload as any, fileId || undefined, ORACLE_FILE_NAME);
+      return;
+    }
+    throw err;
+  }
+}
+
+export async function loadOracleFromDrive(): Promise<{ threads: any[]; globalBible: any } | null> {
+  if (!isGoogleSignedIn()) return null;
+
+  try {
+    const token = requireToken();
+    const fileId = await findSessionsFile(token, ORACLE_FILE_NAME);
+    if (!fileId) return null;
+
+    const resp = await fetch(`${DRIVE_API_BASE}/files/${fileId}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) return null;
+
+    const text = await resp.text();
+    const parsed = JSON.parse(text);
+    if (!parsed || !Array.isArray(parsed.threads)) return null;
+    return { threads: parsed.threads, globalBible: parsed.globalBible || null };
+  } catch (err) {
+    console.warn('[DrivePersistence] Failed to load Oracle data from Drive:', err);
+    return null;
+  }
 }
 
 /**

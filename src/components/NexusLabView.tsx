@@ -38,6 +38,8 @@ import { policyForPreset, type ExecutionPolicy } from '../lib/executionPolicy';
 import { streamPersonaWithFallback } from '../lib/fallbackManager';
 import { extractCodeFromArchive } from '../lib/zipReader';
 import { extractTextFromPDF } from '../lib/pdfUtils';
+import { summarizeTitle } from '../lib/titleUtils';
+import { chunkDocuments, type DocumentChunkPlan } from '../lib/documentChunker';
 import { ZipFilesModal } from './ZipFilesModal';
 import { MessageMarkdown } from './MessageMarkdown';
 import { ConsensusVisualizer } from './ConsensusVisualizer';
@@ -52,11 +54,13 @@ export interface NexusLabViewProps {
 }
 
 const MISSIONS_STORAGE_KEY = 'nexus-missions-v1';
+const ARCHIVE_STORAGE_KEY = 'nexus-missions-archive-v1';
 const MAX_STORED_CONTENT_CHARS = 5000;
 
 interface PersistedMission {
   id: string;
   goal: string;
+  title?: string;
   presetId: string;
   maxIterations: number;
   currentIteration: number;
@@ -66,6 +70,27 @@ interface PersistedMission {
   estimatedCost: number;
   attachedFiles?: AttachedTextFile[];
   updatedAt: number;
+}
+
+function loadArchive(): PersistedMission[] {
+  try {
+    const raw = localStorage.getItem(ARCHIVE_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function pushArchive(mission: PersistedMission): void {
+  try {
+    const list = loadArchive();
+    list.unshift(mission);
+    localStorage.setItem(ARCHIVE_STORAGE_KEY, JSON.stringify(list.slice(0, 20)));
+  } catch (err) {
+    console.warn('[NexusLab] Failed to archive mission:', err);
+  }
 }
 
 function sanitizeMissionForStorage(mission: PersistedMission): PersistedMission {
@@ -153,10 +178,16 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   costCeiling,
 }) => {
   const [missionGoal, setMissionGoal] = useState('');
+  const [missionTitle, setMissionTitle] = useState('Nexus Mission');
+  const [followUpDirective, setFollowUpDirective] = useState('');
+  const [followUpContext, setFollowUpContext] = useState<string | null>(null);
   const [maxIterations, setMaxIterations] = useState(3);
   const [activePreset, setActivePreset] = useState<'fast_and_free' | 'deep_council'>('fast_and_free');
   const [enableWebGrounding, setEnableWebGrounding] = useState(true);
   const [enableCodeSandbox, setEnableCodeSandbox] = useState(true);
+  const [deepDocumentMode, setDeepDocumentMode] = useState(false);
+  const [pagesPerChunk, setPagesPerChunk] = useState(20);
+  const [documentPlan, setDocumentPlan] = useState<DocumentChunkPlan | null>(null);
 
   const [attachedFiles, setAttachedFiles] = useState<AttachedTextFile[]>([]);
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
@@ -183,6 +214,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     const persisted = loadPersistedMission();
     if (persisted) {
       setMissionGoal(persisted.goal);
+      setMissionTitle(persisted.title || summarizeTitle(persisted.goal));
       setMaxIterations(persisted.maxIterations);
       setActivePreset(persisted.presetId === 'deep_council' ? 'deep_council' : 'fast_and_free');
       setCurrentIteration(persisted.currentIteration);
@@ -314,7 +346,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setIsRunning(true);
     pauseRequestedRef.current = false;
     setMissionStatus('running');
-    addLog(`🚀 Initializing Nexus Lab Mission with ${maxIterations} autonomous cycles...`);
+    const title = summarizeTitle(missionGoal);
+    setMissionTitle(title);
 
     const policy: ExecutionPolicy = policyForPreset(activePreset);
     const activePersonas = personas.filter((p) => p.enabled !== false);
@@ -331,17 +364,79 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
             .join('\n\n')
         : '';
 
-    let iter = currentIteration;
-    while (iter < maxIterations && !pauseRequestedRef.current) {
-      iter++;
-      setCurrentIteration(iter);
-      addLog(`⚡ Cycle ${iter}/${maxIterations}: Selecting presiding chair and generating parallel proposals...`);
+    // Carry prior-mission consensus forward when this is a follow-up run.
+    const carriedContext = followUpContext
+      ? `\n\n[Prior Mission Consensus Memory]:\n${followUpContext}`
+      : '';
 
-      const chair = activePersonas[(iter - 1) % activePersonas.length] || activePersonas[0];
-      const cycleQuery = `[Nexus Lab Cycle ${iter}/${maxIterations}]:\nDirective: ${missionGoal}${attachmentContext}\nPresiding Chair: ${chair.name}`;
+    // ---- Execution plan ----
+    // Deep Document Mode: chunk oversized attachments and review each part.
+    // Otherwise: the standard autonomous cycle loop.
+    const textSources = attachedFiles
+      .filter((f) => (f.content || '').trim().length > 0)
+      .map((f) => ({ name: f.name, content: f.content }));
+    const chunkThreshold = pagesPerChunk * 3000;
+    const needsChunking =
+      deepDocumentMode && textSources.some((s) => s.content.length > chunkThreshold);
+
+    interface CyclePlan {
+      label: string;
+      iter: number;
+      query: string;
+      isFinalSynthesis?: boolean;
+    }
+    let plan: CyclePlan[] = [];
+    let docPlan: DocumentChunkPlan | null = null;
+    let docChunks: ReturnType<typeof chunkDocuments>['chunks'] = [];
+    let documentLedger = '';
+
+    if (needsChunking) {
+      docPlan = chunkDocuments(textSources, { pagesPerChunk });
+      docChunks = docPlan.chunks;
+      setDocumentPlan(docPlan);
+      addLog(`📚 Deep Document Mode: splitting ${textSources.length} file(s) into ${docChunks.length} review parts of ~${pagesPerChunk} pages.`);
+      docPlan.messages.forEach((m) => addLog(`   ↳ ${m}`));
+
+      plan = docChunks.map((c, i) => ({
+        label: `📄 Part ${i + 1}/${docChunks.length} · ${c.sourceName} (~${c.estimatedPages} pages)`,
+        iter: i + 1,
+        query: `[Deep Document Mode — Part ${i + 1} of ${docChunks.length}]\nDirective: ${missionGoal}${carriedContext}\n\n[Document: ${c.sourceName} — Section ${i + 1}/${docChunks.length}, ~${c.estimatedPages} pages]\n${c.content}\n\nReview this section against the directive. Report key facts, findings, risks, decisions, and open questions. Reference specific passages.`,
+      }));
+
+      // Final cross-document synthesis pass (ledger built during the loop).
+      plan.push({
+        label: '🧠 Final cross-document synthesis',
+        iter: plan.length + 1,
+        query: '', // filled in the loop from the ledger
+        isFinalSynthesis: true,
+      });
+    } else {
+      addLog(`🚀 Initializing Nexus Lab Mission with ${maxIterations} autonomous cycles...`);
+      plan = Array.from({ length: maxIterations }, (_, i) => ({
+        label: `⚡ Cycle ${i + 1}/${maxIterations}`,
+        iter: i + 1,
+        query: `[Nexus Lab Cycle ${i + 1}/${maxIterations}]:\nDirective: ${missionGoal}${attachmentContext}${carriedContext}`,
+      }));
+    }
+
+    const totalPasses = plan.length;
+
+    for (let qi = 0; qi < plan.length && !pauseRequestedRef.current; qi++) {
+      const p = plan[qi];
+      const chair = activePersonas[qi % activePersonas.length] || activePersonas[0];
+
+      let cycleQuery: string;
+      if (p.isFinalSynthesis) {
+        cycleQuery = `[Deep Document Mode — Final Synthesis]\nDirective: ${missionGoal}\n\nBelow are the accumulated findings from all ${docChunks.length} reviewed sections. Synthesize them into one authoritative, structured report.\n\n${documentLedger || '(no section findings recorded)'}\n\nPresiding Chair: ${chair.name}`;
+      } else {
+        cycleQuery = `${p.query}\nPresiding Chair: ${chair.name}`;
+      }
+
+      setCurrentIteration(qi + 1);
+      addLog(`${p.label}: selecting presiding chair and generating proposals...`);
 
       const newRound: CouncilRound = {
-        id: `nexus_round_${Date.now()}_${iter}`,
+        id: `nexus_round_${Date.now()}_${qi + 1}`,
         userQuery: cycleQuery,
         timestamp: Date.now(),
         mode: 'nexus_lab',
@@ -351,31 +446,31 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       };
 
       // Stage 1: Proposals (via policy-compliant fallback streaming)
-      const s1Promises = activePersonas.map(async (p) => {
-        addLog(`• Model [${p.name} - ${p.model.split('/').pop()}] analyzing objective...`);
+      const s1Promises = activePersonas.map(async (pers) => {
+        addLog(`• Model [${pers.name} - ${pers.model.split('/').pop()}] analyzing objective...`);
         try {
           const res = await streamPersonaWithFallback({
-            persona: p,
+            persona: pers,
             messages: [
-              { role: 'system', content: p.systemPrompt },
+              { role: 'system', content: pers.systemPrompt },
               { role: 'user', content: cycleQuery },
             ],
             policy,
             rawModels: catalog,
             sessionId: activeSessionId ?? undefined,
           });
-          newRound.deliberation.stage1[p.id] = {
-            personaId: p.id,
-            model: p.model,
+          newRound.deliberation.stage1[pers.id] = {
+            personaId: pers.id,
+            model: pers.model,
             actualModel: res.actualModel,
             content: res.content,
             status: 'completed',
             finishReason: res.finishReason,
           };
         } catch (e: any) {
-          newRound.deliberation.stage1[p.id] = {
-            personaId: p.id,
-            model: p.model,
+          newRound.deliberation.stage1[pers.id] = {
+            personaId: pers.id,
+            model: pers.model,
             content: `[Error: ${e.message}]`,
             status: 'error',
             error: e.message,
@@ -384,13 +479,15 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       });
 
       await Promise.allSettled(s1Promises);
-      addLog(`✓ Cycle ${iter} proposals generated. Chair [${chair.name}] synthesizing consensus...`);
+      addLog(`✓ ${p.label} proposals generated. Chair [${chair.name}] synthesizing consensus...`);
 
       // Stage 3 Synthesis & Convergence
       const s1Text = Object.entries(newRound.deliberation.stage1)
         .map(([id, r]) => `Persona (${id}):\n${r.content}`)
         .join('\n\n');
 
+      let synthesis = '';
+      let consensusMetric: ConsensusMetric | undefined;
       try {
         const chairPersona: Persona = {
           ...(chair || synthesizer),
@@ -403,7 +500,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
           persona: chairPersona,
           messages: [
             { role: 'system', content: 'You are the Presiding Nexus Chair. Synthesize decisive consensus, list immutable invariants, and calculate convergence alignment. After your synthesis append exactly one fenced JSON block with keys: agreementScore (integer 0-100), keyConsensusPoints (array), keyDisagreements (array), panelistAlignment (object of persona id -> integer 0-100).' },
-            { role: 'user', content: `Synthesize Cycle ${iter} findings:\n\n${s1Text}` },
+            { role: 'user', content: `Synthesize ${p.label} findings:\n\n${s1Text}` },
           ],
           policy,
           rawModels: catalog,
@@ -411,9 +508,9 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         });
 
         // Real consensus parser from the Chair output.
-        let synthesis = synthRes.content;
+        synthesis = synthRes.content;
         const jsonMatch = synthesis.match(/```json\s*([\s\S]*?)```/);
-        let consensusMetric: ConsensusMetric = {
+        consensusMetric = {
           agreementScore: 50,
           keyConsensusPoints: [] as string[],
           keyDisagreements: [] as string[],
@@ -433,7 +530,10 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
         consensusMetric = {
           ...consensusMetric,
-          iterationDelta: iter > 1 && consensusMetrics.length > 0 ? consensusMetric.agreementScore - (consensusMetrics[consensusMetrics.length - 1]?.agreementScore || consensusMetric.agreementScore) : undefined,
+          iterationDelta:
+            qi > 0 && accumulatedMetrics.length > 0
+              ? consensusMetric.agreementScore - (accumulatedMetrics[accumulatedMetrics.length - 1]?.agreementScore || consensusMetric.agreementScore)
+              : undefined,
         };
 
         newRound.deliberation.stage3 = {
@@ -455,9 +555,16 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
         accumulatedMetrics = [...accumulatedMetrics, consensusMetric];
         setConsensusMetrics(accumulatedMetrics);
-        addLog(`✨ Cycle ${iter} Consensus reached with ${consensusMetric.agreementScore}% alignment score.`);
+        addLog(`✨ ${p.label} consensus: ${consensusMetric.agreementScore}% alignment.`);
       } catch (err: any) {
         addLog(`❌ Chair synthesis error: ${err.message}`);
+      }
+
+      // In deep-document mode, accumulate each section's findings into the ledger.
+      if (docPlan && !p.isFinalSynthesis) {
+        const partNo = qi + 1;
+        const chunk = docChunks[qi];
+        documentLedger += `## Part ${partNo} (${chunk?.sourceName || 'document'} — ${chunk?.estimatedPages || '?'} pages)\n${(synthesis || 'No synthesis').slice(0, 1600)}\n\n`;
       }
 
       accumulatedRounds = [...accumulatedRounds, newRound];
@@ -470,9 +577,10 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       persistMission({
         id: `nexus_${Date.now()}`,
         goal: missionGoal,
+        title,
         presetId: activePreset,
-        maxIterations,
-        currentIteration: iter,
+        maxIterations: totalPasses,
+        currentIteration: qi + 1,
         status: 'running',
         rounds: accumulatedRounds,
         consensusMetrics: accumulatedMetrics,
@@ -482,23 +590,32 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       });
 
       // Short delay between iterations
-      await new Promise((r) => setTimeout(r, 1200));
+      await new Promise((r) => setTimeout(r, 800));
     }
 
     const finalMetrics = accumulatedMetrics;
     const lastScore = finalMetrics.length > 0 ? finalMetrics[finalMetrics.length - 1].agreementScore : 50;
-    const finalStatus: PersistedMission['status'] = lastScore >= 85 ? 'converged' : 'max_reached';
+    const finalStatus: PersistedMission['status'] = docPlan
+      ? 'converged'
+      : lastScore >= 85
+        ? 'converged'
+        : 'max_reached';
 
     setIsRunning(false);
     setMissionStatus(finalStatus);
-    addLog(`🏁 Nexus Lab Mission finalized (${lastScore >= 85 ? 'CONVERGED' : 'MAX ITERATIONS REACHED'}).`);
+    addLog(
+      docPlan
+        ? `🏁 Deep Document review complete — ${docChunks.length} parts reviewed and synthesized.`
+        : `🏁 Nexus Lab Mission finalized (${lastScore >= 85 ? 'CONVERGED' : 'MAX ITERATIONS REACHED'}).`
+    );
 
     persistMission({
       id: `nexus_${Date.now()}`,
       goal: missionGoal,
+      title,
       presetId: activePreset,
-      maxIterations,
-      currentIteration: iter,
+      maxIterations: totalPasses,
+      currentIteration: totalPasses,
       status: finalStatus,
       rounds: accumulatedRounds,
       consensusMetrics: finalMetrics,
@@ -524,9 +641,52 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setTerminalLogs([]);
     setAttachedFiles([]);
     setMissionStatus('idle');
+    setMissionTitle('Nexus Mission');
+    setFollowUpContext(null);
+    setFollowUpDirective('');
+    setDocumentPlan(null);
     setShowDossier(false);
     persistMission(null);
     addLog(`🔄 Nexus Lab reset to standby.`);
+  };
+
+  const handleFollowUp = () => {
+    const directive = followUpDirective.trim();
+    if (!directive) return;
+
+    // Snapshot + archive the finished mission before starting the follow-up.
+    const lastRound = rounds[rounds.length - 1];
+    const finalSynthesis = stripJsonBlocks(lastRound?.synthesis?.content || lastRound?.deliberation?.stage3?.content || '');
+    const priorConsensus = `Goal: ${missionGoal}\nFinal Consensus:\n${finalSynthesis.slice(0, 4000) || 'No synthesis recorded.'}`;
+
+    const finishedMission: PersistedMission = {
+      id: `nexus_${Date.now()}`,
+      goal: missionGoal,
+      title: missionTitle,
+      presetId: activePreset,
+      maxIterations,
+      currentIteration,
+      status: missionStatus,
+      rounds,
+      consensusMetrics,
+      estimatedCost: getEstimatedCost(),
+      attachedFiles,
+      updatedAt: Date.now(),
+    };
+    pushArchive(finishedMission);
+
+    // Carry the prior consensus forward into the new mission's context.
+    setFollowUpContext(priorConsensus);
+    setMissionGoal(directive);
+    setFollowUpDirective('');
+    setCurrentIteration(0);
+    setRounds([]);
+    setConsensusMetrics([]);
+    setDocumentPlan(null);
+    setMissionStatus('idle');
+    setTerminalLogs([]);
+    persistMission(null);
+    addLog(`🔁 Follow-up directive set. Prior mission consensus carried forward.`);
   };
 
   const canExport = missionStatus === 'converged' || missionStatus === 'max_reached';
@@ -535,6 +695,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     const lines: string[] = [];
     lines.push(`# Council Mission Dossier`);
     lines.push('');
+    lines.push(`**Mission:** ${missionTitle}`);
     lines.push(`**Mission Goal:** ${missionGoal}`);
     lines.push(`**Preset:** ${activePreset === 'fast_and_free' ? 'Fast & Free' : 'Deep Frontier'}`);
     lines.push(`**Iterations Run:** ${currentIteration}/${maxIterations}`);
@@ -632,7 +793,11 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         </div>
 
         {/* Status Pills */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 text-xs font-mono px-3 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-300">
+            <Terminal size={13} className="text-emerald-400" />
+            <span className="max-w-[180px] truncate" title={missionTitle}>{missionTitle}</span>
+          </div>
           <div className="flex items-center gap-1.5 text-xs font-mono px-3 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-300">
             <Cpu size={13} className="text-emerald-400" />
             <span>Cycle: {currentIteration} / {maxIterations}</span>
@@ -901,6 +1066,44 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                   className="rounded text-emerald-500 focus:ring-0"
                 />
               </label>
+
+              <div className="p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl space-y-2">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <div className="flex items-center gap-2 text-xs text-slate-300">
+                    <Layers size={14} className="text-emerald-400" />
+                    <div>
+                      <div>Deep Document Mode</div>
+                      <div className="text-[10px] text-slate-500 font-normal">
+                        Split oversized files into ~page-sized parts and review every part, then synthesize.
+                      </div>
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={deepDocumentMode}
+                    onChange={(e) => setDeepDocumentMode(e.target.checked)}
+                    disabled={isRunning}
+                    className="rounded text-emerald-500 focus:ring-0"
+                  />
+                </label>
+
+                {deepDocumentMode && (
+                  <div className="flex items-center justify-between gap-2 pl-1">
+                    <span className="text-[10px] text-slate-400">Pages per part</span>
+                    <select
+                      value={pagesPerChunk}
+                      onChange={(e) => setPagesPerChunk(parseInt(e.target.value) || 20)}
+                      disabled={isRunning}
+                      className="bg-slate-950 text-slate-200 text-xs p-1.5 rounded-lg border border-slate-800"
+                    >
+                      <option value={10}>10</option>
+                      <option value={20}>20</option>
+                      <option value={40}>40</option>
+                      <option value={60}>60</option>
+                    </select>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Execution Buttons */}
@@ -909,11 +1112,11 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 <button
                   type="button"
                   onClick={handlePreLaunchCheck}
-                  disabled={!missionGoal.trim()}
+                  disabled={!missionGoal.trim() && attachedFiles.length === 0}
                   className="flex-1 inline-flex items-center justify-center gap-2 py-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 disabled:opacity-50 text-slate-950 font-bold rounded-2xl text-xs shadow-lg shadow-emerald-900/30 transition-all cursor-pointer"
                 >
                   <Play size={13} className="fill-current" />
-                  <span>{currentIteration > 0 ? 'Resume Cycle' : 'Execute Nexus Lab'}</span>
+                  <span>{currentIteration > 0 ? 'Resume Cycle' : deepDocumentMode ? 'Run Deep Review' : 'Execute Nexus Lab'}</span>
                 </button>
               ) : (
                 <button
@@ -936,11 +1139,59 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 <RotateCcw size={14} />
               </button>
             </div>
+
+            {/* Follow-up directive (available after a mission finishes) */}
+            {(missionStatus === 'converged' || missionStatus === 'max_reached') && (
+              <div className="pt-3 border-t border-slate-800/80 space-y-2">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                  <ArrowRight size={13} className="text-emerald-400" />
+                  <span>Follow-up Directive</span>
+                </div>
+                <textarea
+                  value={followUpDirective}
+                  onChange={(e) => setFollowUpDirective(e.target.value)}
+                  placeholder="Refine, extend, or challenge the prior mission…"
+                  rows={2}
+                  className="w-full bg-slate-950 text-slate-100 text-xs p-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-emerald-500 transition-all resize-none"
+                />
+                <button
+                  type="button"
+                  onClick={handleFollowUp}
+                  disabled={!followUpDirective.trim()}
+                  className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded-xl text-xs transition-colors cursor-pointer"
+                >
+                  Continue as Follow-up (carries prior consensus)
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
         {/* Center & Right Column: Terminal & Consensus Ledger (8 cols) */}
         <div className="lg:col-span-8 space-y-4">
+          {/* Deep Document Mode chunk manifest */}
+          {documentPlan && (
+            <div className="bg-slate-900/90 border border-emerald-700/50 rounded-3xl p-4 shadow-xl space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2">
+                  <Layers size={14} />
+                  Deep Document Plan — {documentPlan.chunks.length} part{documentPlan.chunks.length === 1 ? '' : 's'}
+                </span>
+                <span className="font-mono text-[10px] text-slate-500">
+                  ~{pagesPerChunk} pages/part · {Math.max(1, documentPlan.chunks.length + 1)} review passes
+                </span>
+              </div>
+              <div className="bg-slate-950 rounded-2xl p-3 font-mono text-[11px] text-emerald-300/90 max-h-40 overflow-y-auto space-y-1">
+                {documentPlan.messages.length === 0 && (
+                  <div className="text-slate-500 italic">No files exceeded the chunk threshold.</div>
+                )}
+                {documentPlan.messages.map((m, i) => (
+                  <div key={i}>{m}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Real-Time Convergence Telemetry Gauge */}
           {latestMetric && (
             <ConsensusVisualizer metric={latestMetric} personas={personas} roundIndex={currentIteration} />

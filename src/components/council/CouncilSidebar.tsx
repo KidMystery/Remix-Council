@@ -1,5 +1,5 @@
-import React from 'react';
-import { MessageSquare, PanelLeftClose, Plus, Search, X, Clock, Trash2, Eraser, RefreshCw, Cloud } from 'lucide-react';
+import React, { useState } from 'react';
+import { MessageSquare, PanelLeftClose, Plus, Search, X, Clock, Trash2, Eraser, RefreshCw, Cloud, Pencil } from 'lucide-react';
 import { Session } from '../../types';
 import { ConfirmButton } from '../ConfirmButton';
 
@@ -14,6 +14,7 @@ interface CouncilSidebarProps {
   setSessionSearchQuery: (query: string) => void;
   onCreateNewSession: () => void;
   onSelectSession: (id: string) => void;
+  onRenameSession?: (id: string, title: string) => void;
   onDeleteSession: (id: string) => void;
   onClearAllSessions: () => void;
   onClearActiveHistory?: () => void;
@@ -36,6 +37,7 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
   setSessionSearchQuery,
   onCreateNewSession,
   onSelectSession,
+  onRenameSession,
   onDeleteSession,
   onClearAllSessions,
   onClearActiveHistory,
@@ -46,6 +48,15 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
   isSignedIn,
   onOpenStorageSync,
 }) => {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftTitle, setDraftTitle] = useState('');
+
+  const commitRename = (id: string) => {
+    const clean = draftTitle.trim();
+    if (clean) onRenameSession?.(id, clean);
+    setEditingId(null);
+    setDraftTitle('');
+  };
   const currentSession = activeSession || sessions.find((s) => s.id === activeSessionId);
   const activeHasRounds = Boolean(currentSession && currentSession.rounds && currentSession.rounds.length > 0);
 
@@ -190,9 +201,47 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
                       }`}
                     >
                       <div className="min-w-0 flex-1 space-y-1">
-                        <div className="font-semibold text-xs leading-snug line-clamp-2 break-words" title={sessionTitle}>
-                          {sessionTitle}
-                        </div>
+                        {editingId === s.id ? (
+                          <input
+                            autoFocus
+                            value={draftTitle}
+                            onChange={(e) => setDraftTitle(e.target.value)}
+                            onBlur={() => commitRename(s.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                commitRename(s.id);
+                              } else if (e.key === 'Escape') {
+                                setEditingId(null);
+                                setDraftTitle('');
+                              }
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="w-full bg-slate-950 text-slate-100 text-xs px-2 py-1 rounded border border-cyan-500/60 focus:outline-none"
+                            aria-label="Rename thread"
+                          />
+                        ) : (
+                          <div className="flex items-start gap-1 group/title">
+                            <div className="font-semibold text-xs leading-snug line-clamp-2 break-words" title={sessionTitle}>
+                              {sessionTitle}
+                            </div>
+                            {onRenameSession && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingId(s.id);
+                                  setDraftTitle(sessionTitle);
+                                }}
+                                className="opacity-0 group-hover/title:opacity-100 text-slate-500 hover:text-cyan-400 p-0.5 rounded transition-opacity cursor-pointer shrink-0"
+                                title="Rename thread"
+                                aria-label={`Rename thread ${sessionTitle}`}
+                              >
+                                <Pencil size={11} />
+                              </button>
+                            )}
+                          </div>
+                        )}
                         <div className="flex items-center gap-2 text-[10px] text-slate-400 dark:text-slate-500 font-mono flex-wrap">
                           <span className="flex items-center gap-1">
                             <Clock size={10} aria-hidden="true" />
