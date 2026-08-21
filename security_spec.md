@@ -1,99 +1,103 @@
-# Security Specification: AI Council Chamber Firestore Rules
+# Security Specification — Remix Council (current architecture)
 
-## 1. Data Invariants
-- **Identity Isolation**: A user can strictly only read, create, update, and delete their own documents within `/users/{userId}/**`. Cross-user access is impossible.
-- **Relational Ownership Invariant**: In `/users/{userId}/sessions/{sessionId}`, `incoming().userId` must strictly match `request.auth.uid` and path variable `{userId}`.
-- **ID Guarding**: All document IDs and user IDs must conform to regex `^[a-zA-Z0-9_-]+$` with length `<= 128`.
-- **Schema Completeness & Type Safety**:
-  - `CouncilSession`: Must contain `id` (string <= 128), `userId` (string <= 128), `title` (string <= 500), `createdAt` (number), and `updatedAt` (number). If present, `rounds` must be a list with size `<= 50`. `attachedFiles` list size `<= 100`.
-  - `UserSettings`: Must contain `updatedAt` (number). Optional `settings`, `personas`, and `synthesizer` must conform to valid nested structures.
-- **Immutable Keys**: `id`, `userId`, and `createdAt` are immutable after session document creation.
-- **Default Deny**: Global catch-all denying all reads and writes across unmapped paths.
+This document describes the security model **as actually implemented** in the
+codebase. It replaces the earlier Firestore/Firebase spec, which described a
+backend that no longer exists in this app.
 
 ---
 
-## 2. The "Dirty Dozen" Adversarial Payloads
+## 1. Architecture
 
-1. **Payload 1 (Identity Spoofing - Session Owner Mismatch)**
-   - Attack: Write a session under `/users/user_123/sessions/sess_1` where `userId: "attacker_999"`.
-   - Expected: `PERMISSION_DENIED`
+```
+Browser (React SPA)
+   │  same-origin fetch (relative URLs only)
+   ▼
+Express server (server.ts)
+   │  Authorization: Bearer <OPENROUTER_API_KEY>   ← server-side only
+   ▼
+OpenRouter API  +  Google Drive API (appDataFolder)
+```
 
-2. **Payload 2 (Cross-User Write Infiltration)**
-   - Attack: Authenticated as `user_A`, attempting `setDoc` at `/users/user_B/sessions/sess_2`.
-   - Expected: `PERMISSION_DENIED`
-
-3. **Payload 3 (Path Variable Poisoning)**
-   - Attack: Injecting a 2KB junk character string or invalid regex chars into `{sessionId}` or `{userId}` (e.g. `../../etc/passwd` or `a*b$c!`).
-   - Expected: `PERMISSION_DENIED`
-
-4. **Payload 4 (Ghost Field / Shadow Key Injection)**
-   - Attack: Creating a session with extra malicious properties `{ isSuperAdmin: true, billingOverride: "free" }`.
-   - Expected: `PERMISSION_DENIED`
-
-5. **Payload 5 (Immutable Field Mutation - Hijack Owner)**
-   - Attack: Updating existing session to change `userId` or `id`.
-   - Expected: `PERMISSION_DENIED`
-
-6. **Payload 6 (Immutable Field Mutation - Roll Back Creation Time)**
-   - Attack: Updating existing session with a modified `createdAt` timestamp.
-   - Expected: `PERMISSION_DENIED`
-
-7. **Payload 7 (Denial of Wallet - Title Length Overflow)**
-   - Attack: Creating a session with a `title` containing 50,000 characters.
-   - Expected: `PERMISSION_DENIED`
-
-8. **Payload 8 (Unbounded Array Injection - Rounds Exhaustion)**
-   - Attack: Injecting an array of 5,000 artificial round objects to exceed document boundaries.
-   - Expected: `PERMISSION_DENIED`
-
-9. **Payload 9 (Unauthenticated Anonymous Snooping)**
-   - Attack: Reading `/users/user_123/settings/global_preferences` without valid Firebase Auth tokens.
-   - Expected: `PERMISSION_DENIED`
-
-10. **Payload 10 (Type Poisoning - String for Numeric Timestamp)**
-    - Attack: Setting `createdAt: "yesterday"` or `updatedAt: false`.
-    - Expected: `PERMISSION_DENIED`
-
-11. **Payload 11 (Unmapped Collection Creation)**
-    - Attack: Attempting to create documents in arbitrary collections like `/admin_secrets/` or `/user_backups/`.
-    - Expected: `PERMISSION_DENIED`
-
-12. **Payload 12 (Settings Tampering by Third-Party)**
-    - Attack: Authenticated user attempting to overwrite `/users/target_user/settings/global_preferences`.
-    - Expected: `PERMISSION_DENIED`
+- **All model traffic** goes through the server's `/api/council` proxy. The
+  OpenRouter API key lives in `process.env.OPENROUTER_API_KEY` and is **never
+  sent to the browser**.
+- **Google Drive** is accessed directly from the browser via Google Identity
+  Services (GIS) OAuth tokens. Tokens are held in module memory only — they are
+  never written to localStorage or sessionStorage.
 
 ---
 
-## 3. Rules Verification Matrix
+## 2. Endpoints & protection
 
-| Vulnerability Vector | Defense Mechanism | Rule Function Gate | Status |
-|---|---|---|---|
-| ID Poisoning | Regex & Size check | `isValidId(userId) && isValidId(sessionId)` | Hardened |
-| Cross-User Access | UID Verification | `isOwner(userId)` | Hardened |
-| Type Poisoning | Strict Schema Validation | `isValidCouncilSession(data)` | Hardened |
-| Field Tampering | Immutability check | `incoming().userId == existing().userId` | Hardened |
-| Memory/Cost Bomb | Array & String bounds | `data.title.size() <= 500 && data.rounds.size() <= 50` | Hardened |
-| Catch-All Bleed | Top-level reject | `match /{document=**} { allow read, write: if false; }` | Hardened |
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /api/health` | none | Railway healthcheck |
+| `GET /api/council/models` | council key (optional) + rate limit | Cached OpenRouter catalog |
+| `GET /api/council/account` | council key (optional) | Credits / usage (no key leak) |
+| `POST /api/council` | owner gate (or council key) + rate limit | Model completion proxy (streaming) |
+
+### Council access key
+- `COUNCIL_ACCESS_KEY` (server) is compared against the `x-council-key` header.
+- If **unset**, the server runs in open dev mode (allows all) — intended for
+  localhost / AI Studio / single-user.
+- If set, the client must also set `VITE_COUNCIL_ACCESS_KEY` to the same value.
+  ⚠️ That client copy is **visible in the bundle** — it is a shared secret that
+  mitigates casual cross-site abuse, **not** a strong credential. It never
+  protects money directly: the money key (`OPENROUTER_API_KEY`) stays server-side.
+
+### Owner gate (real identity, optional)
+- Set `OWNER_EMAIL` on the server to bind `/api/council` to **your** Google
+  account. The browser (after Drive sign-in) sends its Google access token as
+  `x-owner-token` on same-origin requests; the server verifies it against
+  Google's `userinfo` endpoint (cached 5 min) and compares the email. Mismatch → 403.
+- This is the modern replacement for the old Firebase `OWNER_UID` concept, using
+  the Google sign-in that already ships with the app — no extra SDK.
+
+### Server hardening already in place
+- Model id allowlist regex (`ALLOWED_MODEL_PATTERN`) — rejects arbitrary provider/URL injection.
+- Zod schema validation of the request body (roles, `content: string | array`).
+- **Rate limiting** — fixed-window per-IP limiter on `/api/council` and
+  `/api/council/models` (default 60 req/min, configurable via `RATE_LIMIT_PER_MINUTE`).
+- **Input caps** — ≤ 80 messages and ≤ 300k characters per completion request.
+- 110 s upstream timeout + client-disconnect abort.
+- 10-minute in-memory catalog cache with stale-fallback.
+- `express.json({ limit: '50mb' })` caps request body size.
 
 ---
 
-## 4. Operational & Deployment Setup Guide
+## 3. Data-at-rest
 
-### Firebase Authentication Setup
-1. **Enable Google Provider**:
-   - Go to **Firebase Console → Authentication → Sign-in method**.
-   - Enable **Google** as a sign-in provider. If disabled, login requests will fail with `auth/operation-not-allowed`.
-2. **Configure Authorized Domains**:
-   - Go to **Firebase Console → Authentication → Settings → Authorized domains**.
-   - Add the domain where the app is hosted (e.g. Railway domain, custom domain, or preview host). If missing, sign-in will fail with `auth/unauthorized-domain`.
+- **Sessions** → localStorage (`council-sessions-v3`) and Drive `appDataFolder/council-sessions.json` when signed in.
+- **Oracle threads/Bibles** → localStorage (`council-oracle-threads-v1`, `council-oracle-global-bible-v1`) and Drive `appDataFolder/council-oracle.json` when signed in.
+- **Attachments are truncated on write** (local ~8 KB, Drive ~20 KB per file) to protect quota — surfaced with a UI warning.
+- No Firebase/Firestore collections are used.
 
-### Server API Route Protection
-1. **Owner Authentication**:
-   - The server enforces owner authentication on protected endpoints (`/api/council`, `/api/council/account`, `/api/council/extract-archive`, `/api/council/import-github`).
-   - Set `OWNER_UID` or `OWNER_EMAIL` in the server environment to strictly bind protected API access to your Firebase account.
-   - In production environments, if neither `OWNER_UID` nor `OWNER_EMAIL` is set, the server fails closed (HTTP 403) to prevent unauthorized API execution.
-   - For non-interactive or headless clients, `COUNCIL_ACCESS_SECRET` may optionally be set as a shared secret header fallback.
-2. **Public Endpoints**:
-   - `/api/health`: Public health check (HTTP 200).
-   - `/api/council/models`: Public cached OpenRouter model catalog with per-IP rate-limiting.
+---
 
+## 4. Known limitations (honest assessment)
+
+1. **Still not safe to expose publicly by default.** If you leave both
+   `COUNCIL_ACCESS_KEY` and `OWNER_EMAIL` unset, the server falls open and anyone
+   who can reach the deployment can drive `/api/council` (rate-limited, but still
+   spending your credits). **For personal use:** keep it on localhost, AI
+   Studio's per-user runtime, or a private Railway service — OR set `OWNER_EMAIL`
+   to your Google address and sign in to Drive before use, which hard-restricts
+   the money route to you.
+2. **Rate limiting is per-IP and in-memory** — it resets on restart and can be
+   bypassed with many IPs; it stops casual abuse, not a determined attacker.
+3. **Prompt injection** in attachments/follow-ups is unmitigated (acceptable for
+   a personal analysis tool; a risk when analyzing untrusted documents).
+4. `VITE_COUNCIL_ACCESS_KEY` (if used) is visible in the client bundle by design.
+
+---
+
+## 5. Roadmap to harden (further)
+
+1. **Persistent rate limiting / per-identity budget** — move the limiter to a
+   store (or key it on the verified owner identity) if you ever scale beyond one user.
+2. **Server-side cost governor** — hard cap on spend per session/mission, enforced
+   server-side (today the Chamber enforces cost ceilings client-side).
+3. **Content-type + prompt-injection hardening** if you feed untrusted documents.
+
+See `HANDBOOK.md` for setup (Google Client ID authorized origins, Railway env,
+Drive troubleshooting) and the full feature/storage map.

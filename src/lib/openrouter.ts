@@ -1,5 +1,6 @@
 import type { GroundingData } from '../types';
 import { parseWebSearchAnnotations } from './webGrounding';
+import { getAuthHeaders } from './apiClient';
 
 export interface StreamOpenRouterOptions {
   model: string;
@@ -26,8 +27,6 @@ export async function streamOpenRouter({
     throw new Error('No model selected.');
   }
 
-  const councilAccessKey = (import.meta as any).env?.VITE_COUNCIL_ACCESS_KEY || '';
-
   const body: Record<string, any> = {
     model: model.trim(),
     messages,
@@ -40,7 +39,7 @@ export async function streamOpenRouter({
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'x-council-key': councilAccessKey,
+    ...getAuthHeaders(),
   };
 
   let attempt = 0;
@@ -162,8 +161,6 @@ export async function streamOpenRouterCompletion(
     throw new Error('No model selected.');
   }
 
-  const councilAccessKey = (import.meta as any).env?.VITE_COUNCIL_ACCESS_KEY || '';
-
   const body: Record<string, any> = {
     model: model.trim(),
     messages,
@@ -196,7 +193,7 @@ export async function streamOpenRouterCompletion(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-council-key': councilAccessKey,
+        ...getAuthHeaders(),
       },
       body: JSON.stringify(body),
       signal,
@@ -274,12 +271,8 @@ export async function streamOpenRouterCompletion(
 }
 
 export async function fetchCouncilModels(): Promise<any[]> {
-  const councilAccessKey = (import.meta as any).env?.VITE_COUNCIL_ACCESS_KEY || '';
-
   const response = await fetch('/api/council/models', {
-    headers: {
-      'x-council-key': councilAccessKey,
-    },
+    headers: getAuthHeaders(),
   });
 
   if (!response.ok) {

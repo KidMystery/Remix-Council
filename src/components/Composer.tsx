@@ -10,14 +10,17 @@ import {
   Sparkles,
   Loader2,
   X,
+  Mic,
 } from 'lucide-react';
 import type { AttachedFile } from '../types';
 import { extractCodeFromArchive } from '../lib/zipReader';
 import { extractTextFromPDF } from '../lib/pdfUtils';
+import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 
 export interface ComposerProps {
   onSend: (query: string, attachedFiles: AttachedFile[], isFollowUp: boolean) => void;
   isDeliberating: boolean;
+  onStop?: () => void;
   estimatedCost?: number;
   estimatedTokens?: number;
 }
@@ -25,6 +28,7 @@ export interface ComposerProps {
 export const Composer: React.FC<ComposerProps> = ({
   onSend,
   isDeliberating,
+  onStop,
   estimatedCost = 0,
   estimatedTokens = 0,
 }) => {
@@ -36,6 +40,22 @@ export const Composer: React.FC<ComposerProps> = ({
   const [showMobileDetails, setShowMobileDetails] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Dictation (speech-to-text) into the query box.
+  const preQueryRef = useRef('');
+  const { supported: sttSupported, isListening, toggle: toggleDictation } = useSpeechRecognition(
+    ({ transcript }) => {
+      setQuery(preQueryRef.current + transcript);
+    }
+  );
+  const handleMic = () => {
+    if (isListening) {
+      toggleDictation();
+    } else {
+      preQueryRef.current = query;
+      toggleDictation();
+    }
+  };
 
   // Auto-resize textarea height to content
   useEffect(() => {
@@ -151,6 +171,13 @@ export const Composer: React.FC<ComposerProps> = ({
           isDraggingOver ? 'border-cyan-400 ring-2 ring-cyan-400/40 bg-cyan-950/20' : 'border-slate-700/80'
         }`}
       >
+        {/* Large attachment storage warning */}
+        {attachedFiles.some((f) => (f.content || '').length > 8000) && (
+          <div className="mb-2 px-3 py-1.5 rounded-lg bg-amber-950/70 border border-amber-600/40 text-amber-300 text-[11px] leading-snug">
+            ⚠️ A large attachment will be truncated to ~8,000 characters in local storage. Use Drive sync or attach smaller files for full fidelity.
+          </div>
+        )}
+
         {/* Attached Files Carousel */}
         {attachedFiles.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-2 max-h-28 overflow-y-auto">
@@ -197,7 +224,7 @@ export const Composer: React.FC<ComposerProps> = ({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask the Council anything... (Press ⌘+Enter to deliberate)"
+            placeholder="Ask the Council anything... (Press Ctrl+Enter to deliberate)"
             rows={2}
             className="w-full bg-slate-950/70 text-slate-100 placeholder-slate-500 text-xs sm:text-sm p-3 rounded-xl border border-slate-800 focus:outline-none focus:border-cyan-500/70 resize-none transition-all leading-relaxed"
           />
@@ -229,6 +256,23 @@ export const Composer: React.FC<ComposerProps> = ({
               <Paperclip size={13} className="text-slate-400" />
               <span className="text-[11px] sm:text-xs">Attach</span>
             </button>
+
+            {sttSupported && (
+              <button
+                type="button"
+                onClick={handleMic}
+                disabled={isExtracting}
+                title={isListening ? 'Stop dictation' : 'Dictate your question (speech-to-text)'}
+                className={`inline-flex items-center gap-1.5 text-xs px-2.5 sm:px-3 py-1.5 rounded-xl border transition-colors shadow-sm cursor-pointer min-h-[38px] ${
+                  isListening
+                    ? 'bg-red-950/80 hover:bg-red-900 text-red-300 border-red-700 animate-pulse'
+                    : 'text-slate-300 hover:text-slate-100 bg-slate-800/80 hover:bg-slate-700 border-slate-700'
+                }`}
+              >
+                <Mic size={13} className={isListening ? 'text-red-400' : 'text-emerald-400'} />
+                <span className="text-[11px] sm:text-xs">{isListening ? 'Listening…' : 'Dictate'}</span>
+              </button>
+            )}
 
             {/* Desktop Fresh/Followup switcher */}
             <div className="hidden sm:flex items-center bg-slate-950 rounded-xl p-0.5 border border-slate-800 text-xs">
@@ -280,6 +324,18 @@ export const Composer: React.FC<ComposerProps> = ({
               <span className="text-slate-600">•</span>
               <span>${estimatedCost.toFixed(4)}</span>
             </div>
+
+            {isDeliberating && onStop && (
+              <button
+                type="button"
+                onClick={onStop}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 sm:px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-bold rounded-xl transition-all shadow-md text-xs cursor-pointer min-h-[38px]"
+                title="Stop the current deliberation"
+              >
+                <X size={13} />
+                <span>Stop</span>
+              </button>
+            )}
 
             <button
               type="submit"

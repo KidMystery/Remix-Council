@@ -27,19 +27,87 @@ const CouncilRequestSchema = z.object({
   messages: z.array(
     z.object({
       role: z.string(),
-      content: z.string(),
+      // content may be a plain string or a multimodal content-part array
+      // (e.g. [{ type: 'text', text }, { type: 'image_url', image_url }]).
+      content: z.union([z.string(), z.array(z.any())]),
     })
   ),
   temperature: z.number().optional(),
   max_tokens: z.number().optional(),
   budget: z.enum(['free', 'cheap', 'quality']).optional(),
   stream: z.boolean().optional(),
+  tools: z.array(z.any()).optional(),
 });
+
+// ---------------------------------------------------------------------------
+// In-memory per-IP rate limiter (fixed window). Personal-use scale: enough to
+// stop casual abuse of the money route without external infra.
+// ---------------------------------------------------------------------------
+interface RateBucket {
+  windowStart: number;
+  count: number;
+}
+const rateBuckets = new Map<string, RateBucket>();
+const RATE_WINDOW_MS = 60 * 1000;
+const DEFAULT_RATE_LIMIT = 60; // requests / minute / IP
+
+function getRateLimit(): number {
+  const raw = parseInt(String(process.env.RATE_LIMIT_PER_MINUTE || ''), 10);
+  return !isNaN(raw) && raw > 0 ? raw : DEFAULT_RATE_LIMIT;
+}
+
+function rateLimited(ip: string): boolean {
+  const now = Date.now();
+  const bucket = rateBuckets.get(ip);
+  if (!bucket || now - bucket.windowStart >= RATE_WINDOW_MS) {
+    rateBuckets.set(ip, { windowStart: now, count: 1 });
+    return false;
+  }
+  bucket.count++;
+  // Periodically prune stale buckets to bound memory.
+  if (rateBuckets.size > 10_000) {
+    for (const [k, v] of rateBuckets) {
+      if (now - v.windowStart >= RATE_WINDOW_MS) rateBuckets.delete(k);
+    }
+  }
+  return bucket.count > getRateLimit();
+}
 
 // In-memory catalog cache (10 minute TTL)
 let cachedCatalog: any[] | null = null;
 let lastCatalogFetchTime = 0;
 const CATALOG_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+// ---------------------------------------------------------------------------
+// Owner gate: when OWNER_EMAIL is set, only a verified Google identity may hit
+// the money route. Verification is cached in-memory (5 min) per token.
+// ---------------------------------------------------------------------------
+interface OwnerVerifyCacheEntry {
+  email: string;
+  expiresAt: number;
+}
+const ownerVerifyCache = new Map<string, OwnerVerifyCacheEntry>();
+const OWNER_VERIFY_TTL_MS = 5 * 60 * 1000;
+
+async function resolveTokenEmail(token: string): Promise<string | null> {
+  const cached = ownerVerifyCache.get(token);
+  if (cached && cached.expiresAt > Date.now()) return cached.email;
+
+  try {
+    const resp = await fetch(
+      `https://www.googleapis.com/oauth2/v1/userinfo?access_token=${encodeURIComponent(token)}`
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const email = (data?.email as string) || null;
+    if (email) {
+      ownerVerifyCache.set(token, { email, expiresAt: Date.now() + OWNER_VERIFY_TTL_MS });
+    }
+    return email;
+  } catch {
+    return null;
+  }
+}
 
 export async function startServer(portOverride?: number) {
   const app = express();
@@ -72,8 +140,41 @@ export async function startServer(portOverride?: number) {
     return next();
   };
 
+  // 2b. Rate limiter middleware for the money route + catalog.
+  const requireRateLimit = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    if (rateLimited(ip)) {
+      return res.status(429).json({ error: 'Rate limit exceeded. Please slow down.' });
+    }
+    return next();
+  };
+
+  // 2c. Owner gate middleware — when OWNER_EMAIL is configured, verify the
+  // caller's Google identity token before allowing access to the money route.
+  const OWNER_EMAIL = (process.env.OWNER_EMAIL || '').trim().toLowerCase();
+  const requireOwnerGate = async (
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
+    if (!OWNER_EMAIL) {
+      // Not configured — fall through to the shared-key gate (or open dev mode).
+      return requireCouncilAuth(req, res, next);
+    }
+
+    const token = req.header('x-owner-token') || '';
+    if (!token) {
+      return res.status(401).json({ error: 'Sign in required (owner gate).' });
+    }
+    const email = await resolveTokenEmail(token);
+    if (!email || email.toLowerCase() !== OWNER_EMAIL) {
+      return res.status(403).json({ error: 'This deployment is restricted to its owner.' });
+    }
+    return next();
+  };
+
   // 3. Models catalog route with 10-minute in-memory cache + stale fallback
-  app.get('/api/council/models', requireCouncilAuth, async (_req, res) => {
+  app.get('/api/council/models', requireCouncilAuth, requireRateLimit, async (_req, res) => {
     const now = Date.now();
     if (cachedCatalog && now - lastCatalogFetchTime < CATALOG_CACHE_TTL_MS) {
       return res.json({ data: cachedCatalog, cached: true });
@@ -114,7 +215,7 @@ export async function startServer(portOverride?: number) {
   });
 
   // 5. Deliberation stream route
-  app.post('/api/council', requireCouncilAuth, async (req, res) => {
+  app.post('/api/council', requireRateLimit, requireOwnerGate, async (req, res) => {
     const parseResult = CouncilRequestSchema.safeParse(req.body);
     if (!parseResult.success) {
       return res.status(400).json({
@@ -123,7 +224,24 @@ export async function startServer(portOverride?: number) {
       });
     }
 
-    const { model: rawModel, messages, temperature, max_tokens, budget, stream } = parseResult.data;
+    const { model: rawModel, messages, temperature, max_tokens, budget, stream, tools } = parseResult.data;
+
+    // Input caps: bound message count and total payload size to prevent runaway
+    // prompt costs via the proxy.
+    if (messages.length > 80) {
+      return res.status(400).json({ error: 'Too many messages in the request.' });
+    }
+    const totalContentChars = messages.reduce((acc, m) => {
+      const c = m.content;
+      if (typeof c === 'string') return acc + c.length;
+      if (Array.isArray(c)) {
+        return acc + c.reduce((a, part) => a + (typeof part?.text === 'string' ? part.text.length : 0), 0);
+      }
+      return acc;
+    }, 0);
+    if (totalContentChars > 300_000) {
+      return res.status(400).json({ error: 'Request content exceeds the 300k character limit.' });
+    }
 
     if (!ALLOWED_MODEL_PATTERN.test(rawModel)) {
       return res.status(400).json({ error: `Unsupported model identifier: ${rawModel}` });
@@ -151,6 +269,9 @@ export async function startServer(portOverride?: number) {
       stream: stream ?? true,
     };
     if (max_tokens) payload.max_tokens = max_tokens;
+    if (tools && tools.length > 0) payload.tools = tools;
+    // Request per-token usage stats on the final stream chunk.
+    payload.stream_options = { include_usage: true };
 
     try {
       const upstreamResp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -188,19 +309,41 @@ export async function startServer(portOverride?: number) {
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
 
+        // Abort the upstream stream promptly if the client disconnects (Stop button).
+        const onClientClose = () => {
+          abortCtrl.abort();
+          readerCleanup();
+        };
         const reader = upstreamResp.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(value);
+        const readerCleanup = () => {
+          try {
+            reader.cancel().catch(() => {});
+          } catch {
+            /* ignore */
+          }
+        };
+        req.on('close', onClientClose);
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(value);
+          }
+          return res.end();
+        } finally {
+          req.off('close', onClientClose);
         }
-        return res.end();
       } else {
         const json = await upstreamResp.json();
         return res.status(upstreamResp.status).json(json);
       }
     } catch (error: any) {
       clearTimeout(timeoutId);
+      // Client disconnected or stream was cancelled — nothing left to respond to.
+      if (res.writableEnded || res.destroyed || res.headersSent) {
+        return;
+      }
       if (error.name === 'AbortError') {
         return res.status(504).json({
           error: 'Gateway Timeout: Upstream LLM provider did not respond within 110 seconds.',

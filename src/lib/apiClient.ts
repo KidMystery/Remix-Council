@@ -1,3 +1,5 @@
+import { getGoogleAccessToken } from './drivePersistence';
+
 function getCouncilAccessKey(): string {
   try {
     if (typeof process !== 'undefined' && (process.env as any)?.VITE_COUNCIL_ACCESS_KEY !== undefined) {
@@ -30,6 +32,17 @@ export function getAuthHeaders(): Record<string, string> {
     }
   } catch (error) {
     console.warn('[apiClient] Unable to obtain council access key:', error);
+  }
+
+  try {
+    // Owner identity token (Google access token) — proves who is calling to the
+    // server's owner gate. Same-origin only; never leaks to external providers.
+    const ownerToken = getGoogleAccessToken();
+    if (ownerToken) {
+      headers['x-owner-token'] = ownerToken;
+    }
+  } catch (error) {
+    console.warn('[apiClient] Unable to obtain owner token:', error);
   }
 
   return headers;
