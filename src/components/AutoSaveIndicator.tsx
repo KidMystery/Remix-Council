@@ -214,7 +214,9 @@ export const AutoSaveIndicator: React.FC<AutoSaveIndicatorProps> = ({
         )}
       </div>
 
-      <div className="flex items-center gap-1 truncate">
+      {/* Icon-only below sm: the "Saved just now" pill was crowding/overlapping
+          the mobile menu; the tooltip still carries the full status. */}
+      <div className="hidden sm:flex items-center gap-1 truncate">
         <span className="hidden md:inline text-[10px] uppercase font-bold tracking-wider text-slate-400 group-hover:text-slate-300">
           {destination === 'cloud' ? 'Cloud' : 'Auto-save'}:
         </span>

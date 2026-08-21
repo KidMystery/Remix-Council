@@ -56,7 +56,7 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
   const { credits, refresh: refreshCredits } = useOpenRouterCredits();
 
   return (
-    <header className="flex items-center justify-between px-2.5 sm:px-5 py-2 sm:py-2.5 border-b border-slate-800 bg-slate-900/95 backdrop-blur-md sticky top-0 z-40">
+    <header className="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 px-2.5 sm:px-5 py-2 sm:py-2.5 border-b border-slate-800 bg-slate-900/95 backdrop-blur-md sticky top-0 z-40">
       {/* Brand & Mode Switcher */}
       <div className="flex items-center gap-1.5 sm:gap-4 min-w-0">
         {onToggleMobileDrawer && (
@@ -81,12 +81,12 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
           </div>
         </div>
 
-        {/* Chamber vs Nexus Lab Navigator */}
+        {/* Chamber vs Nexus Lab vs Oracle Navigator */}
         <nav className="flex items-center bg-slate-950 rounded-xl p-1 border border-slate-800 text-xs shadow-inner">
           <button
             type="button"
             onClick={() => onNavigate('chamber')}
-            className={`inline-flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg transition-all cursor-pointer min-h-[32px] ${
+            className={`inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3.5 py-1.5 rounded-lg transition-all cursor-pointer min-h-[32px] ${
               currentView === 'chamber'
                 ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
                 : 'text-slate-400 hover:text-slate-200'
@@ -99,20 +99,23 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
           <button
             type="button"
             onClick={() => onNavigate('nexus')}
-            className={`inline-flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg transition-all cursor-pointer min-h-[32px] ${
+            className={`inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3.5 py-1.5 rounded-lg transition-all cursor-pointer min-h-[32px] ${
               currentView === 'nexus'
                 ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 font-bold shadow-md shadow-emerald-950/40'
                 : 'text-emerald-400/90 hover:text-emerald-300'
             }`}
           >
             <Orbit size={13} />
-            <span className="text-[11px] sm:text-xs">Nexus Lab</span>
+            <span className="text-[11px] sm:text-xs">
+              <span className="sm:hidden">Nexus</span>
+              <span className="hidden sm:inline">Nexus Lab</span>
+            </span>
           </button>
 
           <button
             type="button"
             onClick={() => onNavigate('oracle')}
-            className={`inline-flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-lg transition-all cursor-pointer min-h-[32px] ${
+            className={`inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3.5 py-1.5 rounded-lg transition-all cursor-pointer min-h-[32px] ${
               currentView === 'oracle'
                 ? 'bg-gradient-to-r from-indigo-500 to-fuchsia-500 text-slate-950 font-bold shadow-md shadow-indigo-950/40'
                 : 'text-indigo-400/90 hover:text-indigo-300'
