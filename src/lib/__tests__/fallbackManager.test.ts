@@ -226,4 +226,39 @@ describe('Fallback Manager tests', () => {
       expect(mockedStream).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('streamPersonaWithFallback cost-governor refusals', () => {
+    const persona: Persona = {
+      id: 'skeptic',
+      name: 'Skeptic',
+      role: 'Critic',
+      avatar: '🛡️',
+      model: 'google/gemini-2.5-flash',
+      systemPrompt: '',
+      color: '',
+    };
+
+    beforeEach(() => {
+      mockedStream.mockReset();
+    });
+
+    it('never tries backup models when the server blocks a call at the ceiling', async () => {
+      const ceilingError = new Error('Round cost ceiling reached — further calls for this round were blocked on the server.');
+      (ceilingError as any).costCeilingExceeded = true;
+      mockedStream.mockRejectedValueOnce(ceilingError);
+      await expect(
+        streamPersonaWithFallback({
+          persona,
+          messages: [{ role: 'user', content: 'hi' }],
+          policy: DEFAULT_POLICY, // allowProviderFallback: true — must still not swap
+          roundKey: 'sess:round',
+          costCeilingUSD: 0.5,
+        })
+      ).rejects.toThrow('Round cost ceiling reached');
+      // Exactly one attempt — no backup model was tried.
+      expect(mockedStream).toHaveBeenCalledTimes(1);
+      expect(mockedStream.mock.calls[0][0].roundKey).toBe('sess:round');
+      expect(mockedStream.mock.calls[0][0].costCeilingUSD).toBe(0.5);
+    });
+  });
 });

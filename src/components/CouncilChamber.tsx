@@ -368,6 +368,10 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     const roundToSynthesize = activeRoundRef.current;
     if (!roundToSynthesize || !activeSessionId) return;
 
+    // Server cost governor (same round identity as the run loop).
+    const costCeilingUSD = maxRoundCostCeiling > 0 ? maxRoundCostCeiling : undefined;
+    const roundKey = `${activeSessionId}:${roundToSynthesize.id}`;
+
     const activePersonas = personas.filter((p) => p.enabled !== false);
     const synthesisModel = synthesizer.model || activePersonas[0]?.model || 'google/gemini-2.5-flash';
 
@@ -429,6 +433,8 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
           signal: call.signal,
           maxTokens: synthesisMaxTokens,
           disableFallback,
+          roundKey,
+          costCeilingUSD,
           onToken: (chunk) => {
             fullSynthesis += chunk;
             dispatch({ type: 'UPDATE_SYNTHESIS_TOKEN', payload: { roundId: roundToSynthesize.id, chunk } });
@@ -546,6 +552,12 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 
     const currentRoundState: CouncilRound = cloneRound(roundToRun);
     activeRoundRef.current = currentRoundState;
+
+    // Server-side cost governor: the server accumulates REAL per-token spend
+    // for this round and refuses further calls once the ceiling is reached —
+    // the money backstop behind the client-side ceiling check.
+    const costCeilingUSD = maxRoundCostCeiling > 0 ? maxRoundCostCeiling : undefined;
+    const roundKey = activeSessionId ? `${activeSessionId}:${currentRoundState.id}` : undefined;
 
     // Ensure the live render list has this round and persist it immediately so
     // an interrupted run can be resumed after a reload.
@@ -682,6 +694,8 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
             maxTokens: stageTokenLimit,
             webSearch: webEnabled,
             disableFallback,
+            roundKey,
+            costCeilingUSD,
             onToken: (chunk) => {
               accumulated += chunk;
               dispatch({ type: 'UPDATE_STAGE1_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
@@ -837,6 +851,8 @@ If the question contains code, documents, or attached files, treat them as avail
             signal: call.signal,
             maxTokens: stageTokenLimit,
             disableFallback,
+            roundKey,
+            costCeilingUSD,
             onToken: (chunk) => {
               accumulated += chunk;
               dispatch({ type: 'UPDATE_STAGE2_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
@@ -1067,6 +1083,9 @@ If the question contains code, documents, or attached files, treat them as avail
       const currentRoundState: CouncilRound = cloneRound(round);
       abortRef.current = new AbortController();
       activeRoundRef.current = currentRoundState;
+      // Server cost governor (counts against the same round budget).
+      const costCeilingUSD = maxRoundCostCeiling > 0 ? maxRoundCostCeiling : undefined;
+      const roundKey = `${activeSessionId}:${currentRoundState.id}`;
       const fullQuery = await prepareQuery(round);
       const webEnabled = shouldEnableWebSearch(currentRoundState.userQuery, webMode, policy.budget).enabled;
 
@@ -1090,6 +1109,8 @@ If the question contains code, documents, or attached files, treat them as avail
           maxTokens: maxTokens || 4000,
           webSearch: webEnabled,
           disableFallback,
+          roundKey,
+          costCeilingUSD,
           onToken: (chunk) => {
             dispatch({ type: 'UPDATE_STAGE1_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
           },

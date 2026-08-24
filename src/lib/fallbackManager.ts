@@ -167,6 +167,9 @@ export interface StreamPersonaWithFallbackOptions {
   onGrounding?: (grounding: GroundingData) => void;
   /** Strict no-fallback mode: surface raw errors instead of swapping models. */
   disableFallback?: boolean;
+  /** Server cost governor: round identity + per-round USD ceiling. */
+  roundKey?: string;
+  costCeilingUSD?: number;
 }
 
 export interface StreamPersonaWithFallbackResult {
@@ -186,7 +189,7 @@ export interface StreamPersonaWithFallbackResult {
 export async function streamPersonaWithFallback(
   options: StreamPersonaWithFallbackOptions
 ): Promise<StreamPersonaWithFallbackResult> {
-  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding, disableFallback } = options;
+  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding, disableFallback, roundKey, costCeilingUSD } = options;
 
   const isFreeOnlyPreset = policy.budget === 'free';
   const originalModel = persona.model;
@@ -210,6 +213,8 @@ export async function streamPersonaWithFallback(
       webSearch,
       onToken,
       onGrounding,
+      roundKey,
+      costCeilingUSD,
     });
     return { ...strictRes, actualModel: strictRes.actualModel || originalModel, fallbackOccurred: false };
   }
@@ -288,6 +293,8 @@ export async function streamPersonaWithFallback(
         onToken,
         onGrounding,
         disableFallback,
+        roundKey,
+        costCeilingUSD,
       };
 
       const streamResult = await streamOpenRouterCompletion(streamOptions);
@@ -312,6 +319,9 @@ export async function streamPersonaWithFallback(
         cost: streamResult.cost,
       };
     } catch (error: any) {
+      // A cost-governor refusal is a budget guard, not a model failure: never
+      // try backup models, surface it to the run loop untouched.
+      if (error?.costCeilingExceeded) throw error;
       lastError = error;
       const triggerReason = classifyTriggerReason(error, null);
       const nextModel = attemptChain[attempts] || '';

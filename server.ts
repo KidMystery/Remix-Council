@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { GoogleGenAI, Modality } from '@google/genai';
 import { allocateCouncilSeats } from './src/lib/serverModelAllocator';
 import { pickBestFromCatalog, type ModelTier } from './src/lib/modelScoring';
+import { RoundCostLedger, modelRatesUSD, usageCostUSD, extractUsageFromSSEChunk } from './src/lib/costGovernor';
 
 // Works under both ESM (tsx dev) and the CJS production bundle (esbuild).
 const __filename =
@@ -88,6 +89,10 @@ const CouncilRequestSchema = z.object({
   budget: z.enum(['free', 'cheap', 'quality']).optional(),
   stream: z.boolean().optional(),
   tools: z.array(z.any()).optional(),
+  // Cost governor: when the client sends both, the server enforces the
+  // per-round ceiling using REAL usage, independent of the client bundle.
+  roundKey: z.string().max(160).optional(),
+  costCeilingUSD: z.number().positive().max(1000).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -127,6 +132,10 @@ function rateLimited(ip: string): boolean {
 // In-memory catalog cache (10 minute TTL)
 let cachedCatalog: any[] | null = null;
 let lastCatalogFetchTime = 0;
+
+// Server-side cost governor ledger: real per-round spend, independent of the
+// client bundle. Enforced in the /api/council route when a roundKey + ceiling arrive.
+const roundCostLedger = new RoundCostLedger();
 const CATALOG_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 // ---------------------------------------------------------------------------
@@ -413,7 +422,7 @@ export async function startServer(portOverride?: number) {
       });
     }
 
-    const { model: rawModel, messages, temperature, max_tokens, budget, stream, tools } = parseResult.data;
+    const { model: rawModel, messages, temperature, max_tokens, budget, stream, tools, roundKey, costCeilingUSD } = parseResult.data;
 
     // Input caps: bound message count and total payload size to prevent runaway
     // prompt costs via the proxy.
@@ -458,6 +467,35 @@ export async function startServer(portOverride?: number) {
         }
       }
     }
+
+    // Server-side cost governor: hard backstop on per-round spend. The client
+    // stops a round when its own estimate trips the ceiling; this guard holds
+    // even if the client is buggy or a stale bundle — once the round's REAL
+    // spend reaches the ceiling, further calls for that round are refused.
+    if (roundKey && costCeilingUSD && roundCostLedger.exceeded(roundKey, costCeilingUSD)) {
+      return res.status(409).json({
+        error: 'Round cost ceiling reached — further calls for this round were blocked on the server.',
+        costCeilingExceeded: true,
+        roundCostUSD: roundCostLedger.total(roundKey),
+        ceilingUSD: costCeilingUSD,
+      });
+    }
+
+    // Record this call's real usage into the round ledger (stream final chunk
+    // or JSON response). Accepts raw snake_case (JSON path) or normalized
+    // camelCase (SSE extractor). No-op when the client didn't send a roundKey.
+    let usageRecorded = false;
+    const recordRoundUsage = (rawUsage: any) => {
+      if (usageRecorded || !roundKey || !rawUsage) return;
+      usageRecorded = true;
+      const usage = {
+        promptTokens: Number(rawUsage.prompt_tokens ?? rawUsage.promptTokens) || 0,
+        completionTokens: Number(rawUsage.completion_tokens ?? rawUsage.completionTokens) || 0,
+      };
+      const rates = modelRatesUSD(cachedCatalog, resolvedModel);
+      const cost = usageCostUSD(usage, rates);
+      if (cost > 0) roundCostLedger.add(roundKey, cost);
+    };
 
     const openrouterKey = process.env.OPENROUTER_API_KEY?.trim() || '';
 
@@ -545,11 +583,32 @@ export async function startServer(portOverride?: number) {
         };
         req.on('close', onClientClose);
 
+        // Keep a small tail so a usage object split across chunk boundaries is
+        // still found; pass-through bytes are never altered.
+        let sseScanTail = '';
         try {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
             res.write(value);
+            if (roundKey && !usageRecorded) {
+              sseScanTail = (sseScanTail + new TextDecoder('utf-8').decode(value)).slice(-4096);
+              const usage = extractUsageFromSSEChunk(sseScanTail);
+              if (usage) recordRoundUsage(usage);
+            }
+          }
+          // Tell the client immediately when the round has hit its ceiling so
+          // it can stop the remaining stages (SSE parsers ignore events
+          // without a choices array, so prepending is safe).
+          if (roundKey && costCeilingUSD && roundCostLedger.exceeded(roundKey, costCeilingUSD)) {
+            res.write(
+              `data: ${JSON.stringify({
+                event: 'cost_governor',
+                roundCostUSD: roundCostLedger.total(roundKey),
+                ceilingUSD: costCeilingUSD,
+                exceeded: true,
+              })}\n\n`
+            );
           }
           return res.end();
         } finally {
@@ -560,6 +619,14 @@ export async function startServer(portOverride?: number) {
         if (resolvedModel !== rawModel) {
           json.resolved_model = resolvedModel;
           json.requested_model = rawModel;
+        }
+        recordRoundUsage(json.usage);
+        if (roundKey && costCeilingUSD && roundCostLedger.exceeded(roundKey, costCeilingUSD)) {
+          json.cost_governor = {
+            roundCostUSD: roundCostLedger.total(roundKey),
+            ceilingUSD: costCeilingUSD,
+            exceeded: true,
+          };
         }
         return res.status(upstreamResp.status).json(json);
       }
