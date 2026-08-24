@@ -3,7 +3,7 @@ import { useSessionManager } from './hooks/useSessionManager';
 import { useModelRecommendations } from './hooks/useModelRecommendations';
 import { useTheme } from './hooks/useTheme';
 import { fetchCouncilModels } from './lib/openrouter';
-import { applyPreset, type PresetId } from './lib/presets';
+import { applyPreset, MODEL_PRESETS, type PresetId } from './lib/presets';
 import { INITIAL_PERSONAS, defaultSynthesizer } from './data';
 import type {
   Persona,
@@ -39,14 +39,26 @@ function loadBooleanSetting(key: string): boolean {
 export default function App() {
   const [view, setView] = useState<AppViewMode>('chamber');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<
+    'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account'
+  >('personas');
+
+  const handleOpenSettingsTab = (
+    tab: 'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account' = 'personas'
+  ) => {
+    setSettingsInitialTab(tab);
+    setIsSettingsOpen(true);
+  };
   const [isStorageSyncOpen, setIsStorageSyncOpen] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => typeof window !== 'undefined' && window.innerWidth >= 1024);
   const [sessionSearchQuery, setSessionSearchQuery] = useState('');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   const [personas, setPersonas] = useState<Persona[]>(INITIAL_PERSONAS);
   const [synthesizer, setSynthesizer] = useState<Persona>(defaultSynthesizer);
-  const [activePresetId, setActivePresetId] = useState<PresetId>('fast_and_free');
+  // Default is the working cheap tier — the free tier is opt-in (its models
+  // rotate and are verified against the live catalog before use).
+  const [activePresetId, setActivePresetId] = useState<PresetId>('balanced_quality');
   const [catalog, setCatalog] = useState<RawOpenRouterModel[]>([]);
   const { theme, setTheme } = useTheme();
 
@@ -87,7 +99,7 @@ export default function App() {
   const [stopAfterStage1, setStopAfterStage1] = useState(false);
   const [useSingleModelForSimple, setUseSingleModelForSimple] = useState(false);
   const [archivistRecentRounds, setArchivistRecentRounds] = useState(2);
-  const [proCompareModelId, setProCompareModelId] = useState('anthropic/claude-3.7-sonnet');
+  const [proCompareModelId, setProCompareModelId] = useState('anthropic/claude-sonnet-4.5');
   const [disableFallback, setDisableFallback] = useState(false);
   const [disableLoadingOverlay, setDisableLoadingOverlay] = useState(false);
   const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>({
@@ -197,10 +209,10 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [exportSessionsJSON]);
 
-  const handleImportSessions = useCallback((file: File) => {
+  const handleImportSessions = useCallback((file: File, mode: 'merge' | 'replace' = 'merge') => {
     const reader = new FileReader();
     reader.onload = () => {
-      const result = importSessionsJSON(String(reader.result || ''));
+      const result = importSessionsJSON(String(reader.result || ''), mode);
       if (result.success) {
         showToast(result.message, 'success');
       } else {
@@ -228,7 +240,7 @@ export default function App() {
         currentView={view}
         onNavigate={(newView) => setView(newView)}
         sessionTitle={activeSession?.title}
-        activePresetName={activePresetId === 'fast_and_free' ? 'Fast & Free' : 'Deep Council'}
+        activePresetName={MODEL_PRESETS.find((p) => p.id === activePresetId)?.name || 'Council'}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenStorageSync={() => setIsStorageSyncOpen(true)}
         onToggleMobileDrawer={() => setIsSidebarOpen(true)}
@@ -283,6 +295,15 @@ export default function App() {
               activePresetId={activePresetId}
               rounds={rounds}
               activeSessionId={activeSessionId}
+              activeSession={activeSession}
+              sessions={sessions}
+              onSelectSession={selectSession}
+              onCreateNewSession={() => createSession('New Deliberation', personas, synthesizer, activePresetId)}
+              onRenameSession={renameSession}
+              onDeleteSession={deleteSession}
+              onClearActiveHistory={clearSessionHistory}
+              onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
+              isSidebarOpen={isSidebarOpen}
               onUpdateRound={updateRoundInActiveSession}
               onCompleteRound={updateRoundInActiveSession}
               onDeleteRound={deleteRoundFromActiveSession}
@@ -316,7 +337,12 @@ export default function App() {
               costCeiling={costCeiling}
             />
           ) : (
-            <OracleView isSignedIn={isSignedIn} />
+            <OracleView
+              isSignedIn={isSignedIn}
+              catalog={catalog}
+              availableModels={catalog.map((m) => ({ id: m.id, name: m.name || m.id }))}
+              onOpenSettings={handleOpenSettingsTab}
+            />
           )}
         </main>
       </div>
@@ -325,6 +351,7 @@ export default function App() {
       <SettingsPanel
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
+        initialTab={settingsInitialTab}
         personas={personas}
         setPersonas={setPersonas}
         synthesizer={synthesizer}

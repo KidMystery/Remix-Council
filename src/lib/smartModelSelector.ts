@@ -1,5 +1,5 @@
 import type { Persona, RawOpenRouterModel } from '../types';
-import { isFreeModel } from './modelMapper';
+import { isFreeModelId as policyIsFreeModelId } from './executionPolicy';
 
 export type TaskDomain = 'code' | 'math' | 'finance' | 'creative' | 'general';
 
@@ -34,25 +34,30 @@ interface DomainModelMapping {
   synthesizer: string;
 }
 
+/**
+ * Curated domain → model preferences (current as of Aug 2026). Each pick is
+ * still validated against the live catalog in pickModel; vanished models are
+ * re-resolved from the catalog pool, so these lists cannot seat dead ids.
+ */
 export const DOMAIN_MODEL_MAPPINGS: Record<TaskDomain, DomainModelMapping> = {
   code: {
-    panelists: ['anthropic/claude-3.7-sonnet', 'deepseek/deepseek-r1', 'google/gemini-2.5-pro'],
-    synthesizer: 'anthropic/claude-3.7-sonnet',
+    panelists: ['anthropic/claude-sonnet-4.5', 'deepseek/deepseek-r1', 'google/gemini-2.5-pro'],
+    synthesizer: 'anthropic/claude-sonnet-4.5',
   },
   math: {
-    panelists: ['deepseek/deepseek-r1', 'anthropic/claude-3.7-sonnet', 'openai/o3-mini'],
+    panelists: ['deepseek/deepseek-r1', 'anthropic/claude-sonnet-4.5', 'openai/gpt-5.1'],
     synthesizer: 'deepseek/deepseek-r1',
   },
   finance: {
-    panelists: ['openai/gpt-4o', 'anthropic/claude-3.5-haiku', 'deepseek/deepseek-chat'],
+    panelists: ['openai/gpt-5.1', 'google/gemini-2.5-flash', 'deepseek/deepseek-chat'],
     synthesizer: 'google/gemini-2.5-pro',
   },
   creative: {
-    panelists: ['google/gemini-2.5-pro', 'openai/gpt-4o', 'meta-llama/llama-3.3-70b-instruct'],
+    panelists: ['google/gemini-2.5-pro', 'openai/gpt-5.1', 'meta-llama/llama-3.3-70b-instruct'],
     synthesizer: 'google/gemini-2.5-pro',
   },
   general: {
-    panelists: ['google/gemini-2.5-flash', 'anthropic/claude-3.5-haiku', 'openai/gpt-4o-mini'],
+    panelists: ['google/gemini-2.5-flash', 'meta-llama/llama-3.3-70b-instruct', 'openai/gpt-4o-mini'],
     synthesizer: 'google/gemini-2.5-flash',
   },
 };
@@ -115,21 +120,9 @@ export function detectTaskDomain(
   return 'general';
 }
 
+/** Single source of truth for free verification — see executionPolicy. */
 function isFreeModelId(modelId: string, catalog?: RawOpenRouterModel[]): boolean {
-  if (!modelId) return false;
-  const n = modelId.trim().toLowerCase();
-  if (n === 'openrouter/free' || n === 'openrouter/auto') return false;
-  const found = catalog?.find((m) => m.id.toLowerCase() === n);
-  if (found?.pricing) {
-    const parse = (v: any) => parseFloat(String(v || '0'));
-    const EPS = 0.000001;
-    return (
-      parse(found.pricing.request) <= EPS &&
-      parse(found.pricing.prompt) <= EPS &&
-      parse(found.pricing.completion) <= EPS
-    );
-  }
-  return n.endsWith(':free');
+  return policyIsFreeModelId(modelId, catalog);
 }
 
 function pickModel(
@@ -167,13 +160,14 @@ function pickModel(
     return { model: option.id, source: 'catalog', rejected };
   }
 
-  // 3. Hardcoded fallback pool
+  // 3. Hardcoded fallback pool (last resort when the catalog is unavailable —
+  // current ids, free ones last so paid modes never silently pick them).
   const fallbackPool = [
     'google/gemini-2.5-flash',
-    'anthropic/claude-3.5-haiku',
     'openai/gpt-4o-mini',
-    'deepseek/deepseek-r1:free',
-    'meta-llama/llama-3.2-3b-instruct:free',
+    'deepseek/deepseek-chat',
+    'nvidia/nemotron-3-ultra-550b-a55b:free',
+    'openai/gpt-oss-120b:free',
   ];
   for (const id of fallbackPool) {
     if (usedModels.has(id)) {

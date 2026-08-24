@@ -89,4 +89,39 @@ describe('Pure Functions Tests', () => {
       expect(backupModels).not.toContain('google/gemini-2.5-flash');
     });
   });
+
+  describe('modelCache and storage safety', () => {
+    it('prunes voluminous metadata and keeps essential model fields', async () => {
+      const { pruneModelForCache, setCachedModels, getCachedModelsWithMetadata } = await import('../modelCache');
+
+      const heavyModel = {
+        id: 'meta-llama/llama-3.3-70b-instruct',
+        name: 'Llama 3.3 70B Instruct',
+        description: 'A very large text description with thousands of characters '.repeat(200),
+        pricing: { prompt: '0.0000004', completion: '0.0000008', request: '0' },
+        context_length: 131072,
+        created: 1700000000,
+        benchmarks: { intelligence: 1300, coding: 85 },
+        top_provider: { context_length: 131072, max_completion_tokens: 4096, is_moderated: false },
+        architecture: { modality: 'text->text', tokenizer: 'llama3' },
+        per_request_limits: { prompt_tokens: 100000 },
+      };
+
+      const pruned = pruneModelForCache(heavyModel as any);
+      expect(pruned.id).toBe('meta-llama/llama-3.3-70b-instruct');
+      expect(pruned.name).toBe('Llama 3.3 70B Instruct');
+      expect((pruned as any).description).toBeUndefined();
+      expect((pruned as any).architecture).toBeUndefined();
+      expect(pruned.context_length).toBe(131072);
+      expect(pruned.pricing?.prompt).toBe('0.0000004');
+
+      // Test caching and retrieval
+      setCachedModels([pruned]);
+      const { models, metadata } = getCachedModelsWithMetadata();
+      expect(models).toHaveLength(1);
+      expect(models![0].id).toBe('meta-llama/llama-3.3-70b-instruct');
+      expect(metadata.cacheStatus).toBe('fresh');
+    });
+  });
 });
+

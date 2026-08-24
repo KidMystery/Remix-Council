@@ -61,9 +61,10 @@ export const CouncilHeader: React.FC<CouncilHeaderProps> = ({
       <div className="flex items-center gap-1.5 sm:gap-4 min-w-0">
         {onToggleMobileDrawer && (
           <button
+            type="button"
             onClick={onToggleMobileDrawer}
-            className="sm:hidden text-slate-400 hover:text-slate-100 p-2 rounded-xl cursor-pointer min-w-[36px] min-h-[36px] flex items-center justify-center"
-            title="Toggle Sessions Menu"
+            className="text-slate-400 hover:text-slate-100 hover:bg-slate-800/60 p-2 rounded-xl cursor-pointer min-w-[36px] min-h-[36px] flex items-center justify-center transition-colors"
+            title="Toggle Sessions & Thread History"
             aria-label="Toggle sessions navigation drawer"
           >
             <Menu size={18} />

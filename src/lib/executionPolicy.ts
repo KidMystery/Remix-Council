@@ -8,10 +8,15 @@ export interface ExecutionPolicy {
   maxOutputTokens: number;
 }
 
+/**
+ * Free-tier policy. Note: free models are verified against the live catalog at
+ * run time; when the catalog has no zero-cost models the round is surfaced as
+ * an honest cheap-tier substitute instead of silently failing.
+ */
 export const FREE_POLICY: ExecutionPolicy = {
   budget: 'free',
   allowProviderFallback: false,
-  maxOutputTokens: 700,
+  maxOutputTokens: 1500,
 };
 
 export const DEFAULT_POLICY: ExecutionPolicy = {
@@ -38,24 +43,32 @@ export function isFreeModelId(
 
   const n = modelId.trim().toLowerCase();
 
-  if (
-    n === 'openrouter/free' ||
-    n === 'openrouter/auto'
-  ) {
-    return false;
-  }
+  // openrouter/free is a structurally free-safe router: OpenRouter only
+  // routes it to zero-cost models, so it satisfies the free budget even
+  // though it has no pricing of its own. openrouter/auto may route to paid
+  // models and stays excluded.
+  if (n === 'openrouter/free') return true;
+  if (n === 'openrouter/auto') return false;
 
   const found = catalog?.find(
     (m) => m?.id?.toLowerCase() === n
   );
 
   if (found?.pricing) {
-    const parse = (v: any) => parseFloat(String(v || '0'));
-    const EPS = 0.000001;
+    // Strict zero: OpenRouter reports free models with exact "0" prices.
+    // Any positive value (even fractions of a cent per 1M tokens) is paid,
+    // and missing pricing fields are not treated as free (unknown ≠ free).
+    const fields = [found.pricing.request, found.pricing.prompt, found.pricing.completion];
+    if (fields.some((v) => v === undefined || v === null)) return n.endsWith(':free');
+    const parse = (v: any) => parseFloat(String(v));
+    const ok = (v: any) => Number.isFinite(parse(v));
     return (
-      parse(found.pricing.request) <= EPS &&
-      parse(found.pricing.prompt) <= EPS &&
-      parse(found.pricing.completion) <= EPS
+      ok(found.pricing.request) &&
+      ok(found.pricing.prompt) &&
+      ok(found.pricing.completion) &&
+      parse(found.pricing.request) === 0 &&
+      parse(found.pricing.prompt) === 0 &&
+      parse(found.pricing.completion) === 0
     );
   }
 

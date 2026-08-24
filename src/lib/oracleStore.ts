@@ -43,6 +43,9 @@ export interface OracleThread {
   createdAt: number;
   updatedAt: number;
   model: string;
+  mode?: 'direct' | 'mini_deliberation' | 'rotation';
+  miniDeliberationModels?: string[];
+  rotationModels?: string[];
   reflectEnabled: boolean;
   webEnabled: boolean;
   rotateVoices: boolean;
@@ -60,12 +63,32 @@ const MAX_MESSAGES = 200;
 
 export const ORACLE_DEFAULT_MODEL = 'google/gemini-2.5-flash';
 
-export const ORACLE_MODEL_OPTIONS: { id: string; name: string; vision: boolean }[] = [
-  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', vision: true },
-  { id: 'openai/gpt-4o', name: 'GPT-4o', vision: true },
-  { id: 'anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet', vision: true },
-  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat', vision: false },
-  { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash Exp (Free)', vision: true },
+/** Curated live-model defaults (verified against OpenRouter, Aug 2026). */
+export const DEFAULT_MINI_DELIBERATION_MODELS: string[] = [
+  'anthropic/claude-sonnet-4.5',
+  'openai/gpt-5.1',
+  'google/gemini-2.5-flash',
+];
+
+export const DEFAULT_ROTATION_ROSTER: string[] = [
+  'anthropic/claude-sonnet-4.5',
+  'openai/gpt-5.1',
+  'google/gemini-2.5-flash',
+  'deepseek/deepseek-chat',
+  'meta-llama/llama-3.3-70b-instruct',
+];
+
+export const ORACLE_MODEL_OPTIONS: { id: string; name: string; tag?: string; vision: boolean }[] = [
+  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', tag: 'Fast & Smart', vision: true },
+  { id: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', tag: 'Fast Frontier', vision: true },
+  { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', tag: 'Top Frontier', vision: true },
+  { id: 'openai/gpt-5.1', name: 'GPT-5.1', tag: 'Omni Frontier', vision: true },
+  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', tag: 'Deep Context', vision: true },
+  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat', tag: 'Efficient Reasoning', vision: false },
+  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', tag: 'Math & Logic', vision: false },
+  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct', tag: 'Open Weights', vision: false },
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra 550B (Free)', tag: 'Free Tier', vision: false },
+  { id: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (Free)', tag: 'Free Tier', vision: false },
 ];
 
 export function newOracleThread(model: string = ORACLE_DEFAULT_MODEL): OracleThread {
@@ -76,6 +99,9 @@ export function newOracleThread(model: string = ORACLE_DEFAULT_MODEL): OracleThr
     createdAt: now,
     updatedAt: now,
     model,
+    mode: 'direct',
+    miniDeliberationModels: [...DEFAULT_MINI_DELIBERATION_MODELS],
+    rotationModels: [...DEFAULT_ROTATION_ROSTER],
     reflectEnabled: true,
     webEnabled: true,
     rotateVoices: true,

@@ -40,18 +40,11 @@ export const MODEL_CATALOG: Record<ModelAlias, ModelCandidate[]> = {
       free: false,
     },
     {
-      id: "google/gemini-2.0-flash-001",
-      label: "Gemini 2.0 Flash (OpenRouter)",
+      id: "google/gemini-3.7-flash",
+      label: "Gemini 3.7 Flash (OpenRouter)",
       provider: "openrouter",
       production: true,
       free: false,
-    },
-    {
-      id: "google/gemini-2.0-flash-exp:free",
-      label: "Gemini 2.0 Flash Exp (Free)",
-      provider: "openrouter",
-      production: true,
-      free: true,
     },
     {
       id: "gemini-2.5-flash",
@@ -70,13 +63,6 @@ export const MODEL_CATALOG: Record<ModelAlias, ModelCandidate[]> = {
       free: false,
     },
     {
-      id: "google/gemini-pro-1.5",
-      label: "Gemini 1.5 Pro (OpenRouter)",
-      provider: "openrouter",
-      production: true,
-      free: false,
-    },
-    {
       id: "gemini-2.5-pro",
       label: "Gemini 2.5 Pro (Google Direct)",
       provider: "google",
@@ -86,28 +72,28 @@ export const MODEL_CATALOG: Record<ModelAlias, ModelCandidate[]> = {
   ],
   "claude:sonnet": [
     {
-      id: "anthropic/claude-3.7-sonnet",
-      label: "Claude 3.7 Sonnet (OpenRouter)",
+      id: "anthropic/claude-sonnet-4.5",
+      label: "Claude Sonnet 4.5 (OpenRouter)",
       provider: "openrouter",
       production: true,
       free: false,
     },
     {
-      id: "anthropic/claude-3.5-sonnet",
-      label: "Claude 3.5 Sonnet (OpenRouter)",
-      provider: "openrouter",
-      production: true,
-      free: false,
-    },
-    {
-      id: "claude-3-7-sonnet-latest",
-      label: "Claude 3.7 Sonnet (Anthropic Direct)",
+      id: "claude-sonnet-4-5-20250929",
+      label: "Claude Sonnet 4.5 (Anthropic Direct)",
       provider: "anthropic",
       production: true,
       free: false,
     },
   ],
   "openai:balanced": [
+    {
+      id: "openai/gpt-5.1",
+      label: "GPT-5.1 (OpenRouter)",
+      provider: "openrouter",
+      production: true,
+      free: false,
+    },
     {
       id: "openai/gpt-4o",
       label: "GPT-4o (OpenRouter)",
@@ -155,8 +141,9 @@ export const MODEL_CATALOG: Record<ModelAlias, ModelCandidate[]> = {
       free: false,
     },
     {
-      id: "deepseek/deepseek-r1:free",
-      label: "DeepSeek R1 (Free)",
+      // DeepSeek R1's free endpoint is delisted; current live free reasoning substitute.
+      id: "openai/gpt-oss-120b:free",
+      label: "GPT-OSS 120B (Free)",
       provider: "openrouter",
       production: true,
       free: true,
@@ -187,15 +174,15 @@ export const MODEL_CATALOG: Record<ModelAlias, ModelCandidate[]> = {
   ],
   "local:free": [
     {
-      id: "meta-llama/llama-3.2-3b-instruct:free",
-      label: "Llama 3.2 3B (Free)",
+      id: "openai/gpt-oss-20b:free",
+      label: "GPT-OSS 20B (Free)",
       provider: "openrouter",
       production: true,
       free: true,
     },
     {
-      id: "google/gemini-2.0-flash-exp:free",
-      label: "Gemini 2.0 Flash Exp (Free)",
+      id: "nvidia/nemotron-3-nano-30b-a3b:free",
+      label: "Nemotron 3 Nano 30B (Free)",
       provider: "openrouter",
       production: true,
       free: true,

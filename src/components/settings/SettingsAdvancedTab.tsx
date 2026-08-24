@@ -76,7 +76,7 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
   setUseSingleModelForSimple,
   archivistRecentRounds = 2,
   setArchivistRecentRounds,
-  proCompareModelId = 'anthropic/claude-3.7-sonnet',
+  proCompareModelId = 'anthropic/claude-sonnet-4.5',
   setProCompareModelId,
   disableFallback = false,
   setDisableFallback,
@@ -256,12 +256,12 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
                   className="w-full text-xs font-mono p-2 rounded-md bg-white dark:bg-slate-900 border border-purple-300 dark:border-purple-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-purple-500"
                 >
                   <optgroup label="Recommended Pro Engines">
-                    <option value="anthropic/claude-3.7-sonnet">Claude 3.7 Sonnet (Anthropic)</option>
-                    <option value="openai/gpt-4o">GPT-4o (OpenAI)</option>
+                    <option value="anthropic/claude-sonnet-4.5">Claude Sonnet 4.5 (Anthropic)</option>
+                    <option value="openai/gpt-5.1">GPT-5.1 (OpenAI)</option>
                     <option value="google/gemini-2.5-pro">Gemini 2.5 Pro (Google)</option>
                     <option value="deepseek/deepseek-r1">DeepSeek R1 (DeepSeek)</option>
                     <option value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B (Meta)</option>
-                    <option value="qwen/qwen-2.5-72b-instruct">Qwen 2.5 72B (Alibaba)</option>
+                    <option value="google/gemini-3.7-flash">Gemini 3.7 Flash (Google)</option>
                   </optgroup>
                   {availableModels.length > 0 && (
                     <optgroup label="All Available Models">
@@ -269,12 +269,12 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
                         .filter(
                           (m) =>
                             ![
-                              'anthropic/claude-3.7-sonnet',
-                              'openai/gpt-4o',
+                              'anthropic/claude-sonnet-4.5',
+                              'openai/gpt-5.1',
                               'google/gemini-2.5-pro',
                               'deepseek/deepseek-r1',
                               'meta-llama/llama-3.3-70b-instruct',
-                              'qwen/qwen-2.5-72b-instruct',
+                              'google/gemini-3.7-flash',
                             ].includes(m.id)
                         )
                         .map((m) => (

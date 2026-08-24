@@ -105,10 +105,10 @@ export const SettingsPersonasTab: React.FC<SettingsPersonasTabProps> = ({
           <div className="flex gap-2 pt-1">
             <button
               type="button"
-              onClick={() => onApplyPreset('fast_and_free')}
+              onClick={() => onApplyPreset('balanced_quality')}
               className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-900 dark:text-amber-200 rounded font-semibold text-[10px] transition-colors cursor-pointer"
             >
-              Fix: Apply Fast & Free
+              Fix: Apply Balanced Quality
             </button>
             <button
               type="button"

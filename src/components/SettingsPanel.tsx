@@ -1,4 +1,4 @@
-import { X, Cpu, Palette, Bell, User, Zap, BookmarkPlus } from 'lucide-react';
+import { X, Cpu, Palette, Bell, User, Zap, BookmarkPlus, BookOpen } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { authenticatedFetch } from '../lib/apiClient';
 import { Persona, NotificationPreferences } from '../types';
@@ -10,6 +10,7 @@ import { CreatePersonalityModal } from './CreatePersonalityModal';
 import { SettingsPersonasTab } from './settings/SettingsPersonasTab';
 import { SettingsPresetsTab } from './settings/SettingsPresetsTab';
 import { SettingsAdvancedTab } from './settings/SettingsAdvancedTab';
+import { SettingsOracleBibleTab } from './settings/SettingsOracleBibleTab';
 import { SettingsThemeTab } from './settings/SettingsThemeTab';
 import { SettingsAccountTab } from './settings/SettingsAccountTab';
 import { SettingsNotificationsTab } from './settings/SettingsNotificationsTab';
@@ -17,6 +18,7 @@ import { SettingsNotificationsTab } from './settings/SettingsNotificationsTab';
 interface SettingsPanelProps {
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: 'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account';
   personas: Persona[];
   setPersonas: (p: Persona[]) => void;
   synthesizer: Persona;
@@ -84,6 +86,7 @@ interface SettingsPanelProps {
 export function SettingsPanel({
   isOpen,
   onClose,
+  initialTab,
   personas,
   setPersonas,
   synthesizer,
@@ -125,7 +128,7 @@ export function SettingsPanel({
   setUseSingleModelForSimple,
   archivistRecentRounds = 2,
   setArchivistRecentRounds,
-  proCompareModelId = 'anthropic/claude-3.7-sonnet',
+  proCompareModelId = 'anthropic/claude-sonnet-4.5',
   setProCompareModelId,
   disableFallback = false,
   setDisableFallback,
@@ -146,10 +149,19 @@ export function SettingsPanel({
   enableWeightTuning = false,
   setEnableWeightTuning,
 }: SettingsPanelProps) {
-  const [activeTab, setActiveTab] = useState<'personas' | 'presets' | 'advanced' | 'theme' | 'notifications' | 'account'>('personas');
+  const [activeTab, setActiveTab] = useState<'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account'>(
+    initialTab || 'personas'
+  );
   const [usageData, setUsageData] = useState<{ usage: number; limit: number | null; remaining?: number | null } | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editingPersona, setEditingPersona] = useState<Persona | null>(null);
+
+  // Sync initialTab if prop changes
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab, isOpen]);
 
   const { credits, refresh: refreshCredits } = useOpenRouterCredits();
 
@@ -169,7 +181,7 @@ export function SettingsPanel({
   const isDebounced = propIsDebounced ?? hookRecs.isDebounced;
   const refreshModelRecommendations = hookRecs.refreshModelRecommendations;
 
-  const [localActivePresetId, setLocalActivePresetId] = useState<PresetId>('fast_and_free');
+  const [localActivePresetId, setLocalActivePresetId] = useState<PresetId>('balanced_quality');
   const activePresetId = propActivePresetId || localActivePresetId;
   const setActivePresetId = propSetActivePresetId || setLocalActivePresetId;
 
@@ -217,6 +229,7 @@ export function SettingsPanel({
     { id: 'personas', label: 'Basic Details', icon: Cpu },
     { id: 'presets', label: 'Presets', icon: BookmarkPlus },
     { id: 'advanced', label: 'Advanced', icon: Zap },
+    { id: 'oracle_bible', label: 'Oracle Memory', icon: BookOpen },
     { id: 'theme', label: 'Theme', icon: Palette },
     { id: 'notifications', label: 'Alerts', icon: Bell },
     { id: 'account', label: 'Account', icon: User },
@@ -337,6 +350,10 @@ export function SettingsPanel({
               enableWeightTuning={enableWeightTuning}
               setEnableWeightTuning={setEnableWeightTuning}
             />
+          )}
+
+          {activeTab === 'oracle_bible' && (
+            <SettingsOracleBibleTab />
           )}
 
           {activeTab === 'theme' && (

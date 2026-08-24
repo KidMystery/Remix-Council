@@ -1,4 +1,11 @@
 import type { Persona, RawOpenRouterModel } from '../types';
+import {
+  isUsableCatalogModel,
+  pricingIsFree,
+  pickBestFromCatalog,
+  catalogHasFreeModels,
+  type ModelTier,
+} from './modelScoring';
 
 export type { RawOpenRouterModel };
 
@@ -24,20 +31,35 @@ export interface ModelPreset {
   description: string;
   category: 'finance' | 'life' | 'tech' | 'product' | 'legal' | 'general' | 'custom';
   assignments: Record<string, PresetAssignment>;
+  /**
+   * Runtime flag set by updatePresetsFromFetchedModels: when the live catalog
+   * contains no zero-cost models, free-tier presets are honestly downgraded to
+   * the cheapest paid substitutes and this is set to false so the UI can say so.
+   */
+  freeTierAvailable?: boolean;
 }
 
+/**
+ * The assignments below are PREFERENCES, not promises: every time a live
+ * OpenRouter catalog is fetched, updatePresetsFromFetchedModels validates each
+ * model against it and dynamically re-resolves anything that has vanished
+ * (free endpoints and frontier models rotate constantly). When the catalog is
+ * unavailable (offline / fetch failed) these live models are the fallback.
+ */
 export const MODEL_PRESETS: ModelPreset[] = [
   {
     id: 'fast_and_free',
     name: 'Fast & Free',
-    badge: '⚡ Zero Cost',
-    description: 'Ultra-fast free-tier models for rapid, cost-free deliberations.',
+    badge: '⚡ Zero Cost (live-verified)',
+    description:
+      'Current live-verified zero-cost models. If OpenRouter\'s free tier is empty at refresh time, slots are honestly downgraded to the cheapest paid models and flagged in Settings.',
     category: 'general',
+    freeTierAvailable: true,
     assignments: {
-      skeptic: { model: 'meta-llama/llama-3.2-3b-instruct:free', provider: 'openrouter', isFree: true },
-      visionary: { model: 'google/gemini-2.0-flash-exp:free', provider: 'openrouter', isFree: true },
-      pragmatist: { model: 'deepseek/deepseek-r1:free', provider: 'openrouter', isFree: true },
-      synthesizer: { model: 'qwen/qwen-2.5-72b-instruct:free', provider: 'openrouter', isFree: true },
+      skeptic: { model: 'nvidia/nemotron-3-ultra-550b-a55b:free', provider: 'openrouter', isFree: true },
+      visionary: { model: 'openai/gpt-oss-120b:free', provider: 'openrouter', isFree: true },
+      pragmatist: { model: 'google/gemma-4-31b-it:free', provider: 'openrouter', isFree: true },
+      synthesizer: { model: 'qwen/qwen3-next-80b-a3b-instruct:free', provider: 'openrouter', isFree: true },
     },
   },
   {
@@ -47,22 +69,22 @@ export const MODEL_PRESETS: ModelPreset[] = [
     description: 'Frontier reasoning models for deep, high-stakes analysis.',
     category: 'general',
     assignments: {
-      skeptic: { model: 'anthropic/claude-3.7-sonnet', provider: 'openrouter' },
-      visionary: { model: 'openai/gpt-4o', provider: 'openrouter' },
-      pragmatist: { model: 'deepseek/deepseek-r1', provider: 'openrouter' },
-      synthesizer: { model: 'google/gemini-2.5-pro', provider: 'openrouter' },
+      skeptic: { model: 'anthropic/claude-sonnet-4.5', provider: 'openrouter' },
+      visionary: { model: 'openai/gpt-5.1', provider: 'openrouter' },
+      pragmatist: { model: 'google/gemini-2.5-pro', provider: 'openrouter' },
+      synthesizer: { model: 'deepseek/deepseek-r1', provider: 'openrouter' },
     },
   },
   {
     id: 'balanced_quality',
     name: 'Balanced Quality',
     badge: '⚖️ Mixed',
-    description: 'A balanced mix of capable paid and free models.',
+    description: 'A balanced mix of capable low-cost models — the sensible default.',
     category: 'general',
     assignments: {
-      skeptic: { model: 'anthropic/claude-3.5-haiku', provider: 'openrouter' },
-      visionary: { model: 'meta-llama/llama-3.3-70b-instruct', provider: 'openrouter' },
-      pragmatist: { model: 'openai/gpt-4o-mini', provider: 'openrouter' },
+      skeptic: { model: 'openai/gpt-5.1', provider: 'openrouter' },
+      visionary: { model: 'deepseek/deepseek-r1', provider: 'openrouter' },
+      pragmatist: { model: 'meta-llama/llama-3.3-70b-instruct', provider: 'openrouter' },
       synthesizer: { model: 'google/gemini-2.5-flash', provider: 'openrouter' },
     },
   },
@@ -80,6 +102,22 @@ export const MODEL_PRESETS: ModelPreset[] = [
     },
   },
 ];
+
+/** Maps a preset id to the scoring tier used when dynamically resolving seats. */
+export function presetTierFor(presetId: PresetId): ModelTier {
+  switch (presetId) {
+    case 'fast_and_free':
+    case 'fastest_cheapest':
+      return 'free';
+    case 'highest_quality':
+      return 'quality';
+    case 'cheapest_viable':
+      return 'cheap';
+    case 'balanced_quality':
+    default:
+      return 'balanced';
+  }
+}
 
 /** Cleans a raw model id into a human-readable display name. */
 export function cleanModelName(modelId: string, name?: string): string {
@@ -157,7 +195,13 @@ function isFreeId(modelId: string): boolean {
   return n.endsWith(':free');
 }
 
-/** Applies a preset to the current personas + synthesizer, returning updated assignments. */
+/** Applies a preset to the current personas + synthesizer, returning updated assignments.
+ *
+ * Dynamic resolution: when a live catalog is provided, each preset model is
+ * validated against it. Vanished models are replaced with the best live
+ * candidate for the same tier (scored by context, recency, cost, and
+ * same-provider affinity) — never "the first model in the list".
+ */
 export function applyPreset(
   presetId: PresetId,
   personas: Persona[],
@@ -165,25 +209,37 @@ export function applyPreset(
   rawModelsCatalog?: RawOpenRouterModel[]
 ): { updatedPersonas: Persona[]; updatedSynthesizer: Persona } {
   const preset = MODEL_PRESETS.find((p) => p.id === presetId) || MODEL_PRESETS[0];
-  const catalog = rawModelsCatalog || [];
+  const catalog = (rawModelsCatalog || []).filter(isUsableCatalogModel);
+  const tier = presetTierFor(presetId);
+  const used = new Set<string>();
 
   const resolveModel = (slotId: string, fallback: string): string => {
     const assigned = preset.assignments[slotId]?.model;
     if (!assigned) return fallback;
-    // Verify the model exists in the live catalog when available; otherwise keep the assignment.
-    const catalogIds = new Set(catalog.map((m) => m.id.toLowerCase()));
-    if (catalog.length > 0 && !catalogIds.has(assigned.toLowerCase())) {
-      // Fall back to a catalog model that satisfies the same budget class if possible.
-      const isFreeSlot = preset.assignments[slotId]?.isFree === true || isFreeId(assigned);
-      const candidate = catalog.find((m) => {
-        const isFreeCandidate =
-          parseFloat(String(m.pricing?.request || '0')) <= 0.000001 &&
-          parseFloat(String(m.pricing?.prompt || '0')) <= 0.000001 &&
-          parseFloat(String(m.pricing?.completion || '0')) <= 0.000001;
-        return isFreeSlot ? isFreeCandidate : !isFreeCandidate;
-      });
-      return candidate?.id || fallback;
+    const assignedLower = assigned.toLowerCase();
+
+    if (catalog.length > 0) {
+      const live = catalog.some((m) => m.id.toLowerCase() === assignedLower);
+      if (live) {
+        used.add(assignedLower);
+        return assigned;
+      }
+      // Vanished from the live catalog — re-resolve dynamically.
+      const preferOrg = assigned.split('/')[0];
+      const wantsFree = preset.assignments[slotId]?.isFree === true || isFreeId(assigned);
+      const replacement = wantsFree
+        ? pickBestFromCatalog(catalog, 'free', preferOrg, used) ||
+          pickBestFromCatalog(catalog, 'cheap', preferOrg, used)
+        : pickBestFromCatalog(catalog, tier, preferOrg, used);
+      if (replacement) {
+        used.add(replacement.id.toLowerCase());
+        return replacement.id;
+      }
+      return fallback;
     }
+
+    // No catalog (offline): trust the curated preference.
+    used.add(assignedLower);
     return assigned;
   };
 
@@ -203,32 +259,54 @@ export function applyPreset(
 /**
  * Recomputes preset assignments from a live OpenRouter catalog, preserving
  * preset structure and never throwing on malformed input.
+ *
+ * Free-tier honesty: if the live catalog contains no zero-cost models, free
+ * preset slots are downgraded to cheap paid models and preset.freeTierAvailable
+ * is set to false so the UI can tell the user instead of silently selling
+ * "Free" that costs money.
  */
 export function updatePresetsFromFetchedModels(rawModels: RawOpenRouterModel[]): void {
   if (!rawModels || !Array.isArray(rawModels)) return;
 
-  const byId = new Map(rawModels.map((m) => [m.id.toLowerCase(), m]));
-  const freeModels = rawModels.filter(
-    (m) =>
-      parseFloat(String(m.pricing?.request || '0')) <= 0.000001 &&
-      parseFloat(String(m.pricing?.prompt || '0')) <= 0.000001 &&
-      parseFloat(String(m.pricing?.completion || '0')) <= 0.000001
-  );
+  const usable = rawModels.filter(isUsableCatalogModel);
+  const byId = new Map(usable.map((m) => [m.id.toLowerCase(), m]));
+  const anyFreeLive = catalogHasFreeModels(usable);
 
   MODEL_PRESETS.forEach((preset) => {
+    const tier = presetTierFor(preset.id);
+    const wantsFree = tier === 'free';
+    const used = new Set<string>();
+    preset.freeTierAvailable = wantsFree ? anyFreeLive : true;
+
     Object.keys(preset.assignments).forEach((slotId) => {
       const assignment = preset.assignments[slotId];
       if (!assignment) return;
       const currentId = assignment.model?.toLowerCase();
-      if (currentId && byId.has(currentId)) return; // still live — keep
+      if (currentId && byId.has(currentId)) {
+        used.add(currentId);
+        return; // still live — keep
+      }
 
       // Slot's current model vanished from the catalog; replace with a live candidate.
-      const preferFree = assignment.isFree === true || isFreeId(assignment.model || '');
-      const pool = preferFree ? freeModels : rawModels.filter((m) => !freeModels.includes(m));
-      const replacement = pool[0];
+      const preferOrg = currentId ? currentId.split('/')[0] : undefined;
+      let replacement;
+      if (wantsFree && anyFreeLive) {
+        // If the live free pool is smaller than the number of free slots,
+        // remaining seats honestly fall back to the cheapest paid models.
+        replacement =
+          pickBestFromCatalog(usable, 'free', preferOrg, used) ||
+          pickBestFromCatalog(usable, 'cheap', preferOrg, used);
+      } else if (wantsFree && !anyFreeLive) {
+        // Honest downgrade: no live free models → cheapest paid substitute.
+        replacement = pickBestFromCatalog(usable, 'cheap', preferOrg, used);
+      } else {
+        replacement = pickBestFromCatalog(usable, tier, preferOrg, used);
+      }
+
       if (replacement) {
         assignment.model = replacement.id;
-        assignment.isFree = preferFree;
+        assignment.isFree = pricingIsFree(replacement);
+        used.add(replacement.id.toLowerCase());
       }
     });
   });

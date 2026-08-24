@@ -1,9 +1,14 @@
 import type { CouncilRound } from '../types';
 import { streamOpenRouter } from './openrouter';
 
+/**
+ * Default compression model: a cheap, fast, live workhorse. (The previous
+ * default, gemini-2.0-flash-exp:free, was delisted from OpenRouter and would
+ * have failed every context-compression call.)
+ */
 export async function compressSessionContext(
   rounds: CouncilRound[],
-  compressionModel: string = 'google/gemini-2.0-flash-exp:free'
+  compressionModel: string = 'google/gemini-2.5-flash'
 ): Promise<string> {
   if (rounds.length <= 1) return '';
 

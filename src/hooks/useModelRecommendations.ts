@@ -30,19 +30,18 @@ export function useModelRecommendations() {
         name: cleanModelName(m.id, m.name),
       }));
     }
-    // Fallback default models if no cache exists
+    // Fallback default models if no cache exists (current live ids, Aug 2026)
     return [
-      { id: 'google/gemini-3.5-flash', name: 'Gemini 3.5 Flash' },
-      { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
       { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
-      { id: 'anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet' },
-      { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku' },
-      { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet' },
+      { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+      { id: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
+      { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5' },
+      { id: 'openai/gpt-5.1', name: 'GPT-5.1' },
       { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini' },
       { id: 'openai/gpt-4o', name: 'GPT-4o' },
-      { id: 'openai/o3-mini', name: 'o3 Mini' },
-      { id: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1 (Free)' },
       { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1' },
+      { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat' },
+      { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B' },
     ];
   });
 

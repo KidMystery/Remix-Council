@@ -27,7 +27,7 @@ interface StorageSyncModalProps {
   onSignIn: () => Promise<void> | void;
   onSignOut: () => Promise<void> | void;
   onExportSessions: () => void;
-  onImportSessions: (file: File) => void;
+  onImportSessions: (file: File, mode?: 'merge' | 'replace') => void;
   onFlushNow: () => Promise<void> | void;
   sessionsCount: number;
 }
@@ -48,6 +48,7 @@ export const StorageSyncModal: React.FC<StorageSyncModalProps> = ({
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isFlushing, setIsFlushing] = useState(false);
+  const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge');
   const [storageUsageBytes, setStorageUsageBytes] = useState<number>(0);
   const [customClientId, setCustomClientId] = useState<string>(() => {
     return localStorage.getItem('council_custom_google_client_id') || '';
@@ -101,7 +102,7 @@ export const StorageSyncModal: React.FC<StorageSyncModalProps> = ({
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      onImportSessions(file);
+      onImportSessions(file, importMode);
       e.target.value = '';
     }
   };
@@ -201,6 +202,26 @@ export const StorageSyncModal: React.FC<StorageSyncModalProps> = ({
               </div>
             </div>
 
+            {autoSaveState?.error && (
+              <div className="p-3 rounded-xl bg-red-950/60 border border-red-500/40 text-red-200 text-xs flex items-start justify-between gap-2">
+                <div className="space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-red-300">
+                    <AlertCircle size={14} />
+                    <span>Cloud Sync Issue</span>
+                  </div>
+                  <p className="text-[11px] text-red-200/90 break-words">{autoSaveState.error}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleManualSync}
+                  disabled={isSyncing || isFlushing}
+                  className="px-2.5 py-1 rounded-lg bg-red-800 hover:bg-red-700 text-white text-[11px] font-semibold shrink-0 cursor-pointer transition-colors"
+                >
+                  Retry Sync
+                </button>
+              </div>
+            )}
+
             {isSignedIn ? (
               <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 space-y-3">
                 <div className="flex items-center justify-between gap-2">
@@ -211,7 +232,7 @@ export const StorageSyncModal: React.FC<StorageSyncModalProps> = ({
                         {userEmail || 'Google Account Connected'}
                       </div>
                       <div className="text-[10px] text-emerald-400/80 font-mono">
-                        Real-time Drive cloud synchronization active
+                        Real-time Drive AppData cloud synchronization active
                       </div>
                     </div>
                   </div>
@@ -303,13 +324,45 @@ export const StorageSyncModal: React.FC<StorageSyncModalProps> = ({
 
           {/* Manual JSON Backup & Restore */}
           <div className="p-4 rounded-2xl bg-slate-950/70 border border-slate-800 space-y-3">
-            <h3 className="font-bold text-xs text-slate-200 flex items-center gap-1.5">
-              <Shield size={14} className="text-cyan-400" />
-              <span>Offline JSON Backup & Restore</span>
-            </h3>
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-xs text-slate-200 flex items-center gap-1.5">
+                <Shield size={14} className="text-cyan-400" />
+                <span>Offline JSON Backup &amp; Restore</span>
+              </h3>
+              <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800 text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => setImportMode('merge')}
+                  className={`px-2 py-1 rounded cursor-pointer font-semibold transition-colors ${
+                    importMode === 'merge'
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Preserves existing deliberations and incorporates uploaded records"
+                >
+                  Smart Merge (Safe)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImportMode('replace')}
+                  className={`px-2 py-1 rounded cursor-pointer font-semibold transition-colors ${
+                    importMode === 'replace'
+                      ? 'bg-red-500/20 text-red-300 border border-red-500/40'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Overwrites all local records with the uploaded file"
+                >
+                  Replace All
+                </button>
+              </div>
+            </div>
+
             <p className="text-slate-400 text-xs">
-              Export your full deliberation history into a JSON archive file, or restore past council sessions.
+              {importMode === 'merge'
+                ? 'Smart Merge is active: Importing a JSON file will merge sessions with your current history without losing any data.'
+                : 'Replace All mode: Importing a JSON file will overwrite your current sessions.'}
             </p>
+
             <div className="flex flex-wrap gap-2 pt-1">
               <button
                 type="button"
@@ -322,7 +375,7 @@ export const StorageSyncModal: React.FC<StorageSyncModalProps> = ({
 
               <label className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors font-semibold cursor-pointer min-h-[40px]">
                 <Upload size={14} className="text-emerald-400" />
-                <span>Import JSON</span>
+                <span>Import JSON ({importMode === 'merge' ? 'Merge' : 'Replace'})</span>
                 <input
                   type="file"
                   accept=".json"

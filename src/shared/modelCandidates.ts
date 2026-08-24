@@ -9,41 +9,45 @@ export const OPENROUTER_MODEL_ALIASES: Record<string, string> = {
   "gemini-flash": "google/gemini-2.5-flash",
   "gemini pro": "google/gemini-2.5-pro",
   "gemini-pro": "google/gemini-2.5-pro",
-  "claude sonnet": "anthropic/claude-3.7-sonnet",
-  "claude-sonnet": "anthropic/claude-3.7-sonnet",
+  // Claude 3.x are delisted from OpenRouter — "sonnet" maps to the current Sonnet.
+  "claude sonnet": "anthropic/claude-sonnet-4.5",
+  "claude-sonnet": "anthropic/claude-sonnet-4.5",
 
   // Google Gemini Specific
   "gemini 3.7 flash": "google/gemini-3.7-flash",
   "gemini-3.7-flash": "google/gemini-3.7-flash",
   "gemini 2.5 flash": "google/gemini-2.5-flash",
   "gemini-2.5-flash": "google/gemini-2.5-flash",
-  "gemini 2.0 flash": "google/gemini-2.0-flash-001",
-  "gemini-2.0-flash": "google/gemini-2.0-flash-001",
-  "gemini-2.0-flash-001": "google/gemini-2.0-flash-001",
+  "gemini 2.0 flash": "google/gemini-2.5-flash", // delisted — map to current fast Gemini,
+  "gemini-2.0-flash": "google/gemini-2.5-flash", // delisted — map to current fast Gemini,
+  "gemini-2.0-flash-001": "google/gemini-2.5-flash", // delisted — map to current fast Gemini,
   "gemini 2.5 pro": "google/gemini-2.5-pro",
   "gemini-2.5-pro": "google/gemini-2.5-pro",
-  "gemini 2.0 flash exp": "google/gemini-2.0-flash-exp:free",
-  "gemini-2.0-flash-exp": "google/gemini-2.0-flash-exp:free",
-  "gemini 1.5 pro": "google/gemini-pro-1.5",
-  "gemini-1.5-pro": "google/gemini-pro-1.5",
-  "gemini 1.5 flash": "google/gemini-flash-1.5",
-  "gemini-1.5-flash": "google/gemini-flash-1.5",
+  // Gemini 2.0 Flash Exp is delisted — map to the current fast Gemini.
+  "gemini 2.0 flash exp": "google/gemini-2.5-flash",
+  "gemini-2.0-flash-exp": "google/gemini-2.5-flash",
+  "gemini 1.5 pro": "google/gemini-2.5-pro", // delisted — map to current Pro,
+  "gemini-1.5-pro": "google/gemini-2.5-pro", // delisted — map to current Pro,
+  "gemini 1.5 flash": "google/gemini-2.5-flash", // delisted — map to current Flash,
+  "gemini-1.5-flash": "google/gemini-2.5-flash", // delisted — map to current Flash,
   "gemma 2 9b": "google/gemma-2-9b-it:free",
   "gemma-2-9b-it": "google/gemma-2-9b-it:free",
   "gemma 2 27b": "google/gemma-2-27b-it",
   "gemma-2-27b-it": "google/gemma-2-27b-it",
 
   // Anthropic Claude
-  "claude 3.7 sonnet": "anthropic/claude-3.7-sonnet",
-  "claude-3.7-sonnet": "anthropic/claude-3.7-sonnet",
-  "claude 3.5 sonnet": "anthropic/claude-3.5-sonnet",
-  "claude-3.5-sonnet": "anthropic/claude-3.5-sonnet",
-  "claude 3.5 haiku": "anthropic/claude-3.5-haiku",
-  "claude-3.5-haiku": "anthropic/claude-3.5-haiku",
-  "claude 3 opus": "anthropic/claude-3-opus",
-  "claude-3-opus": "anthropic/claude-3-opus",
-  "claude 3 haiku": "anthropic/claude-3-haiku",
-  "claude-3-haiku": "anthropic/claude-3-haiku",
+  // Claude 3.7 Sonnet is delisted from OpenRouter — keep the alias for
+  // backward compatibility but resolve to the current Sonnet.
+  "claude 3.7 sonnet": "anthropic/claude-sonnet-4.5",
+  "claude-3.7-sonnet": "anthropic/claude-sonnet-4.5",
+  "claude 3.5 sonnet": "anthropic/claude-sonnet-4.5", // delisted — map to current Sonnet,
+  "claude-3.5-sonnet": "anthropic/claude-sonnet-4.5", // delisted — map to current Sonnet,
+  "claude 3.5 haiku": "anthropic/claude-sonnet-4.5", // delisted — map to current Sonnet,
+  "claude-3.5-haiku": "anthropic/claude-sonnet-4.5", // delisted — map to current Sonnet,
+  "claude 3 opus": "anthropic/claude-sonnet-4.5", // delisted — map to current frontier,
+  "claude-3-opus": "anthropic/claude-sonnet-4.5", // delisted — map to current frontier,
+  "claude 3 haiku": "anthropic/claude-sonnet-4.5", // delisted — map to current Sonnet,
+  "claude-3-haiku": "anthropic/claude-sonnet-4.5", // delisted — map to current Sonnet,
 
   // OpenAI
   "gpt-4o": "openai/gpt-4o",
@@ -53,11 +57,11 @@ export const OPENROUTER_MODEL_ALIASES: Record<string, string> = {
   "gpt 4o mini": "openai/gpt-4o-mini",
   "o3-mini": "openai/o3-mini",
   "o3 mini": "openai/o3-mini",
-  "o1": "openai/o1",
-  "o1-mini": "openai/o1-mini",
-  "o1 mini": "openai/o1-mini",
-  "gpt-4-turbo": "openai/gpt-4-turbo",
-  "gpt-3.5-turbo": "openai/gpt-3.5-turbo",
+  "o1": "openai/o3-mini", // o1 retired — map to current efficient reasoner,
+  "o1-mini": "openai/o3-mini", // o1-mini retired — map to current efficient reasoner,
+  "o1 mini": "openai/o3-mini", // o1-mini retired — map to current efficient reasoner,
+  "gpt-4-turbo": "openai/gpt-4o", // delisted — map to GPT-4o,
+  "gpt-3.5-turbo": "openai/gpt-4o-mini", // delisted — map to current cheap tier,
 
   // DeepSeek
   "deepseek r1": "deepseek/deepseek-r1",
@@ -66,7 +70,7 @@ export const OPENROUTER_MODEL_ALIASES: Record<string, string> = {
   "deepseek-v3": "deepseek/deepseek-chat",
   "deepseek chat": "deepseek/deepseek-chat",
   "deepseek-chat": "deepseek/deepseek-chat",
-  "deepseek r1 free": "deepseek/deepseek-r1:free",
+  "deepseek r1 free": "nvidia/nemotron-3-ultra-550b-a55b:free", // R1 free delisted — map to live free reasoning,
 
   // Meta Llama
   "llama 3.3 70b instruct": "meta-llama/llama-3.3-70b-instruct",
@@ -76,8 +80,8 @@ export const OPENROUTER_MODEL_ALIASES: Record<string, string> = {
   "llama-3.1-70b-instruct": "meta-llama/llama-3.1-70b-instruct",
   "llama 3.1 8b instruct": "meta-llama/llama-3.1-8b-instruct:free",
   "llama-3.1-8b-instruct": "meta-llama/llama-3.1-8b-instruct:free",
-  "llama 3.2 3b instruct": "meta-llama/llama-3.2-3b-instruct:free",
-  "llama-3.2-3b-instruct": "meta-llama/llama-3.2-3b-instruct:free",
+  "llama 3.2 3b instruct": "meta-llama/llama-3.3-70b-instruct", // delisted — map to current Llama,
+  "llama-3.2-3b-instruct": "meta-llama/llama-3.3-70b-instruct", // delisted — map to current Llama,
 
   // Qwen
   "qwen 2.5 72b instruct": "qwen/qwen-2.5-72b-instruct",

@@ -8,6 +8,7 @@ import {
   isGoogleSignedIn,
   signInWithGoogle,
   signOutGoogle,
+  mergeSessions,
 } from '../lib/drivePersistence';
 
 const LOCAL_STORAGE_KEY = 'council-sessions-v3';
@@ -144,28 +145,43 @@ export function useSessionManager() {
         setSaveDestination(isGoogleSignedIn() ? 'cloud' : 'local');
         setSaveError(null);
       }
-      if (isGoogleSignedIn() && current.length > 0) {
+      if (isGoogleSignedIn()) {
         setIsSyncing(true);
-        await saveSessionsToDrive(current);
+        // Pre-fetch remote to merge so concurrent or remote changes are not overwritten
+        let toSave = current;
+        try {
+          const remote = await loadSessionsFromDrive();
+          if (remote.length > 0) {
+            const { merged } = mergeSessions(current, remote);
+            toSave = merged;
+            setSessions(merged);
+            persistToLocalStorage(merged);
+          }
+        } catch (e) {
+          console.warn('[SessionManager] Non-fatal pre-fetch merge notice:', e);
+        }
+        await saveSessionsToDrive(toSave);
         setLastSavedAt(Date.now());
         setSaveDestination('cloud');
         setSaveError(null);
       }
     } catch (err: any) {
       console.warn('[SessionManager] Flush error:', err);
-      setSaveError(err?.message || 'Error flushing session save');
+      setSaveError(err?.message || 'Error syncing to Google Drive');
+      throw err;
     } finally {
       setIsSaving(false);
       setIsSyncing(false);
     }
   }, []);
 
-  // ---- Load: Drive first when signed in, else localStorage ----
+  // ---- Load: Merge local storage cache with Drive on mount ----
   useEffect(() => {
     let isMounted = true;
     async function load() {
       setIsLoading(true);
-      let loaded: Session[] | null = null;
+      const local = loadFromLocalStorage();
+      let unified = local;
       let loadedFromCloud = false;
 
       if (isGoogleSignedIn()) {
@@ -173,26 +189,23 @@ export function useSessionManager() {
         try {
           const driveSessions = await loadSessionsFromDrive();
           if (driveSessions.length > 0) {
-            loaded = driveSessions;
+            const { merged } = mergeSessions(local, driveSessions);
+            unified = merged;
             loadedFromCloud = true;
+            persistToLocalStorage(merged);
           }
         } catch (err) {
-          console.warn('[SessionManager] Drive load failed; falling back to local cache:', err);
+          console.warn('[SessionManager] Drive load notice (using local cache):', err);
         } finally {
           setIsSyncing(false);
         }
       }
 
-      if (loaded === null) {
-        loaded = loadFromLocalStorage();
-        loadedFromCloud = false;
-      }
-
       if (isMounted) {
-        setSessions(loaded);
-        if (loaded.length > 0) {
-          setActiveSessionId((prev) => prev && loaded.some((s) => s.id === prev) ? prev : loaded[0].id);
-          const newestTime = loaded.reduce((max, s) => Math.max(max, s.updatedAt || 0), 0);
+        setSessions(unified);
+        if (unified.length > 0) {
+          setActiveSessionId((prev) => (prev && unified.some((s) => s.id === prev) ? prev : unified[0].id));
+          const newestTime = unified.reduce((max, s) => Math.max(max, s.updatedAt || 0), 0);
           setLastSavedAt(newestTime > 0 ? newestTime : Date.now());
           setSaveDestination(loadedFromCloud ? 'cloud' : 'local');
         } else {
@@ -353,44 +366,82 @@ export function useSessionManager() {
     return JSON.stringify(sessionsRef.current, null, 2);
   }, []);
 
-  const importSessionsJSON = useCallback((jsonString: string): { success: boolean; message: string; count: number } => {
-    let parsed: any;
-    try {
-      parsed = JSON.parse(jsonString);
-    } catch (err: any) {
-      return { success: false, message: `Invalid JSON: ${err?.message || 'could not parse input.'}`, count: 0 };
-    }
+  const importSessionsJSON = useCallback(
+    (
+      jsonString: string,
+      mode: 'merge' | 'replace' = 'merge'
+    ): { success: boolean; message: string; count: number; addedCount: number; updatedCount: number } => {
+      let parsed: any;
+      try {
+        parsed = JSON.parse(jsonString);
+      } catch (err: any) {
+        return { success: false, message: `Invalid JSON: ${err?.message || 'could not parse input.'}`, count: 0, addedCount: 0, updatedCount: 0 };
+      }
 
-    let list: any[];
-    if (Array.isArray(parsed)) {
-      list = parsed;
-    } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.sessions)) {
-      list = parsed.sessions;
-    } else {
+      let list: any[];
+      if (Array.isArray(parsed)) {
+        list = parsed;
+      } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.sessions)) {
+        list = parsed.sessions;
+      } else {
+        return {
+          success: false,
+          message: 'Invalid import format: expected a JSON array of sessions or an object with a "sessions" array.',
+          count: 0,
+          addedCount: 0,
+          updatedCount: 0,
+        };
+      }
+
+      for (let i = 0; i < list.length; i++) {
+        const s = list[i];
+        if (!s || typeof s.id !== 'string' || s.id.trim() === '') {
+          return { success: false, message: `Invalid session at index ${i}: missing string "id".`, count: 0, addedCount: 0, updatedCount: 0 };
+        }
+        if (!Array.isArray(s.rounds)) {
+          return { success: false, message: `Invalid session "${s.id}": "rounds" must be an array.`, count: 0, addedCount: 0, updatedCount: 0 };
+        }
+      }
+
+      const imported = list as Session[];
+      let finalSessions: Session[];
+      let addedCount = imported.length;
+      let updatedCount = 0;
+
+      if (mode === 'replace') {
+        finalSessions = imported;
+      } else {
+        // Smart merge: preserves existing threads and updates matching ones
+        const res = mergeSessions(sessionsRef.current, imported);
+        finalSessions = res.merged;
+        addedCount = res.addedCount;
+        updatedCount = res.updatedCount;
+      }
+
+      setSessions(finalSessions);
+      if (finalSessions.length > 0) {
+        setActiveSessionId((prev) =>
+          prev && finalSessions.some((s) => s.id === prev) ? prev : finalSessions[0].id
+        );
+      }
+      persistToLocalStorage(finalSessions);
+      writeDriveThrottled(finalSessions);
+
+      const message =
+        mode === 'replace'
+          ? `Replaced all sessions with ${imported.length} imported session(s).`
+          : `Imported successfully: ${addedCount} added, ${updatedCount} updated (${finalSessions.length} total sessions).`;
+
       return {
-        success: false,
-        message: 'Invalid import format: expected a JSON array of sessions or an object with a "sessions" array.',
-        count: 0,
+        success: true,
+        message,
+        count: finalSessions.length,
+        addedCount,
+        updatedCount,
       };
-    }
-
-    for (let i = 0; i < list.length; i++) {
-      const s = list[i];
-      if (!s || typeof s.id !== 'string' || s.id.trim() === '') {
-        return { success: false, message: `Invalid session at index ${i}: missing string "id".`, count: 0 };
-      }
-      if (!Array.isArray(s.rounds)) {
-        return { success: false, message: `Invalid session "${s.id}": "rounds" must be an array.`, count: 0 };
-      }
-    }
-
-    const imported = list as Session[];
-    setSessions(imported);
-    setActiveSessionId(imported[0]?.id || null);
-    persistToLocalStorage(imported);
-    writeDriveThrottled(imported);
-    return { success: true, message: `Imported ${imported.length} session(s).`, count: imported.length };
-  }, [writeDriveThrottled]);
+    },
+    [writeDriveThrottled]
+  );
 
   const signIn = useCallback(async (): Promise<void> => {
     await signInWithGoogle();
@@ -398,9 +449,27 @@ export function useSessionManager() {
     try {
       const driveSessions = await loadSessionsFromDrive();
       if (driveSessions.length > 0) {
-        setSessions(driveSessions);
-        setActiveSessionId(driveSessions[0].id);
+        // Merge drive sessions with current local sessions so neither is lost
+        const { merged } = mergeSessions(sessionsRef.current, driveSessions);
+        setSessions(merged);
+        if (merged.length > 0) {
+          setActiveSessionId((prev) =>
+            prev && merged.some((s) => s.id === prev) ? prev : merged[0].id
+          );
+        }
+        persistToLocalStorage(merged);
+        await saveSessionsToDrive(merged);
+      } else if (sessionsRef.current.length > 0) {
+        // Drive was empty; upload current local sessions to Drive
+        await saveSessionsToDrive(sessionsRef.current);
       }
+      setLastSavedAt(Date.now());
+      setSaveDestination('cloud');
+      setSaveError(null);
+    } catch (err: any) {
+      console.warn('[SessionManager] Drive post-signin sync error:', err);
+      setSaveError(err?.message || 'Drive sync error');
+      throw err;
     } finally {
       setIsSyncing(false);
     }

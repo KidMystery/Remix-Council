@@ -19,7 +19,7 @@ export const ARCHETYPE_LIBRARY: PersonaArchetype[] = [
     color: 'border-indigo-300 dark:border-indigo-500/40 bg-indigo-50/80 dark:bg-indigo-950/50 text-indigo-900 dark:text-indigo-200',
     systemPrompt:
       'You are a distributed systems architect. Focus on scalability, fault tolerance, state management, and operational complexity. Challenge designs that will not survive real load.',
-    recommendedModel: 'anthropic/claude-3.7-sonnet',
+    recommendedModel: 'anthropic/claude-sonnet-4.5',
   },
   {
     id: 'compliance_officer',
