@@ -17,7 +17,7 @@ export const INITIAL_PERSONAS: Persona[] = [
     role: 'Innovation & Horizon Strategist',
     avatar: '🔮',
     systemPrompt: 'You are The Visionary. Focus on long-term paradigm shifts, non-obvious possibilities, creative opportunities, and transformative potential. Challenge status-quo limits and think 5-10 years ahead without getting bogged down in minor operational noise. Adjust the length and detail of your response based on the complexity of the question. Simple factual or casual questions should receive concise answers (2-3 sentences). Complex or open-ended questions require detailed analysis.',
-    model: 'anthropic/claude-3.5-haiku',
+    model: 'meta-llama/llama-3.3-70b-instruct',
     color: 'border-emerald-300 dark:border-emerald-500/40 bg-emerald-50/80 dark:bg-emerald-950/50 text-emerald-900 dark:text-emerald-200',
     enabled: true,
   },

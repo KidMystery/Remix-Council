@@ -7,7 +7,7 @@ interface RecognitionResult {
 
 /**
  * Browser speech-to-text (dictation) via the Web Speech API.
- * Works in Chromium-family browsers (Chrome, Edge, Brave, Arc).
+ * Works in Chromium-family browsers (Chrome, Edge, Brave, Arc) and modern Safari.
  */
 export function useSpeechRecognition(onResult?: (r: RecognitionResult) => void) {
   const [supported] = useState<boolean>(() => {
@@ -16,11 +16,14 @@ export function useSpeechRecognition(onResult?: (r: RecognitionResult) => void) 
     return Boolean(w.SpeechRecognition || w.webkitSpeechRecognition);
   });
   const [isListening, setIsListening] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const recRef = useRef<any>(null);
+  const isListeningRef = useRef(false);
   const onResultRef = useRef(onResult);
   onResultRef.current = onResult;
 
   const stop = useCallback(() => {
+    isListeningRef.current = false;
     try {
       recRef.current?.stop();
     } catch {
@@ -31,10 +34,22 @@ export function useSpeechRecognition(onResult?: (r: RecognitionResult) => void) 
   }, []);
 
   const start = useCallback(() => {
-    if (!supported) return;
+    if (!supported) {
+      setError('Speech recognition is not supported in this browser environment.');
+      return;
+    }
+    setError(null);
+
     const w = window as any;
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
-    const rec = new SR();
+    let rec: any;
+    try {
+      rec = new SR();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to initialize speech recognition');
+      return;
+    }
+
     rec.lang = 'en-US';
     rec.interimResults = true;
     rec.continuous = true;
@@ -43,25 +58,55 @@ export function useSpeechRecognition(onResult?: (r: RecognitionResult) => void) 
     rec.onresult = (e: any) => {
       let final = '';
       let interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
+      for (let i = 0; i < e.results.length; i++) {
         const r = e.results[i];
-        if (r.isFinal) final += r[0].transcript;
+        if (r.isFinal) final += r[0].transcript + ' ';
         else interim += r[0].transcript;
       }
-      onResultRef.current?.({ transcript: (final + interim).trim(), isFinal: final.length > 0 });
+      const full = (final + interim).trim();
+      if (full) {
+        onResultRef.current?.({ transcript: full, isFinal: Boolean(final.trim()) });
+      }
     };
-    rec.onerror = () => setIsListening(false);
+
+    rec.onerror = (e: any) => {
+      console.warn('[useSpeechRecognition] Error:', e.error);
+      if (e.error === 'not-allowed') {
+        setError('Microphone access was denied. Please allow microphone permissions in your browser.');
+        isListeningRef.current = false;
+        setIsListening(false);
+      } else if (e.error === 'no-speech') {
+        // Harmless silence timeout
+      } else if (e.error === 'audio-capture') {
+        setError('No microphone found or audio capture failed.');
+        isListeningRef.current = false;
+        setIsListening(false);
+      } else {
+        setError(`Dictation issue: ${e.error}`);
+      }
+    };
+
     rec.onend = () => {
-      setIsListening(false);
+      // If user still intended to listen and wasn't manually stopped, finish gracefully
+      if (isListeningRef.current) {
+        setIsListening(false);
+        isListeningRef.current = false;
+      } else {
+        setIsListening(false);
+      }
       recRef.current = null;
     };
 
     recRef.current = rec;
+    isListeningRef.current = true;
     setIsListening(true);
     try {
       rec.start();
-    } catch {
+    } catch (err: any) {
+      console.warn('[useSpeechRecognition] start error:', err);
       setIsListening(false);
+      isListeningRef.current = false;
+      setError('Could not start microphone dictation.');
     }
   }, [supported]);
 
@@ -72,6 +117,7 @@ export function useSpeechRecognition(onResult?: (r: RecognitionResult) => void) 
 
   useEffect(() => {
     return () => {
+      isListeningRef.current = false;
       try {
         recRef.current?.abort?.();
       } catch {
@@ -80,5 +126,6 @@ export function useSpeechRecognition(onResult?: (r: RecognitionResult) => void) 
     };
   }, []);
 
-  return { supported, isListening, start, stop, toggle };
+  return { supported, isListening, error, start, stop, toggle };
 }
+

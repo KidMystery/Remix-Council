@@ -1,4 +1,4 @@
-import type { Session } from '../types';
+import type { Session, CouncilRound } from '../types';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 /**
@@ -8,10 +8,8 @@ import firebaseConfig from '../../firebase-applet-config.json';
  */
 
 export const DRIVE_SCOPES = [
-  'https://www.googleapis.com/auth/drive',
   'https://www.googleapis.com/auth/drive.appdata',
   'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/drive.metadata.readonly',
 ];
 
 const DRIVE_SCOPE_STRING = DRIVE_SCOPES.join(' ');
@@ -220,15 +218,18 @@ function sanitizeForDrive(sessions: Session[]): Session[] {
 
 async function uploadSessionsMultipart(
   token: string,
-  sessions: Session[],
+  sessions: any,
   fileId?: string,
   fileName: string = SESSION_FILE_NAME
 ): Promise<void> {
-  const metadata = {
+  const metadata: Record<string, any> = {
     name: fileName,
-    parents: ['appDataFolder'],
     mimeType: 'application/json',
   };
+  // 'parents' can only be provided when creating a new file (POST), never during PATCH/update
+  if (!fileId) {
+    metadata.parents = ['appDataFolder'];
+  }
   const payload = JSON.stringify(sessions);
 
   const boundary = `council-boundary-${Date.now()}`;
@@ -257,7 +258,14 @@ async function uploadSessionsMultipart(
   });
 
   if (!resp.ok) {
-    throw new Error(`Failed to ${fileId ? 'update' : 'create'} Drive sessions file: HTTP ${resp.status}`);
+    let errorDetail = '';
+    try {
+      const errJson = await resp.json();
+      errorDetail = errJson?.error?.message || JSON.stringify(errJson);
+    } catch {
+      errorDetail = `HTTP ${resp.status}`;
+    }
+    throw new Error(`Failed to ${fileId ? 'update' : 'create'} Drive file (${fileName}): ${errorDetail}`);
   }
 }
 
@@ -403,4 +411,167 @@ export function migrateLocalSession(legacy: any): Session {
     createdAt: legacy?.createdAt || now,
     updatedAt: legacy?.updatedAt || now,
   };
+}
+
+export interface MergeResult<T> {
+  merged: T[];
+  addedCount: number;
+  updatedCount: number;
+}
+
+/**
+ * Intelligently merges base sessions with incoming sessions.
+ * Preserves existing sessions, updates existing matching sessions with newer rounds,
+ * and adds new sessions without deleting or overwriting anything.
+ */
+export function mergeSessions(
+  baseSessions: Session[],
+  incomingSessions: Session[]
+): MergeResult<Session> {
+  let addedCount = 0;
+  let updatedCount = 0;
+
+  const sessionMap = new Map<string, Session>();
+  baseSessions.forEach((s) => {
+    if (s && s.id) sessionMap.set(s.id, s);
+  });
+
+  for (const incoming of incomingSessions) {
+    if (!incoming || !incoming.id) continue;
+
+    const existing = sessionMap.get(incoming.id);
+    if (!existing) {
+      sessionMap.set(incoming.id, incoming);
+      addedCount++;
+    } else {
+      // Merge rounds by round ID
+      const roundMap = new Map<string, CouncilRound>();
+      (existing.rounds || []).forEach((r) => {
+        if (r && r.id) roundMap.set(r.id, r);
+      });
+
+      for (const r of incoming.rounds || []) {
+        if (!r || !r.id) continue;
+        const existingRound = roundMap.get(r.id);
+        if (!existingRound) {
+          roundMap.set(r.id, r);
+        } else {
+          // If incoming round has more synthesis or deliberation content, prefer incoming
+          const incomingContentLen =
+            (r.synthesis?.content || '').length +
+            Object.keys(r.deliberation?.stage1 || {}).length +
+            Object.keys(r.deliberation?.stage2 || {}).length;
+          const existingContentLen =
+            (existingRound.synthesis?.content || '').length +
+            Object.keys(existingRound.deliberation?.stage1 || {}).length +
+            Object.keys(existingRound.deliberation?.stage2 || {}).length;
+
+          if (incomingContentLen >= existingContentLen) {
+            roundMap.set(r.id, r);
+          }
+        }
+      }
+
+      const mergedRounds = Array.from(roundMap.values()).sort(
+        (a, b) => (a.timestamp || 0) - (b.timestamp || 0)
+      );
+
+      const isDefaultTitle = (t?: string) =>
+        !t || t.trim() === '' || t === 'New Deliberation' || t === 'Untitled Session';
+
+      const bestTitle = !isDefaultTitle(existing.title)
+        ? existing.title
+        : !isDefaultTitle(incoming.title)
+        ? incoming.title
+        : existing.title || incoming.title || 'Deliberation';
+
+      const mergedSession: Session = {
+        ...existing,
+        ...incoming,
+        title: bestTitle,
+        rounds: mergedRounds,
+        personas: incoming.personas?.length ? incoming.personas : existing.personas,
+        synthesizer: incoming.synthesizer || existing.synthesizer,
+        activePresetId: incoming.activePresetId || existing.activePresetId,
+        updatedAt: Math.max(existing.updatedAt || 0, incoming.updatedAt || 0, Date.now()),
+      };
+
+      sessionMap.set(incoming.id, mergedSession);
+      updatedCount++;
+    }
+  }
+
+  // Sort sessions by latest updatedAt first
+  const merged = Array.from(sessionMap.values()).sort(
+    (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)
+  );
+
+  return { merged, addedCount, updatedCount };
+}
+
+/**
+ * Intelligently merges base Oracle threads with incoming threads.
+ */
+export function mergeOracleThreads(
+  baseThreads: any[],
+  incomingThreads: any[]
+): MergeResult<any> {
+  let addedCount = 0;
+  let updatedCount = 0;
+
+  const threadMap = new Map<string, any>();
+  baseThreads.forEach((t) => {
+    if (t && t.id) threadMap.set(t.id, t);
+  });
+
+  for (const incoming of incomingThreads) {
+    if (!incoming || !incoming.id) continue;
+    const existing = threadMap.get(incoming.id);
+    if (!existing) {
+      threadMap.set(incoming.id, incoming);
+      addedCount++;
+    } else {
+      // Merge messages by ID
+      const msgMap = new Map<string, any>();
+      (existing.messages || []).forEach((m: any) => {
+        if (m && m.id) msgMap.set(m.id, m);
+      });
+
+      for (const m of incoming.messages || []) {
+        if (!m || !m.id) continue;
+        if (!msgMap.has(m.id)) {
+          msgMap.set(m.id, m);
+        } else {
+          const ex = msgMap.get(m.id);
+          if ((m.content || '').length >= (ex.content || '').length) {
+            msgMap.set(m.id, m);
+          }
+        }
+      }
+
+      const mergedMessages = Array.from(msgMap.values()).sort(
+        (a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0)
+      );
+
+      const mergedThread = {
+        ...existing,
+        ...incoming,
+        title:
+          incoming.title && incoming.title !== 'New Consultation'
+            ? incoming.title
+            : existing.title,
+        messages: mergedMessages,
+        updatedAt: Math.max(existing.updatedAt || 0, incoming.updatedAt || 0, Date.now()),
+      };
+
+      threadMap.set(incoming.id, mergedThread);
+      updatedCount++;
+    }
+  }
+
+  const merged = Array.from(threadMap.values()).sort(
+    (a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0)
+  );
+
+  return { merged, addedCount, updatedCount };
 }

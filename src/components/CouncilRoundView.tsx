@@ -14,6 +14,7 @@ import {
   RotateCw,
   AlertTriangle,
   Trash2,
+  Loader2,
 } from 'lucide-react';
 import type { CouncilRound, Persona } from '../types';
 import { useSpeech } from '../hooks/useSpeech';
@@ -43,6 +44,7 @@ interface CardHeaderProps {
   persona: Persona;
   status?: string;
   preview?: string;
+  content?: string;
   isExpanded: boolean;
   canCollapse: boolean;
   onToggle: () => void;
@@ -51,6 +53,7 @@ interface CardHeaderProps {
   onRegenerate?: () => void;
   copiedId: string | null;
   speakingId: string | null;
+  loadingId?: string | null;
   isDeliberating: boolean;
 }
 
@@ -91,6 +94,7 @@ const PersonaCardHeader: React.FC<CardHeaderProps> = ({
   persona,
   status,
   preview,
+  content,
   isExpanded,
   canCollapse,
   onToggle,
@@ -99,11 +103,13 @@ const PersonaCardHeader: React.FC<CardHeaderProps> = ({
   onRegenerate,
   copiedId,
   speakingId,
+  loadingId,
   isDeliberating,
 }) => {
   const copyId = `copy-${persona.id}`;
   const speakId = `speak-${persona.id}`;
   const isSpeaking = speakingId === speakId;
+  const isLoadingAudio = loadingId === speakId;
   const isCopied = copiedId === copyId;
 
   return (
@@ -166,15 +172,21 @@ const PersonaCardHeader: React.FC<CardHeaderProps> = ({
         )}
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); onSpeak('', ''); }}
-          className="p-1.5 rounded-md text-slate-400 hover:text-cyan-300 hover:bg-slate-800 transition-colors cursor-pointer"
-          title={isSpeaking ? 'Stop reading' : 'Read aloud'}
+          onClick={(e) => { e.stopPropagation(); onSpeak(content || '', speakId); }}
+          className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+            isSpeaking
+              ? 'text-cyan-300 bg-cyan-950 animate-pulse'
+              : isLoadingAudio
+              ? 'text-amber-400 bg-amber-950/50'
+              : 'text-slate-400 hover:text-cyan-300 hover:bg-slate-800'
+          }`}
+          title={isSpeaking ? 'Stop reading' : isLoadingAudio ? 'Generating neural audio...' : 'Read aloud (Google AI Voice)'}
         >
-          {isSpeaking ? <VolumeX size={13} /> : <Volume2 size={13} />}
+          {isLoadingAudio ? <Loader2 size={13} className="animate-spin text-amber-400" /> : isSpeaking ? <VolumeX size={13} /> : <Volume2 size={13} />}
         </button>
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); onCopy(copyId, ''); }}
+          onClick={(e) => { e.stopPropagation(); onCopy(copyId, content || ''); }}
           className="p-1.5 rounded-md text-slate-400 hover:text-emerald-300 hover:bg-slate-800 transition-colors cursor-pointer"
           title="Copy response"
         >
@@ -205,7 +217,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
   const stage2 = round.deliberation?.stage2 || {};
   const stage3 = round.deliberation?.stage3 || round.synthesis;
 
-  const { speak, stop, speakingId } = useSpeech();
+  const { speak, stop, speakingId, loadingId } = useSpeech();
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isForking, setIsForking] = useState(false);
   const [forkBranchName, setForkBranchName] = useState('');
@@ -321,11 +333,12 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
           persona={p}
           status={response?.status}
           preview={preview}
+          content={content}
           isExpanded={isExpanded}
           canCollapse={canCollapse}
           onToggle={() => togglePersona(p.id)}
           onCopy={(id) => handleCopy(id, content)}
-          onSpeak={(id) => handleSpeak(content, id)}
+          onSpeak={(text, id) => handleSpeak(text, id)}
           onRegenerate={
             onRegeneratePersona && stageKey === 'stage1'
               ? () => onRegeneratePersona(p.id, round.id)
@@ -333,6 +346,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
           }
           copiedId={copiedId}
           speakingId={speakingId}
+          loadingId={loadingId}
           isDeliberating={isDeliberating}
         />
 
@@ -543,6 +557,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
               synthesizer={synthesizer}
               isDeliberating={isDeliberating}
               speakingId={speakingId}
+              loadingId={loadingId}
               copiedId={copiedId}
               onSpeak={handleSpeak}
               onCopy={handleCopy}

@@ -25,7 +25,7 @@ interface CouncilSummaryBarProps {
 }
 
 export function CouncilSummaryBar({
-  presetId = 'fast_and_free',
+  presetId = 'balanced_quality',
   answerMode = 'Standard Deliberation',
   taskDomain,
   personas,

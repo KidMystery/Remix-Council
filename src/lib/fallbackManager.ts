@@ -92,20 +92,27 @@ interface OrderedBackupOptions {
   isFreeOnlyPreset?: boolean;
 }
 
+/**
+ * Hardcoded backup pools are a LAST resort, used only when no live catalog is
+ * available (offline / fetch failed). The live catalog always takes priority —
+ * these ids are current (verified against OpenRouter in Aug 2026) and are
+ * re-validated at run time against the catalog when one exists.
+ */
 const DEFAULT_PAID_BACKUPS: BackupCandidate[] = [
-  { model: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', org: 'anthropic' },
+  { model: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', org: 'google' },
   { model: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', org: 'openai' },
   { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', org: 'google' },
   { model: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat', org: 'deepseek' },
   { model: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct', org: 'meta-llama' },
-  { model: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B Instruct', org: 'qwen' },
 ];
 
 const DEFAULT_FREE_BACKUPS: BackupCandidate[] = [
-  { model: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1 (Free)', org: 'deepseek', isFree: true },
-  { model: 'meta-llama/llama-3.2-3b-instruct:free', name: 'Llama 3.2 3B (Free)', org: 'meta-llama', isFree: true },
-  { model: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash Exp (Free)', org: 'google', isFree: true },
-  { model: 'qwen/qwen-2.5-72b-instruct:free', name: 'Qwen 2.5 72B Instruct (Free)', org: 'qwen', isFree: true },
+  { model: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra 550B (Free)', org: 'nvidia', isFree: true },
+  { model: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (Free)', org: 'openai', isFree: true },
+  { model: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B (Free)', org: 'google', isFree: true },
+  { model: 'qwen/qwen3-next-80b-a3b-instruct:free', name: 'Qwen3 Next 80B (Free)', org: 'qwen', isFree: true },
+  // Last-resort router: OpenRouter picks a live free model for you.
+  { model: 'openrouter/free', name: 'Free Models Router', org: 'openrouter', isFree: true },
 ];
 
 /** Computes an ordered backup candidate list excluding failed/active models. */
@@ -158,6 +165,11 @@ export interface StreamPersonaWithFallbackOptions {
   query?: string;
   webSearch?: boolean;
   onGrounding?: (grounding: GroundingData) => void;
+  /** Strict no-fallback mode: surface raw errors instead of swapping models. */
+  disableFallback?: boolean;
+  /** Server cost governor: round identity + per-round USD ceiling. */
+  roundKey?: string;
+  costCeilingUSD?: number;
 }
 
 export interface StreamPersonaWithFallbackResult {
@@ -177,7 +189,7 @@ export interface StreamPersonaWithFallbackResult {
 export async function streamPersonaWithFallback(
   options: StreamPersonaWithFallbackOptions
 ): Promise<StreamPersonaWithFallbackResult> {
-  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding } = options;
+  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding, disableFallback, roundKey, costCeilingUSD } = options;
 
   const isFreeOnlyPreset = policy.budget === 'free';
   const originalModel = persona.model;
@@ -188,6 +200,24 @@ export async function streamPersonaWithFallback(
   // forbid paid upgrades; free→free swaps are always allowed.
   let startModel = originalModel;
   let policySubstituted = false;
+  // Strict no-fallback mode: pin to the configured model and surface raw errors.
+  if (disableFallback) {
+    const strictRes = await streamOpenRouterCompletion({
+      model: originalModel,
+      messages,
+      temperature,
+      maxTokens,
+      budget: budget || policy.budget,
+      query,
+      signal,
+      webSearch,
+      onToken,
+      onGrounding,
+      roundKey,
+      costCeilingUSD,
+    });
+    return { ...strictRes, actualModel: strictRes.actualModel || originalModel, fallbackOccurred: false };
+  }
   if (isFreeOnlyPreset && !isFreeModelId(originalModel, rawModels)) {
     const freeCandidates = computeOrderedBackupList({
       activePersonas: [persona],
@@ -262,6 +292,9 @@ export async function streamPersonaWithFallback(
         webSearch,
         onToken,
         onGrounding,
+        disableFallback,
+        roundKey,
+        costCeilingUSD,
       };
 
       const streamResult = await streamOpenRouterCompletion(streamOptions);
@@ -286,6 +319,9 @@ export async function streamPersonaWithFallback(
         cost: streamResult.cost,
       };
     } catch (error: any) {
+      // A cost-governor refusal is a budget guard, not a model failure: never
+      // try backup models, surface it to the run loop untouched.
+      if (error?.costCeilingExceeded) throw error;
       lastError = error;
       const triggerReason = classifyTriggerReason(error, null);
       const nextModel = attemptChain[attempts] || '';

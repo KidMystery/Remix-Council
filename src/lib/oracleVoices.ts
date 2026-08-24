@@ -57,7 +57,7 @@ export const ORACLE_VOICES: OracleVoice[] = [
     avatar: '♟️',
     prompt:
       'Adopt the Strategist voice: think in systems and second-order effects. Identify leverage points and long-run consequences.',
-    model: 'anthropic/claude-3.5-haiku',
+    model: 'openai/gpt-4o',
   },
   {
     id: 'teacher',

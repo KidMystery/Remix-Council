@@ -84,6 +84,13 @@ export const SettingsPresetsTab: React.FC<SettingsPresetsTabProps> = ({
                   {preset.description}
                 </p>
 
+                {preset.id === 'fast_and_free' && preset.freeTierAvailable === false && (
+                  <p className="text-[11px] font-semibold text-amber-600 dark:text-amber-400 whitespace-normal break-words">
+                    ⚠ No zero-cost models live right now — this preset will use the cheapest
+                    paid models (flagged in the summary bar) until the free tier returns.
+                  </p>
+                )}
+
                 <div className="pt-1 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between text-[11px] font-mono text-slate-400">
                   <span className="font-medium">{preset.badge}</span>
                   <span className="text-[10px] text-slate-500">4 models</span>

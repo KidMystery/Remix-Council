@@ -1,14 +1,23 @@
 import type { CouncilRound } from '../types';
 import { streamOpenRouter } from './openrouter';
 
+/**
+ * Default compression model: a cheap, fast, live workhorse. (The previous
+ * default, gemini-2.0-flash-exp:free, was delisted from OpenRouter and would
+ * have failed every context-compression call.)
+ */
 export async function compressSessionContext(
   rounds: CouncilRound[],
-  compressionModel: string = 'google/gemini-2.0-flash-exp:free'
+  compressionModel: string = 'google/gemini-2.5-flash',
+  options: { keepLast?: boolean } = {}
 ): Promise<string> {
   if (rounds.length <= 1) return '';
 
-  // Take all rounds except the most recent active one
-  const priorRounds = rounds.slice(0, -1);
+  // Default: summarize everything except the most recent active round.
+  // With keepLast, every round in the input is summarized (used when the
+  // caller already excluded the active round — e.g. hierarchical memory).
+  const priorRounds = options.keepLast ? rounds : rounds.slice(0, -1);
+  if (priorRounds.length === 0) return '';
   const contextCorpus = priorRounds
     .map((r, i) => {
       const s3 = r.deliberation?.stage3?.content || 'No final synthesis recorded.';

@@ -43,9 +43,11 @@ export const Composer: React.FC<ComposerProps> = ({
 
   // Dictation (speech-to-text) into the query box.
   const preQueryRef = useRef('');
-  const { supported: sttSupported, isListening, toggle: toggleDictation } = useSpeechRecognition(
+  const { supported: sttSupported, isListening, error: sttError, toggle: toggleDictation } = useSpeechRecognition(
     ({ transcript }) => {
-      setQuery(preQueryRef.current + transcript);
+      const base = preQueryRef.current;
+      const separator = base && !base.endsWith(' ') && transcript ? ' ' : '';
+      setQuery(base + separator + transcript);
     }
   );
   const handleMic = () => {

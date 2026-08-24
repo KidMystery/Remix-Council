@@ -127,6 +127,22 @@ export interface StreamOpenRouterCompletionOptions {
   webSearch?: boolean;
   onToken?: (chunk: string) => void;
   onGrounding?: (grounding: GroundingData) => void;
+  /** Server cost governor: round identity + per-round USD ceiling. */
+  roundKey?: string;
+  costCeilingUSD?: number;
+}
+
+/** Thrown when the server-side cost governor refuses a call (ceiling reached). */
+export class CostCeilingError extends Error {
+  readonly costCeilingExceeded = true;
+  readonly roundCostUSD?: number;
+  readonly ceilingUSD?: number;
+  constructor(message: string, roundCostUSD?: number, ceilingUSD?: number) {
+    super(message);
+    this.name = 'CostCeilingError';
+    this.roundCostUSD = roundCostUSD;
+    this.ceilingUSD = ceilingUSD;
+  }
 }
 
 export interface StreamCompletionResult {
@@ -155,6 +171,8 @@ export async function streamOpenRouterCompletion(
     webSearch = false,
     onToken,
     onGrounding,
+    roundKey,
+    costCeilingUSD,
   } = options;
 
   if (!model || !model.trim()) {
@@ -169,6 +187,8 @@ export async function streamOpenRouterCompletion(
   };
   if (maxTokens) body.max_tokens = maxTokens;
   if (budget) body.budget = budget;
+  if (roundKey) body.roundKey = roundKey;
+  if (costCeilingUSD) body.costCeilingUSD = costCeilingUSD;
   if (webSearch) {
     body.tools = [
       {
@@ -201,6 +221,13 @@ export async function streamOpenRouterCompletion(
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
+      if (errorData.costCeilingExceeded) {
+        throw new CostCeilingError(
+          errorData.error || 'Round cost ceiling reached on the server.',
+          errorData.roundCostUSD,
+          errorData.ceilingUSD
+        );
+      }
       throw new Error(errorData.error || `HTTP ${response.status}: LLM streaming failure`);
     }
 

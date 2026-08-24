@@ -1,5 +1,5 @@
 import React from 'react';
-import { RefreshCw, Volume2, VolumeX, Check, Copy, Globe } from 'lucide-react';
+import { RefreshCw, Volume2, VolumeX, Check, Copy, Globe, Loader2 } from 'lucide-react';
 import { CouncilRound, Persona } from '../types';
 import { MessageMarkdown } from './MessageMarkdown';
 import { GroundingSourcesCard } from './GroundingSourcesCard';
@@ -12,6 +12,7 @@ interface SynthesisCardProps {
   synthesizer: Persona;
   isDeliberating: boolean;
   speakingId: string | null;
+  loadingId?: string | null;
   copiedId: string | null;
   onSpeak: (text: string, id: string) => void;
   onCopy: (id: string, text: string) => void;
@@ -25,6 +26,7 @@ export const SynthesisCard: React.FC<SynthesisCardProps> = ({
   synthesizer,
   isDeliberating,
   speakingId,
+  loadingId,
   copiedId,
   onSpeak,
   onCopy,
@@ -37,6 +39,9 @@ export const SynthesisCard: React.FC<SynthesisCardProps> = ({
   }
 
   const activeModel = round.synthesis?.model || synthesizer.model || defaultSynthModel;
+  const synthSpeakId = `${round.id}-synthesis`;
+  const isSpeaking = speakingId === synthSpeakId;
+  const isLoadingAudio = loadingId === synthSpeakId;
 
   return (
     <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border-2 border-amber-400/60 dark:border-amber-500/40 shadow-xl space-y-4 text-slate-800 dark:text-slate-100 min-w-0 max-w-full overflow-hidden">
@@ -82,16 +87,24 @@ export const SynthesisCard: React.FC<SynthesisCardProps> = ({
             <>
               <button
                 type="button"
-                onClick={() => onSpeak(round.synthesis.content, `${round.id}-synthesis`)}
+                onClick={() => onSpeak(round.synthesis.content, synthSpeakId)}
                 className={`transition-colors p-1.5 rounded text-xs font-medium flex items-center gap-1 cursor-pointer ${
-                  speakingId === `${round.id}-synthesis`
+                  isSpeaking
                     ? 'text-amber-900 dark:text-amber-200 bg-amber-200/80 dark:bg-amber-950/80 animate-pulse'
+                    : isLoadingAudio
+                    ? 'text-amber-500 bg-amber-950/40'
                     : 'text-amber-700 dark:text-amber-400 hover:text-amber-900 dark:hover:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/40'
                 }`}
-                title={speakingId === `${round.id}-synthesis` ? 'Stop reading' : 'Read synthesis aloud'}
+                title={isSpeaking ? 'Stop reading' : isLoadingAudio ? 'Generating neural audio...' : 'Read synthesis aloud (Google AI Neural Voice)'}
               >
-                {speakingId === `${round.id}-synthesis` ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                <span>{speakingId === `${round.id}-synthesis` ? 'Stop' : 'Listen'}</span>
+                {isLoadingAudio ? (
+                  <Loader2 size={13} className="animate-spin text-amber-400" />
+                ) : isSpeaking ? (
+                  <VolumeX size={13} />
+                ) : (
+                  <Volume2 size={13} />
+                )}
+                <span>{isLoadingAudio ? 'Generating...' : isSpeaking ? 'Stop' : 'Listen'}</span>
               </button>
 
               <button

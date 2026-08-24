@@ -1,5 +1,8 @@
 import { RawOpenRouterModel, MODEL_PRESETS, cleanModelName } from './presets';
 import { getAuthorOrganization, isFreeModel, estimatedCost } from './modelMapper';
+import { modelHasVision } from './modelScoring';
+
+export type ModelHealthStatus = 'live' | 'delisted' | 'unknown';
 
 export interface ModelDetails {
   id: string;
@@ -16,6 +19,10 @@ export interface ModelDetails {
   fallbackInfo?: string;
   alsoInPresets?: string[];
   qualityComparisonText?: string;
+  /** Live-verified in the OpenRouter catalog / delisted / not verifiable. */
+  health: ModelHealthStatus;
+  /** Image input capability from catalog architecture data (null = unknown). */
+  hasVision: boolean | null;
 }
 
 export function getModelDetails(
@@ -25,10 +32,24 @@ export function getModelDetails(
   fallbackLogs?: Array<{ personaId: string; originalModel: string; fallbackModel: string; reason: string }>,
   currentPresetId?: string
 ): ModelDetails {
-  const modelObj = rawModelsCatalog?.find((m) => m.id === modelId) || null;
+  const modelObj = rawModelsCatalog?.find((m) => m.id.toLowerCase() === modelId.toLowerCase()) || null;
 
   // 1. Display name
   const displayName = cleanModelName(modelId, modelObj?.name);
+
+  // 1b. Health + vision (only claimable when a live catalog is available)
+  let health: ModelHealthStatus = 'unknown';
+  let hasVision: boolean | null = null;
+  if (rawModelsCatalog && rawModelsCatalog.length > 0) {
+    if (modelObj) {
+      health = 'live';
+      hasVision = modelHasVision(modelObj);
+    } else if (modelId.includes('/')) {
+      // OpenRouter-form id that is not in the live catalog → delisted.
+      // Direct-provider ids (no slash) can't be verified here → unknown.
+      health = 'delisted';
+    }
+  }
 
   // 2. Author Organization
   const rawOrg = getAuthorOrganization(modelId);
@@ -177,6 +198,8 @@ export function getModelDetails(
     fallbackInfo,
     alsoInPresets: alsoInPresets.length > 0 ? alsoInPresets : undefined,
     qualityComparisonText,
+    health,
+    hasVision,
   };
 }
 
@@ -207,17 +230,21 @@ function calculateQualityComparison(
   return `Estimated quality: ${percentage}% of top-rated model`;
 }
 
+/** Family-based fallback quality score for models without benchmark data
+ *  (exact family matches — no loose substring collisions like gpt-4o-mini). */
 function getModelQualityScore(m: RawOpenRouterModel): number {
   const b = m.benchmarks;
   if (!b) {
-    if (m.id.includes('claude-3.7-sonnet') || m.id.includes('gemini-2.0-pro') || m.id.includes('gpt-4o')) return 100;
-    if (m.id.includes('deepseek-r1')) return 98;
-    if (m.id.includes('claude-3.5-sonnet')) return 95;
-    if (m.id.includes('qwen-2.5-72b') || m.id.includes('llama-3.3-70b')) return 88;
-    if (m.id.includes('gemma-4-31b')) return 78;
-    if (m.id.includes('nemotron-3.5')) return 72;
-    if (m.id.includes('laguna')) return 68;
-    if (m.id.includes('ling-3.0')) return 65;
+    const family = (m.id || '').split('/')[1] || '';
+    const frontier = ['claude-sonnet-4.5', 'claude-opus-4', 'claude-opus-4.1', 'gpt-5.1', 'gemini-2.5-pro'];
+    if (frontier.some((f) => family === f || family.startsWith(f + '-'))) return 100;
+    if (family.startsWith('deepseek-r1') || family === 'gemini-3.7-flash' || family === 'gpt-4o') return 96;
+    if (family === 'gemini-2.5-flash' || family === 'gpt-4o-mini' || family.startsWith('o3-mini')) return 90;
+    if (family.startsWith('llama-3.3-70b') || family.startsWith('qwen3-235b')) return 88;
+    if (family.startsWith('gemma-4')) return 78;
+    if (family.startsWith('nemotron-3')) return 72;
+    if (family.startsWith('laguna')) return 68;
+    if (family.startsWith('ling-3.0')) return 65;
     return 0;
   }
 

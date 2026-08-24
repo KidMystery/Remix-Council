@@ -24,6 +24,7 @@ import {
   X,
   Eye,
   Loader2,
+  ChevronDown,
 } from 'lucide-react';
 import type {
   Persona,
@@ -35,6 +36,7 @@ import type {
   ZipArchiveResult,
 } from '../types';
 import { policyForPreset, type ExecutionPolicy } from '../lib/executionPolicy';
+import { pickBestFromCatalog, pricingIsFree } from '../lib/modelScoring';
 import { streamPersonaWithFallback } from '../lib/fallbackManager';
 import { extractCodeFromArchive } from '../lib/zipReader';
 import { extractTextFromPDF } from '../lib/pdfUtils';
@@ -51,6 +53,225 @@ export interface NexusLabViewProps {
   onCompleteRound: (sessionId: string, round: CouncilRound) => void;
   activeSessionId?: string | null;
   costCeiling: CostCeilingConfig;
+}
+
+export type NexusExecutionMode = 'autonomous' | 'mini_deliberation' | 'model_rotation';
+export type NexusEnginePreset = 'frontier_trio' | 'deep_reasoning' | 'fast_and_free' | 'active_council' | 'custom';
+
+export const CURATED_NEXUS_MODELS = [
+  { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', tag: 'Top Frontier' },
+  { id: 'openai/gpt-5.1', name: 'GPT-5.1', tag: 'Omni Frontier' },
+  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', tag: 'Fast & Smart' },
+  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', tag: 'Deep Context' },
+  { id: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', tag: 'Fast Frontier' },
+  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', tag: 'Deep Reasoning' },
+  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat', tag: 'Efficient' },
+  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', tag: 'Open Weights' },
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra 550B (Free)', tag: 'Free Tier' },
+  { id: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (Free)', tag: 'Free Tier' },
+];
+
+/**
+ * Curated live-free fallback for the Nexus free roster (verified Aug 2026).
+ * Used only when the live catalog is unavailable or has no zero-cost models
+ * left — the dynamic builder below always prefers the live catalog.
+ */
+const CURATED_NEXUS_FREE_FALLBACK = [
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra 550B (Free)' },
+  { id: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (Free)' },
+  { id: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B (Free)' },
+  { id: 'qwen/qwen3-next-80b-a3b-instruct:free', name: 'Qwen3 Next 80B (Free)' },
+];
+
+/**
+ * Builds the Nexus free-tier roster dynamically:
+ * 1. If a live catalog is available, seats are the best live zero-cost models
+ *    (scored by context/recency, distinct from each other).
+ * 2. Otherwise it falls back to the curated live-free set.
+ */
+function buildFreeRoster(catalog?: RawOpenRouterModel[]): { personas: Persona[]; synthesizer: Persona } {
+  const used = new Set<string>();
+  const picks: Array<{ id: string; name: string }> = [];
+  const take = (id: string, name: string) => {
+    const key = id.toLowerCase();
+    if (!used.has(key)) {
+      used.add(key);
+      picks.push({ id, name });
+    }
+  };
+
+  if (catalog && catalog.length > 0) {
+    for (let i = 0; i < 4; i += 1) {
+      const m = pickBestFromCatalog(catalog, 'free', undefined, used);
+      if (!m) break;
+      take(m.id, m.name || m.id);
+    }
+  }
+  for (const c of CURATED_NEXUS_FREE_FALLBACK) take(c.id, c.name);
+  if (picks.length === 0) take('openrouter/free', 'Free Models Router');
+
+  const roles = [
+    {
+      id: 'nexus_free_a',
+      role: 'Fast Specialist',
+      avatar: '⚡',
+      color: '#10b981',
+      prompt: 'You are the Fast Specialist in Nexus Lab. Provide rapid, concise, structured domain analysis.',
+    },
+    {
+      id: 'nexus_free_b',
+      role: 'Open Weights Evaluator',
+      avatar: '🦙',
+      color: '#f97316',
+      prompt: 'You are the Open Weights Evaluator in Nexus Lab. Provide clear open-weights domain analysis and actionable recommendations.',
+    },
+    {
+      id: 'nexus_free_c',
+      role: 'Context Analyst',
+      avatar: '🔎',
+      color: '#0ea5e9',
+      prompt: 'You are the Context Analyst in Nexus Lab. Verify long-range context, flag inconsistencies, and keep the mission grounded.',
+    },
+  ];
+
+  const panelistCount = picks.length >= 4 ? 3 : Math.max(1, picks.length - 1);
+  const personas = roles.slice(0, panelistCount).map((r, i) => ({
+    id: r.id,
+    name: picks[i].name,
+    role: r.role,
+    avatar: r.avatar,
+    color: r.color,
+    model: picks[i].id,
+    systemPrompt: r.prompt,
+    enabled: true,
+  }));
+  const chairPick = picks[Math.max(3, picks.length - 1)] || picks[0];
+
+  return {
+    personas,
+    synthesizer: {
+      id: 'synth_free',
+      name: 'Free Tier Chair',
+      role: 'Consensus Chair',
+      avatar: '⚖️',
+      color: '#6366f1',
+      model: chairPick.id,
+      systemPrompt: 'You are the Presiding Chair. Synthesize decisive consensus without cost overhead.',
+      enabled: true,
+    },
+  };
+}
+
+export function getPresetRoster(
+  preset: NexusEnginePreset,
+  basePersonas: Persona[],
+  baseSynthesizer: Persona,
+  catalog?: RawOpenRouterModel[]
+): { personas: Persona[]; synthesizer: Persona } {
+  if (preset === 'frontier_trio') {
+    return {
+      personas: [
+        {
+          id: 'claude_frontier',
+          name: 'Claude Sonnet 4.5',
+          role: 'Lead Architect',
+          avatar: '🧠',
+          color: '#3b82f6',
+          model: 'anthropic/claude-sonnet-4.5',
+          systemPrompt:
+            'You are Claude Sonnet 4.5, Lead Architect in Nexus Lab. Provide profound structural insights, robust logic, and clear architectural trade-offs.',
+          enabled: true,
+        },
+        {
+          id: 'gpt4o_frontier',
+          name: 'GPT-4o',
+          role: 'Strategy & Execution',
+          avatar: '⚡',
+          color: '#10b981',
+          model: 'openai/gpt-4o',
+          systemPrompt:
+            'You are GPT-4o, Strategy & Execution Specialist in Nexus Lab. Focus on operational execution, edge-case mitigation, and pragmatic paths.',
+          enabled: true,
+        },
+        {
+          id: 'gemini_frontier',
+          name: 'Gemini 2.5 Flash',
+          role: 'Verification & Speed',
+          avatar: '✨',
+          color: '#f59e0b',
+          model: 'google/gemini-2.5-flash',
+          systemPrompt:
+            'You are Gemini 2.5 Flash, Verification Specialist in Nexus Lab. Stress-test assumptions, verify facts, and test for hidden vulnerabilities.',
+          enabled: true,
+        },
+      ],
+      synthesizer: {
+        id: 'synth_frontier',
+        name: 'Frontier Consensus Chair',
+        role: 'Consensus Chair',
+        avatar: '⚖️',
+        color: '#6366f1',
+        model: 'anthropic/claude-sonnet-4.5',
+        systemPrompt:
+          'You are the Presiding Chair. Synthesize decisive consensus across all panelists and output invariant agreements.',
+        enabled: true,
+      },
+    };
+  }
+  if (preset === 'deep_reasoning') {
+    return {
+      personas: [
+        {
+          id: 'r1_reasoner',
+          name: 'DeepSeek R1',
+          role: 'Deep Reasoning Engine',
+          avatar: '🔬',
+          color: '#8b5cf6',
+          model: 'deepseek/deepseek-r1',
+          systemPrompt:
+            'You are DeepSeek R1, Deep Reasoning Engine. Perform exhaustive first-principles reasoning and mathematical verification.',
+          enabled: true,
+        },
+        {
+          id: 'claude_reasoner',
+          name: 'Claude Sonnet 4.5 (Thinking)',
+          role: 'System Designer',
+          avatar: '💡',
+          color: '#ec4899',
+          model: 'anthropic/claude-sonnet-4.5',
+          systemPrompt:
+            'You are Claude Sonnet 4.5 with extended thinking. Analyze core problem topology and build complete solution frameworks.',
+          enabled: true,
+        },
+        {
+          id: 'gemini_pro_reasoner',
+          name: 'Gemini 2.5 Pro',
+          role: 'Contextual Synthesist',
+          avatar: '🌐',
+          color: '#06b6d4',
+          model: 'google/gemini-2.5-pro',
+          systemPrompt:
+            'You are Gemini 2.5 Pro. Analyze deep contextual nuances, edge cases, and long-range system trajectories.',
+          enabled: true,
+        },
+      ],
+      synthesizer: {
+        id: 'synth_deep_reasoning',
+        name: 'Reasoning Synthesis Chair',
+        role: 'Consensus Chair',
+        avatar: '⚖️',
+        color: '#6366f1',
+        model: 'deepseek/deepseek-r1',
+        systemPrompt:
+          'You are the Presiding Chair. Synthesize decisive consensus and alignment across deep reasoning passes.',
+        enabled: true,
+      },
+    };
+  }
+  if (preset === 'fast_and_free') {
+    return buildFreeRoster(catalog);
+  }
+  return { personas: basePersonas, synthesizer: baseSynthesizer };
 }
 
 const MISSIONS_STORAGE_KEY = 'nexus-missions-v1';
@@ -182,7 +403,37 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [followUpDirective, setFollowUpDirective] = useState('');
   const [followUpContext, setFollowUpContext] = useState<string | null>(null);
   const [maxIterations, setMaxIterations] = useState(3);
-  const [activePreset, setActivePreset] = useState<'fast_and_free' | 'deep_council'>('fast_and_free');
+  const [executionMode, setExecutionMode] = useState<NexusExecutionMode>('autonomous');
+  const [enginePreset, setEnginePreset] = useState<NexusEnginePreset>('frontier_trio');
+  const [activePreset, setActivePreset] = useState<'fast_and_free' | 'deep_council'>('deep_council');
+  
+  const [activeRosterPersonas, setActiveRosterPersonas] = useState<Persona[]>(() =>
+    getPresetRoster('frontier_trio', personas, synthesizer, catalog).personas
+  );
+  const [activeRosterSynthesizer, setActiveRosterSynthesizer] = useState<Persona>(() =>
+    getPresetRoster('frontier_trio', personas, synthesizer, catalog).synthesizer
+  );
+  const [isRosterModalOpen, setIsRosterModalOpen] = useState(false);
+
+  const handleSelectEnginePreset = (preset: NexusEnginePreset) => {
+    setEnginePreset(preset);
+    setActivePreset(preset === 'fast_and_free' ? 'fast_and_free' : 'deep_council');
+    const roster = getPresetRoster(preset, personas, synthesizer, catalog);
+    setActiveRosterPersonas(roster.personas);
+    setActiveRosterSynthesizer(roster.synthesizer);
+  };
+
+  const handleUpdatePersonaModel = (personaId: string, modelId: string) => {
+    setEnginePreset('custom');
+    setActiveRosterPersonas((prev) =>
+      prev.map((p) => (p.id === personaId ? { ...p, model: modelId } : p))
+    );
+  };
+
+  const handleUpdateSynthesizerModel = (modelId: string) => {
+    setEnginePreset('custom');
+    setActiveRosterSynthesizer((prev) => ({ ...prev, model: modelId }));
+  };
   const [enableWebGrounding, setEnableWebGrounding] = useState(true);
   const [enableCodeSandbox, setEnableCodeSandbox] = useState(true);
   const [deepDocumentMode, setDeepDocumentMode] = useState(false);
@@ -202,7 +453,21 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [consensusMetrics, setConsensusMetrics] = useState<ConsensusMetric[]>([]);
   const [missionStatus, setMissionStatus] = useState<PersistedMission['status']>('idle');
   const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
+  // Clean-by-default display: the telemetry terminal is collapsed until
+  // expanded, and the deliberation feed shows only the final verdict plus
+  // one-line summaries of earlier cycles (expandable).
+  const [showTerminal, setShowTerminal] = useState(false);
+  const [showFullDeliberation, setShowFullDeliberation] = useState(false);
   const [showCostApprovalModal, setShowCostApprovalModal] = useState(false);
+
+  // Auto-open the telemetry terminal while a mission runs; collapse it when the
+  // run finishes so the results view stays clean.
+  const wasRunningRef = useRef(false);
+  useEffect(() => {
+    if (isRunning && !wasRunningRef.current) setShowTerminal(true);
+    if (!isRunning && wasRunningRef.current) setShowTerminal(false);
+    wasRunningRef.current = isRunning;
+  }, [isRunning]);
   const [estimatedMissionCost, setEstimatedMissionCost] = useState(0);
   const [showDossier, setShowDossier] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
@@ -323,9 +588,23 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   };
 
   const getEstimatedCost = (): number => {
-    const isFree = activePreset === 'fast_and_free';
-    const activePersonas = personas.filter((p) => p.enabled !== false);
-    return calculateEstimatedCost(activePersonas, catalog, maxIterations, isFree);
+    // Honest cost: the "free" estimate only holds when every seated model is
+    // actually verified zero-cost in the live catalog (or the catalog is
+    // unavailable, in which case we can't verify either way).
+    const rosterAll = [...(activeRosterPersonas || []), activeRosterSynthesizer].filter(Boolean);
+    const isFree =
+      enginePreset === 'fast_and_free' &&
+      (catalog.length === 0 ||
+        rosterAll.every((p) => {
+          if (!p?.model) return true;
+          if (p.model.toLowerCase() === 'openrouter/free') return true;
+          const m = catalog.find((r) => r.id?.toLowerCase() === p.model.toLowerCase());
+          if (!m) return p.model.endsWith(':free');
+          return pricingIsFree(m);
+        }));
+    const activePersonas = activeRosterPersonas.filter((p) => p.enabled !== false);
+    const passes = executionMode === 'mini_deliberation' ? 1 : maxIterations;
+    return calculateEstimatedCost(activePersonas, catalog, passes, isFree);
   };
 
   const handlePreLaunchCheck = () => {
@@ -350,7 +629,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setMissionTitle(title);
 
     const policy: ExecutionPolicy = policyForPreset(activePreset);
-    const activePersonas = personas.filter((p) => p.enabled !== false);
+    const activePersonas = activeRosterPersonas.filter((p) => p.enabled !== false);
 
     let accumulatedRounds: CouncilRound[] = [...rounds];
     let accumulatedMetrics: ConsensusMetric[] = [...consensusMetrics];
@@ -370,8 +649,6 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       : '';
 
     // ---- Execution plan ----
-    // Deep Document Mode: chunk oversized attachments and review each part.
-    // Otherwise: the standard autonomous cycle loop.
     const textSources = attachedFiles
       .filter((f) => (f.content || '').trim().length > 0)
       .map((f) => ({ name: f.name, content: f.content }));
@@ -384,6 +661,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       iter: number;
       query: string;
       isFinalSynthesis?: boolean;
+      rotationFocus?: string;
     }
     let plan: CyclePlan[] = [];
     let docPlan: DocumentChunkPlan | null = null;
@@ -407,9 +685,34 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       plan.push({
         label: '🧠 Final cross-document synthesis',
         iter: plan.length + 1,
-        query: '', // filled in the loop from the ledger
+        query: '',
         isFinalSynthesis: true,
       });
+    } else if (executionMode === 'mini_deliberation') {
+      addLog(`⚡ Initializing Nexus Mini Deliberation (Single Consensus Pass)...`);
+      plan = [
+        {
+          label: `⚖️ Mini Deliberation Consensus Pass`,
+          iter: 1,
+          query: `[Nexus Mini Deliberation Pass]:\nDirective: ${missionGoal}${attachmentContext}${carriedContext}\n\nProvide your authoritative analysis and distinct technical recommendations for consensus synthesis.`,
+        },
+      ];
+    } else if (executionMode === 'model_rotation') {
+      addLog(`🔄 Initializing Nexus Model Rotation across ${maxIterations} specialized cycles...`);
+      const rotationThemes = [
+        'Cycle 1: Strategic Foundations & Core Architecture',
+        'Cycle 2: Operational Implementation, Code & Vulnerability Audit',
+        'Cycle 3: Adversarial Stress-Test & Invariant Synthesis',
+        'Cycle 4: Optimization, Performance & Scalability',
+        'Cycle 5: Comprehensive Cross-Model Alignment & Verification',
+        'Cycle 6: Final Hardened Blueprint & Actionable Execution',
+      ];
+      plan = Array.from({ length: maxIterations }, (_, i) => ({
+        label: `🔄 ${rotationThemes[i % rotationThemes.length]}`,
+        iter: i + 1,
+        query: `[Nexus Model Rotation — ${rotationThemes[i % rotationThemes.length]}]:\nDirective: ${missionGoal}${attachmentContext}${carriedContext}\n\nLead Panelist Seat: ${activePersonas[i % activePersonas.length]?.name || 'Specialist'}.\nFocus deeply on the specific domain of this rotation cycle.`,
+        rotationFocus: rotationThemes[i % rotationThemes.length],
+      }));
     } else {
       addLog(`🚀 Initializing Nexus Lab Mission with ${maxIterations} autonomous cycles...`);
       plan = Array.from({ length: maxIterations }, (_, i) => ({
@@ -421,9 +724,17 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
     const totalPasses = plan.length;
 
+    // Self-correction memory: each cycle's chair consensus is carried into the
+    // next cycle, which is instructed to falsify it before building on it.
+    let previousSynthesis: string | null = null;
+    let previousMetric: ConsensusMetric | undefined;
+
     for (let qi = 0; qi < plan.length && !pauseRequestedRef.current; qi++) {
       const p = plan[qi];
-      const chair = activePersonas[qi % activePersonas.length] || activePersonas[0];
+      const chair =
+        executionMode === 'model_rotation'
+          ? activePersonas[qi % activePersonas.length] || activeRosterSynthesizer
+          : activePersonas[qi % activePersonas.length] || activeRosterSynthesizer;
 
       let cycleQuery: string;
       if (p.isFinalSynthesis) {
@@ -433,7 +744,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       }
 
       setCurrentIteration(qi + 1);
-      addLog(`${p.label}: selecting presiding chair and generating proposals...`);
+      addLog(`${p.label}: generating proposals across active panel...`);
 
       const newRound: CouncilRound = {
         id: `nexus_round_${Date.now()}_${qi + 1}`,
@@ -479,7 +790,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       });
 
       await Promise.allSettled(s1Promises);
-      addLog(`✓ ${p.label} proposals generated. Chair [${chair.name}] synthesizing consensus...`);
+      addLog(`✓ ${p.label} proposals generated. Chair [${activeRosterSynthesizer.name}] synthesizing consensus...`);
 
       // Stage 3 Synthesis & Convergence
       const s1Text = Object.entries(newRound.deliberation.stage1)
@@ -490,17 +801,24 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       let consensusMetric: ConsensusMetric | undefined;
       try {
         const chairPersona: Persona = {
-          ...(chair || synthesizer),
-          id: chair?.id || 'synthesizer',
-          name: chair?.name || synthesizer.name || 'Presiding Nexus Chair',
-          role: chair?.role || synthesizer.role || 'Chair',
+          ...activeRosterSynthesizer,
+          id: activeRosterSynthesizer.id || 'synthesizer',
+          name: activeRosterSynthesizer.name || 'Presiding Nexus Chair',
+          role: activeRosterSynthesizer.role || 'Chair',
         };
+
+        // Reconsideration pass: from cycle 2 onward, the chair must adversarially
+        // re-examine the previous consensus instead of simply repeating it.
+        const reconsiderBlock =
+          qi > 0 && previousSynthesis
+            ? `\n\n[Self-Correction Pass — do NOT simply repeat the previous cycle]:\nPrevious consensus (${previousMetric?.agreementScore ?? 'unknown'}% agreement):\n${previousSynthesis.slice(0, 3500)}\n\nInstructions:\n1) Adversarially falsify the previous consensus: hunt for factual errors, unsupported claims, missing failure modes, and overconfident generalizations.\n2) Re-derive any critical claim you cannot defend from the panel's findings; if you have web tooling, prefer live verification over memory.\n3) Only change the consensus where you have substantive justification.\n4) State explicitly: what you changed versus the previous cycle and why, and list the top remaining risks/pitfalls.`
+            : '';
 
         const synthRes = await streamPersonaWithFallback({
           persona: chairPersona,
           messages: [
             { role: 'system', content: 'You are the Presiding Nexus Chair. Synthesize decisive consensus, list immutable invariants, and calculate convergence alignment. After your synthesis append exactly one fenced JSON block with keys: agreementScore (integer 0-100), keyConsensusPoints (array), keyDisagreements (array), panelistAlignment (object of persona id -> integer 0-100).' },
-            { role: 'user', content: `Synthesize ${p.label} findings:\n\n${s1Text}` },
+            { role: 'user', content: `Synthesize ${p.label} findings:\n\n${s1Text}${reconsiderBlock}` },
           ],
           policy,
           rawModels: catalog,
@@ -537,16 +855,16 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         };
 
         newRound.deliberation.stage3 = {
-          model: synthRes.actualModel || chair.model,
-          chairPersonaId: chair?.id,
+          model: synthRes.actualModel || chairPersona.model,
+          chairPersonaId: chairPersona.id,
           content: synthesis,
           consensusMetric,
           status: 'completed',
           finishReason: synthRes.finishReason,
         };
         newRound.synthesis = {
-          model: synthRes.actualModel || chair.model,
-          chairPersonaId: chair?.id,
+          model: synthRes.actualModel || chairPersona.model,
+          chairPersonaId: chairPersona.id,
           content: synthesis,
           consensusMetric,
           status: 'completed',
@@ -555,6 +873,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
         accumulatedMetrics = [...accumulatedMetrics, consensusMetric];
         setConsensusMetrics(accumulatedMetrics);
+        previousSynthesis = synthesis;
+        previousMetric = consensusMetric;
         addLog(`✨ ${p.label} consensus: ${consensusMetric.agreementScore}% alignment.`);
       } catch (err: any) {
         addLog(`❌ Chair synthesis error: ${err.message}`);
@@ -1004,32 +1324,173 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               </div>
             </div>
 
-            {/* Iterations and Preset */}
+            {/* Execution Mode Selector */}
+            <div className="space-y-1.5 pt-1">
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Execution Mode
+              </label>
+              <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-950/80 rounded-2xl border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setExecutionMode('autonomous')}
+                  disabled={isRunning}
+                  className={`py-2 px-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer flex flex-col items-center gap-1 text-center ${
+                    executionMode === 'autonomous'
+                      ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Zap size={13} />
+                  <span>Autonomous</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExecutionMode('mini_deliberation')}
+                  disabled={isRunning}
+                  className={`py-2 px-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer flex flex-col items-center gap-1 text-center ${
+                    executionMode === 'mini_deliberation'
+                      ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <ShieldCheck size={13} />
+                  <span>Mini Delib</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExecutionMode('model_rotation')}
+                  disabled={isRunning}
+                  className={`py-2 px-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer flex flex-col items-center gap-1 text-center ${
+                    executionMode === 'model_rotation'
+                      ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <RotateCcw size={13} />
+                  <span>Rotation</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Engine Preset and Cycles */}
             <div className="grid grid-cols-2 gap-3 pt-1">
               <div>
-                <label className="block text-[11px] text-slate-400 mb-1">Preset Engine</label>
+                <label className="block text-[11px] text-slate-400 mb-1">Engine Preset</label>
                 <select
-                  value={activePreset}
-                  onChange={(e) => setActivePreset(e.target.value as any)}
+                  value={enginePreset}
+                  onChange={(e) => handleSelectEnginePreset(e.target.value as NexusEnginePreset)}
                   disabled={isRunning}
                   className="w-full bg-slate-950 text-slate-200 text-xs p-2.5 rounded-xl border border-slate-800"
                 >
-                  <option value="fast_and_free">Fast & Free</option>
-                  <option value="deep_council">Deep Frontier</option>
+                  <option value="frontier_trio">🌟 Frontier Trio (Sonnet/GPT-4o/Gemini)</option>
+                  <option value="deep_reasoning">🧠 Deep Reasoning (R1/Sonnet/Pro)</option>
+                  <option value="fast_and_free">⚡ Free Tier (live-verified)</option>
+                  <option value="active_council">🏛️ Active Council (Settings)</option>
+                  <option value="custom">⚙️ Custom Roster</option>
                 </select>
               </div>
 
               <div>
-                <label className="block text-[11px] text-slate-400 mb-1">Cycles</label>
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  {executionMode === 'mini_deliberation' ? 'Delib Passes' : 'Cycles'}
+                </label>
                 <input
                   type="number"
                   min={1}
                   max={6}
-                  value={maxIterations}
+                  value={executionMode === 'mini_deliberation' ? 1 : maxIterations}
                   onChange={(e) => setMaxIterations(parseInt(e.target.value) || 1)}
-                  disabled={isRunning}
-                  className="w-full bg-slate-950 text-slate-200 text-xs p-2.5 rounded-xl border border-slate-800 font-mono"
+                  disabled={isRunning || executionMode === 'mini_deliberation'}
+                  className="w-full bg-slate-950 text-slate-200 text-xs p-2.5 rounded-xl border border-slate-800 font-mono disabled:opacity-50"
                 />
+              </div>
+            </div>
+
+            {/* Active Panel Roster & Model Selection */}
+            <div className="space-y-2 pt-2 border-t border-slate-800/80">
+              <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                <span>Active Model Panel</span>
+                <span className="text-[10px] text-emerald-400 font-mono">
+                  {activeRosterPersonas.length} Seats + Chair
+                </span>
+              </div>
+
+              <div className="space-y-1.5">
+                {activeRosterPersonas.map((pers) => (
+                  <div
+                    key={pers.id}
+                    className="p-2 rounded-xl bg-slate-950/70 border border-slate-800 flex items-center justify-between gap-2 text-xs"
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span>{pers.avatar || '🤖'}</span>
+                      <div className="min-w-0">
+                        <div className="font-semibold text-slate-200 truncate">{pers.name}</div>
+                        <div className="text-[10px] text-slate-500 truncate">{pers.role}</div>
+                      </div>
+                    </div>
+
+                    <select
+                      value={pers.model}
+                      onChange={(e) => handleUpdatePersonaModel(pers.id, e.target.value)}
+                      disabled={isRunning}
+                      className="bg-slate-900 text-slate-200 text-[11px] p-1.5 rounded-lg border border-slate-700 max-w-[150px] truncate"
+                    >
+                      <optgroup label="Curated Frontier">
+                        {CURATED_NEXUS_MODELS.map((cm) => (
+                          <option key={cm.id} value={cm.id}>
+                            {cm.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                      {catalog.length > 0 && (
+                        <optgroup label="All Catalog Models">
+                          {catalog.slice(0, 50).map((cat) => (
+                            <option key={cat.id} value={cat.id}>
+                              {cat.name || cat.id}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                  </div>
+                ))}
+
+                {/* Chair Seat */}
+                <div className="p-2 rounded-xl bg-indigo-950/30 border border-indigo-500/30 flex items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span>{activeRosterSynthesizer.avatar || '⚖️'}</span>
+                    <div className="min-w-0">
+                      <div className="font-semibold text-indigo-200 truncate">
+                        {activeRosterSynthesizer.name}
+                      </div>
+                      <div className="text-[10px] text-indigo-400/80 truncate">Consensus Chair</div>
+                    </div>
+                  </div>
+
+                  <select
+                    value={activeRosterSynthesizer.model}
+                    onChange={(e) => handleUpdateSynthesizerModel(e.target.value)}
+                    disabled={isRunning}
+                    className="bg-slate-900 text-slate-200 text-[11px] p-1.5 rounded-lg border border-indigo-700/60 max-w-[150px] truncate"
+                  >
+                    <optgroup label="Curated Frontier">
+                      {CURATED_NEXUS_MODELS.map((cm) => (
+                        <option key={cm.id} value={cm.id}>
+                          {cm.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                    {catalog.length > 0 && (
+                      <optgroup label="All Catalog Models">
+                        {catalog.slice(0, 50).map((cat) => (
+                          <option key={cat.id} value={cat.id}>
+                            {cat.name || cat.id}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                </div>
               </div>
             </div>
 
@@ -1197,46 +1658,123 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
             <ConsensusVisualizer metric={latestMetric} personas={personas} roundIndex={currentIteration} />
           )}
 
-          {/* Live Execution Terminal */}
+          {/* Live Execution Terminal (collapsed by default for a clean view) */}
           <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 shadow-xl space-y-2">
-            <div className="flex items-center justify-between text-xs border-b border-slate-800 pb-2">
+            <button
+              type="button"
+              onClick={() => setShowTerminal((v) => !v)}
+              className="w-full flex items-center justify-between text-xs cursor-pointer group"
+              aria-expanded={showTerminal}
+            >
               <div className="flex items-center gap-2 text-emerald-400 font-mono">
                 <Terminal size={14} />
                 <span>NEXUS-RUNTIME-TELEMETRY</span>
+                {terminalLogs.length > 0 && (
+                  <span className="text-slate-500 font-sans text-[10px]">
+                    {terminalLogs.length} log{terminalLogs.length === 1 ? '' : 's'}
+                  </span>
+                )}
               </div>
-              <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            </div>
+              <div className="flex items-center gap-2">
+                {isRunning && <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />}
+                <span className="text-[10px] text-slate-500 group-hover:text-slate-300">
+                  {showTerminal ? 'hide' : 'show'}
+                </span>
+                <ChevronDown
+                  size={14}
+                  className={`text-slate-500 transition-transform ${showTerminal ? 'rotate-180' : ''}`}
+                />
+              </div>
+            </button>
 
-            <div className="bg-slate-950 rounded-2xl p-3.5 font-mono text-[11px] text-emerald-300/90 max-h-48 overflow-y-auto space-y-1">
-              {terminalLogs.length === 0 ? (
-                <div className="text-slate-600 italic">Ready for autonomous execution...</div>
-              ) : (
-                terminalLogs.map((log, i) => <div key={i}>{log}</div>)
-              )}
-            </div>
+            {showTerminal && (
+              <div className="bg-slate-950 rounded-2xl p-3.5 font-mono text-[11px] text-emerald-300/90 max-h-48 overflow-y-auto space-y-1 border-t border-slate-800 pt-2.5">
+                {terminalLogs.length === 0 ? (
+                  <div className="text-slate-600 italic">Ready for autonomous execution...</div>
+                ) : (
+                  terminalLogs.map((log, i) => <div key={i}>{log}</div>)
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Iteration Findings Feed */}
+          {/* Iteration Findings Feed — clean by default: final verdict in full,
+              earlier cycles as one-liners. Toggle reveals the full thread. */}
           {rounds.length > 0 && (
             <div className="space-y-4">
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                <Layers size={14} className="text-emerald-400" />
-                <span>Synthesized Convergence Verdicts</span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                  <Layers size={14} className="text-emerald-400" />
+                  <span>Synthesized Convergence Verdicts</span>
+                </div>
+                {rounds.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowFullDeliberation((v) => !v)}
+                    className="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-500 px-2.5 py-1 rounded-lg cursor-pointer transition-colors"
+                    title="Toggle the full deliberation thread (all cycles, complete text)"
+                  >
+                    <ChevronDown size={12} className={`transition-transform ${showFullDeliberation ? 'rotate-180' : ''}`} />
+                    {showFullDeliberation ? 'Clean view' : 'Full deliberation'}
+                  </button>
+                )}
               </div>
 
-              {rounds.map((r, idx) => (
-                <div key={r.id} className="p-5 bg-slate-900/90 border border-slate-800 rounded-3xl shadow-xl space-y-3">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 text-xs">
-                    <span className="font-bold text-emerald-400">Cycle {idx + 1} Consensus</span>
-                    <span className="text-slate-400 font-mono text-[11px]">
-                      {new Date(r.timestamp || r.createdAt || Date.now()).toLocaleTimeString()}
-                    </span>
+              {/* Earlier cycles: one-line summary (or full, when expanded) */}
+              {rounds.slice(0, -1).map((r, idx) => {
+                const content = r.deliberation?.stage3?.content || '';
+                const score = r.deliberation?.stage3?.consensusMetric?.agreementScore;
+                return (
+                  <div key={r.id}>
+                    {showFullDeliberation ? (
+                      <div className="p-5 bg-slate-900/90 border border-slate-800 rounded-3xl shadow-xl space-y-3 mb-3">
+                        <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 text-xs">
+                          <span className="font-bold text-emerald-400">Cycle {idx + 1} Consensus</span>
+                          <span className="text-slate-400 font-mono text-[11px]">
+                            {new Date(r.timestamp || r.createdAt || Date.now()).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        {content && <MessageMarkdown content={content} />}
+                      </div>
+                    ) : (
+                      <div className="mb-2 flex items-baseline gap-2 px-4 py-2.5 bg-slate-900/60 border border-slate-800/80 rounded-2xl text-[11px] text-slate-400">
+                        <span className="font-bold text-emerald-400/90 shrink-0">
+                          Cycle {idx + 1}
+                        </span>
+                        {typeof score === 'number' && (
+                          <span className="shrink-0 font-mono text-cyan-300/90">{score}% aligned</span>
+                        )}
+                        <span className="truncate" title={content.replace(/\s+/g, ' ')}>
+                          {content ? content.replace(/^#+\s*/gm, '').replace(/[*_`>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 160) : 'No synthesis'}
+                        </span>
+                      </div>
+                    )}
                   </div>
-                  {r.deliberation?.stage3?.content && (
-                    <MessageMarkdown content={r.deliberation.stage3.content} />
-                  )}
-                </div>
-              ))}
+                );
+              })}
+
+              {/* Final cycle: always shown in full */}
+              {(() => {
+                const r = rounds[rounds.length - 1];
+                const idx = rounds.length - 1;
+                return (
+                  <div className="p-5 bg-slate-900/90 border border-emerald-800/40 rounded-3xl shadow-xl space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 text-xs">
+                      <span className="font-bold text-emerald-300">
+                        Cycle {idx + 1} Consensus {rounds.length > 1 && <span className="text-emerald-500/70 font-semibold">— Final Verdict</span>}
+                      </span>
+                      <span className="text-slate-400 font-mono text-[11px]">
+                        {new Date(r.timestamp || r.createdAt || Date.now()).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    {r.deliberation?.stage3?.content ? (
+                      <MessageMarkdown content={r.deliberation.stage3.content} />
+                    ) : (
+                      <div className="text-slate-500 italic">No synthesis recorded for this cycle.</div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>

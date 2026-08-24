@@ -43,6 +43,9 @@ export interface OracleThread {
   createdAt: number;
   updatedAt: number;
   model: string;
+  mode?: 'direct' | 'mini_deliberation' | 'rotation';
+  miniDeliberationModels?: string[];
+  rotationModels?: string[];
   reflectEnabled: boolean;
   webEnabled: boolean;
   rotateVoices: boolean;
@@ -60,13 +63,59 @@ const MAX_MESSAGES = 200;
 
 export const ORACLE_DEFAULT_MODEL = 'google/gemini-2.5-flash';
 
-export const ORACLE_MODEL_OPTIONS: { id: string; name: string; vision: boolean }[] = [
-  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', vision: true },
-  { id: 'openai/gpt-4o', name: 'GPT-4o', vision: true },
-  { id: 'anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet', vision: true },
-  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat', vision: false },
-  { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash Exp (Free)', vision: true },
+/**
+ * Curated frontier defaults (verified live against OpenRouter, Aug 2026).
+ * Kept to current frontier models only — the full catalog remains available
+ * in Settings → Oracle for manual picks.
+ */
+export const DEFAULT_MINI_DELIBERATION_MODELS: string[] = [
+  'anthropic/claude-sonnet-4.5',
+  'openai/gpt-5.1',
+  'google/gemini-2.5-flash',
 ];
+
+export const DEFAULT_ROTATION_ROSTER: string[] = [
+  'anthropic/claude-sonnet-4.5',
+  'openai/gpt-5.1',
+  'google/gemini-2.5-pro',
+  'google/gemini-3.7-flash',
+  'deepseek/deepseek-r1',
+];
+
+/** Oracle's curated model list — current frontier only (vision-accurate). */
+export const ORACLE_MODEL_OPTIONS: { id: string; name: string; tag?: string; vision: boolean }[] = [
+  { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', tag: 'Frontier', vision: true },
+  { id: 'openai/gpt-5.1', name: 'GPT-5.1', tag: 'Frontier', vision: true },
+  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', tag: 'Frontier', vision: true },
+  { id: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', tag: 'Fast Frontier', vision: true },
+  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', tag: 'Fast Workhorse', vision: true },
+  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', tag: 'Deep Reasoning', vision: false },
+];
+
+/**
+ * Fallback vision-capable model for image attachments when the chosen model
+ * is text-only (verified live, Aug 2026).
+ */
+export const VISION_SAFE_FALLBACK_MODEL = 'google/gemini-2.5-flash';
+
+/** Broadcast when Oracle threads are edited outside the Oracle view (Settings). */
+export const ORACLE_THREADS_UPDATED_EVENT = 'council-oracle-threads-updated';
+
+/** Patches a stored Oracle thread by id and persists + broadcasts the update. */
+export function patchOracleThread(
+  threadId: string,
+  patch: Partial<Omit<OracleThread, 'id'>>
+): OracleThread[] {
+  const threads = loadOracleThreads();
+  const updated = threads.map((t) => (t.id === threadId ? { ...t, ...patch, updatedAt: Date.now() } : t));
+  saveOracleThreads(updated);
+  try {
+    window.dispatchEvent(new CustomEvent(ORACLE_THREADS_UPDATED_EVENT));
+  } catch {
+    /* non-browser environment */
+  }
+  return updated;
+}
 
 export function newOracleThread(model: string = ORACLE_DEFAULT_MODEL): OracleThread {
   const now = Date.now();
@@ -76,6 +125,9 @@ export function newOracleThread(model: string = ORACLE_DEFAULT_MODEL): OracleThr
     createdAt: now,
     updatedAt: now,
     model,
+    mode: 'direct',
+    miniDeliberationModels: [...DEFAULT_MINI_DELIBERATION_MODELS],
+    rotationModels: [...DEFAULT_ROTATION_ROSTER],
     reflectEnabled: true,
     webEnabled: true,
     rotateVoices: true,

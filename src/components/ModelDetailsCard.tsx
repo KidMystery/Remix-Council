@@ -5,6 +5,9 @@ import {
   AlertTriangle,
   Info,
   Sparkles,
+  Eye,
+  EyeOff,
+  Activity,
 } from 'lucide-react';
 import { getModelDetails, ModelDetails } from '../lib/modelDetails';
 import { RawOpenRouterModel } from '../lib/presets';
@@ -83,6 +86,48 @@ export function ModelDetailsCard({
             <span className="font-mono text-xs font-semibold text-emerald-400">{details.costFormatted}</span>
           </div>
 
+          {/* Live/Vision capability badges (only shown when a live catalog is loaded) */}
+          {(details.health !== 'unknown' || details.hasVision !== null) && (
+            <div className="flex items-center gap-1.5">
+              {details.health === 'live' && (
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold uppercase tracking-wider"
+                  title="Verified present in the live OpenRouter catalog"
+                >
+                  <Activity size={10} />
+                  Live
+                </span>
+              )}
+              {details.health === 'delisted' && (
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-red-500/15 border border-red-500/40 text-red-300 text-[10px] font-bold uppercase tracking-wider"
+                  title="Not found in the live OpenRouter catalog — requests may fail or auto-substitute"
+                >
+                  <AlertTriangle size={10} />
+                  Delisted
+                </span>
+              )}
+              {details.hasVision === true && (
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 text-[10px] font-bold uppercase tracking-wider"
+                  title="Accepts image input"
+                >
+                  <Eye size={10} />
+                  Vision
+                </span>
+              )}
+              {details.hasVision === false && (
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-700/40 border border-slate-600/50 text-slate-300 text-[10px] font-bold uppercase tracking-wider"
+                  title="Text-only model — cannot read image attachments"
+                >
+                  <EyeOff size={10} />
+                  Text only
+                </span>
+              )}
+            </div>
+          )}
+
           {/* Cross-Preset Overlap Badge */}
           {details.alsoInPresets && (
             <div className="flex flex-wrap gap-1 justify-end">
@@ -108,6 +153,17 @@ export function ModelDetailsCard({
           <span>{details.selectionRationale}</span>
         </div>
       </div>
+
+      {/* Delisted warning */}
+      {details.health === 'delisted' && (
+        <div className="bg-red-950/40 border border-red-500/40 p-2 rounded-lg text-[11px] text-red-300 flex items-center gap-2">
+          <AlertTriangle size={13} className="text-red-400 shrink-0" />
+          <span>
+            Not in the live OpenRouter catalog. Requests with this model will be auto-substituted with a live
+            model (or fail in strict mode) — pick a model marked <strong>Live</strong> to be sure.
+          </span>
+        </div>
+      )}
 
       {/* Fallback Indicator if active */}
       {details.isFallback && (
