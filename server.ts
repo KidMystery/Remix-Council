@@ -6,6 +6,13 @@ import { GoogleGenAI, Modality } from '@google/genai';
 import { allocateCouncilSeats } from './src/lib/serverModelAllocator';
 import { pickBestFromCatalog, type ModelTier } from './src/lib/modelScoring';
 import { RoundCostLedger, modelRatesUSD, usageCostUSD, extractUsageFromSSEChunk } from './src/lib/costGovernor';
+import {
+  AgentLoopRunner,
+  sanitizeAgentSpec,
+  newAgentJobId,
+  DEFAULT_MAX_JOB_COST_USD,
+  type AgentJob,
+} from './src/server/agentLoop';
 
 // Works under both ESM (tsx dev) and the CJS production bundle (esbuild).
 const __filename =
@@ -645,6 +652,84 @@ export async function startServer(portOverride?: number) {
         error: error.message || 'Upstream LLM communication failure',
       });
     }
+  });
+
+  // 5b. Server-side Agent Loop — assess → plan → research → deliberate →
+  //     fact-check → answer, entirely on the server. Jobs survive tab closes
+  //     and are persisted to disk (bounded). Env knobs:
+  //       AGENT_DEFAULT_MODEL      (default google/gemini-2.5-flash)
+  //       AGENT_MAX_JOB_COST_USD   (default 2.00)
+  //       AGENT_DATA_DIR           (default ./data)
+  const agentDataDir = process.env.AGENT_DATA_DIR?.trim() || path.join(process.cwd(), 'data');
+  const getAgentDefaultModel = () =>
+    process.env.AGENT_DEFAULT_MODEL?.trim() || 'google/gemini-2.5-flash';
+  const getAgentMaxJobCost = () => {
+    const raw = parseFloat(String(process.env.AGENT_MAX_JOB_COST_USD || ''));
+    return !isNaN(raw) && raw > 0 ? raw : DEFAULT_MAX_JOB_COST_USD;
+  };
+  const agentRunner = new AgentLoopRunner(
+    {
+      catalog: () => cachedCatalog || [],
+      openRouterKey: () => process.env.OPENROUTER_API_KEY?.trim() || '',
+      defaultModel: getAgentDefaultModel,
+      defaultMaxJobCostUSD: getAgentMaxJobCost,
+    },
+    agentDataDir
+  );
+
+  const toAgentSummary = (job: AgentJob) => ({
+    id: job.id,
+    goal: job.spec.goal.slice(0, 120),
+    mode: job.spec.mode,
+    status: job.status,
+    progress: job.progress,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    finishedAt: job.finishedAt,
+    usageUSD: Number(job.usageUSD.toFixed(6)),
+    citations: job.citations.length,
+    error: job.error,
+  });
+
+  app.post('/api/agent', requireRateLimit, requireOwnerGate, (req, res) => {
+    const spec = sanitizeAgentSpec(req.body);
+    if ('error' in spec) {
+      return res.status(400).json({ error: spec.error });
+    }
+    const job: AgentJob = {
+      id: newAgentJobId(),
+      spec,
+      status: 'planning',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      plan: null,
+      research: [],
+      passes: [],
+      verdict: '',
+      citations: [],
+      usageUSD: 0,
+      progress: { phase: 'planning', detail: 'Job accepted — planning next.' },
+    };
+    // Fire-and-forget: the client polls job status; the loop persists every
+    // phase so a restart leaves an honest trail.
+    void agentRunner.run(job);
+    return res.status(202).json({ data: { id: job.id, status: job.status } });
+  });
+
+  app.get('/api/agent/jobs', requireOwnerGate, requireRateLimit, (_req, res) => {
+    return res.json({ data: agentRunner.list().slice(0, 20).map(toAgentSummary) });
+  });
+
+  app.get('/api/agent/jobs/:id', requireOwnerGate, requireRateLimit, (req, res) => {
+    const job = agentRunner.get(String(req.params.id || ''));
+    if (!job) return res.status(404).json({ error: 'Agent job not found.' });
+    return res.json({ data: job });
+  });
+
+  app.post('/api/agent/jobs/:id/cancel', requireOwnerGate, requireRateLimit, (req, res) => {
+    const ok = agentRunner.cancel(String(req.params.id || ''));
+    if (!ok) return res.status(404).json({ error: 'Agent job not found.' });
+    return res.json({ data: { cancelled: true } });
   });
 
   // 6. Client assets handling (Vite middleware in dev, static dist in production)

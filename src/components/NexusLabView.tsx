@@ -45,6 +45,13 @@ import { summarizeTitle } from '../lib/titleUtils';
 import { chunkDocuments, type DocumentChunkPlan } from '../lib/documentChunker';
 import { ZipFilesModal } from './ZipFilesModal';
 import { MessageMarkdown } from './MessageMarkdown';
+import {
+  launchAgentJob,
+  getAgentJob,
+  cancelAgentJob,
+  isAgentJobTerminal,
+} from '../lib/agentClient';
+import type { AgentJobFull } from '../lib/agentClient';
 import { ConsensusVisualizer } from './ConsensusVisualizer';
 
 export interface NexusLabViewProps {
@@ -295,6 +302,8 @@ interface PersistedMission {
   /** Night Shift morning-brief changelog (what changed overnight). */
   morningBrief?: string | null;
   nightShift?: { cycles: number; paceMinutes: number } | null;
+  /** Server-run agent job (re-attachable after a reload or tab close). */
+  serverJobId?: string | null;
 }
 
 function loadArchive(): PersistedMission[] {
@@ -447,6 +456,10 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [nightShiftCycles, setNightShiftCycles] = useState(5);
   const [nightShiftPaceMinutes, setNightShiftPaceMinutes] = useState(0);
   const [morningBrief, setMorningBrief] = useState<string | null>(null);
+  // Server-run missions: the agent loop lives in server.ts, survives tab close.
+  const [serverMode, setServerMode] = useState(false);
+  const [serverJobId, setServerJobId] = useState<string | null>(null);
+  const [serverJob, setServerJob] = useState<AgentJobFull | null>(null);
   const [documentPlan, setDocumentPlan] = useState<DocumentChunkPlan | null>(null);
 
   const [attachedFiles, setAttachedFiles] = useState<AttachedTextFile[]>([]);
@@ -502,11 +515,55 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         setNightShiftCycles(persisted.nightShift.cycles || 5);
         setNightShiftPaceMinutes(persisted.nightShift.paceMinutes || 0);
       }
+      if (persisted.serverJobId) {
+        setServerMode(true);
+        setServerJobId(persisted.serverJobId);
+      }
       if (persisted.attachedFiles && Array.isArray(persisted.attachedFiles)) {
         setAttachedFiles(persisted.attachedFiles);
       }
     }
   }, []);
+
+  // Poll an in-flight server agent job. Re-attaches after a reload or tab
+  // close; the job lives on the server, not in this component.
+  useEffect(() => {
+    if (!serverJobId) return;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const job = await getAgentJob(serverJobId);
+        if (stopped || !job) return;
+        setServerJob(job);
+        if (isAgentJobTerminal(job.status)) {
+          if (job.status === 'done' || job.status === 'stopped_budget') {
+            hydrateServerAgentJob(job);
+          } else if (job.status === 'failed') {
+            setIsRunning(false);
+            setMissionStatus('error');
+            addLog(`❌ Server mission failed: ${job.error || 'unknown error'}`);
+          } else if (job.status === 'cancelled' || job.status === 'interrupted') {
+            setIsRunning(false);
+            setMissionStatus('paused');
+            addLog(`⏸️ Server mission ${job.status === 'cancelled' ? 'cancelled' : 'interrupted'}.`);
+          }
+          return;
+        }
+        timeoutRef = window.setTimeout(tick, 4000);
+      } catch (err) {
+        if (!stopped) {
+          console.warn('[Nexus] Server job poll failed:', err);
+          timeoutRef = window.setTimeout(tick, 6000);
+        }
+      }
+    };
+    let timeoutRef = window.setTimeout(tick, 800);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timeoutRef);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverJobId]);
 
   const addLog = (msg: string) => {
     setTerminalLogs((prev) => [...prev.slice(-30), `[${new Date().toLocaleTimeString()}] ${msg}`]);
@@ -630,11 +687,157 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     const estCost = getEstimatedCost();
     setEstimatedMissionCost(estCost);
 
+    if (serverMode) {
+      startServerAgentExecution();
+      return;
+    }
+
     if (estCost > costCeiling.requireApprovalAboveDollars && costCeiling.requireApprovalAboveDollars > 0) {
       setShowCostApprovalModal(true);
     } else {
       startAutonomousExecution();
     }
+  };
+
+  /**
+   * Server-run mission: plan → research → falsify → Morning Brief, executed
+   * inside server.ts. Survives tab close; polls until a terminal state.
+   */
+  const startServerAgentExecution = async () => {
+    setShowCostApprovalModal(false);
+    setIsRunning(true);
+    pauseRequestedRef.current = false;
+    setMissionStatus('running');
+    setMorningBrief(null);
+    const title = summarizeTitle(missionGoal);
+    setMissionTitle(title);
+
+    const attachmentContext =
+      attachedFiles.length > 0
+        ? attachedFiles.map((f) => `--- File: ${f.name} ---\n${f.content.slice(0, 8000)}`).join('\n\n')
+        : '';
+    const carriedContext = followUpContext ? `[Prior Mission Consensus Memory]\n${followUpContext.slice(0, 6000)}` : '';
+    const context = [carriedContext, attachmentContext].filter(Boolean).join('\n\n');
+
+    const budget = enginePreset === 'fast_and_free' ? 'free' : 'cheap';
+    const capRaw = costCeiling.requireApprovalAboveDollars;
+    const jobCap = capRaw > 0 ? Math.min(25, Math.max(0.5, capRaw)) : undefined;
+
+    addLog(`☁️ Launching server-side mission (plan → research → falsify → Morning Brief)...`);
+    try {
+      const { id } = await launchAgentJob({
+        goal: missionGoal,
+        mode: 'nexus',
+        context: context || undefined,
+        model: activeRosterSynthesizer?.model,
+        budget,
+        maxResearchQueries: enableWebGrounding ? 3 : 0,
+        maxDeliberationPasses: nightShiftEnabled ? nightShiftCycles : maxIterations,
+        pacedMinutes: nightShiftEnabled ? nightShiftPaceMinutes : 0,
+        maxJobCostUSD: jobCap,
+      });
+      setServerJobId(id);
+      persistMission({
+        id: `nexus_${Date.now()}`,
+        goal: missionGoal,
+        title,
+        presetId: activePreset,
+        maxIterations,
+        currentIteration: 0,
+        status: 'running',
+        rounds,
+        consensusMetrics,
+        estimatedCost: getEstimatedCost(),
+        attachedFiles,
+        morningBrief: null,
+        nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
+        serverJobId: id,
+        updatedAt: Date.now(),
+      });
+      addLog(`📡 Server mission ${id} accepted — you can close this tab; it keeps working.`);
+    } catch (err: any) {
+      setIsRunning(false);
+      setMissionStatus('error');
+      addLog(`❌ Failed to launch server mission: ${err.message}`);
+    }
+  };
+
+  /** Fold a finished server job back into the mission view. */
+  const hydrateServerAgentJob = (job: AgentJobFull) => {
+    addLog(`🏁 Server mission finished (${job.usageUSD.toFixed(4)} USD) — hydrating results...`);
+    const hydratedRounds: CouncilRound[] = job.passes.map((p, i) => ({
+      id: `server_${job.id}_pass_${p.index}`,
+      userQuery: `[Server mission pass ${p.index}] ${missionGoal}`,
+      timestamp: Date.now() + i,
+      mode: 'nexus_lab',
+      attachedTextFiles: [...attachedFiles],
+      deliberation: { stage1: {}, stage2: {} },
+      synthesis: {
+        content: p.consensus,
+        status: 'completed',
+        model: job.spec?.model || '',
+        consensusMetric: {
+          agreementScore: p.agreementScore ?? 50,
+          keyConsensusPoints: [],
+          keyDisagreements: [],
+          panelistAlignment: {},
+        },
+      },
+    }));
+    if (job.verdict) {
+      hydratedRounds.push({
+        id: `server_${job.id}_final`,
+        userQuery: `[Server mission final verdict] ${missionGoal}`,
+        timestamp: Date.now() + hydratedRounds.length,
+        mode: 'nexus_lab',
+        attachedTextFiles: [...attachedFiles],
+        deliberation: { stage1: {}, stage2: {} },
+        synthesis: {
+          content: job.verdict,
+          status: 'completed',
+          model: job.spec?.model || '',
+          grounding: { sources: job.citationsList || [], queries: [] },
+          consensusMetric: {
+            agreementScore: job.passes[job.passes.length - 1]?.agreementScore ?? 50,
+            keyConsensusPoints: [],
+            keyDisagreements: [],
+            panelistAlignment: {},
+          },
+        },
+      });
+    }
+    const metrics = job.passes
+      .filter((p) => typeof p.agreementScore === 'number')
+      .map((p) => ({
+        agreementScore: p.agreementScore!,
+        keyConsensusPoints: [] as string[],
+        keyDisagreements: [] as string[],
+        panelistAlignment: {} as Record<string, number>,
+      }));
+    const lastScore = job.passes[job.passes.length - 1]?.agreementScore ?? 50;
+    setRounds(hydratedRounds);
+    setConsensusMetrics(metrics);
+    setMorningBrief(job.brief || null);
+    setIsRunning(false);
+    setMissionStatus(job.status === 'done' ? (lastScore >= 85 ? 'converged' : 'max_reached') : 'max_reached');
+    persistMission({
+      id: `nexus_${Date.now()}`,
+      goal: missionGoal,
+      title: missionTitle,
+      presetId: activePreset,
+      maxIterations,
+      currentIteration: job.passes.length,
+      status: job.status === 'done' ? (lastScore >= 85 ? 'converged' : 'max_reached') : 'max_reached',
+      rounds: hydratedRounds,
+      consensusMetrics: metrics,
+      estimatedCost: job.usageUSD,
+      attachedFiles,
+      morningBrief: job.brief || null,
+      nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
+      serverJobId: job.id,
+      updatedAt: Date.now(),
+    });
+    addLog(`✨ Server mission complete — ${job.passes.length} pass(es), ${job.research.length} research item(s), ${(job.citationsList || []).length} source(s).`);
   };
 
   const startAutonomousExecution = async () => {
@@ -1056,7 +1259,12 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     pauseRequestedRef.current = true;
     setIsRunning(false);
     setMissionStatus('paused');
-    addLog(`⏸️ Nexus Lab Mission paused.`);
+    if (serverJobId) {
+      void cancelAgentJob(serverJobId).catch(() => {});
+      addLog(`⏸️ Nexus Lab Mission paused — server job cancelled.`);
+    } else {
+      addLog(`⏸️ Nexus Lab Mission paused.`);
+    }
   };
 
   const handleReset = () => {
@@ -1075,6 +1283,10 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setShowDossier(false);
     setMorningBrief(null);
     setNightShiftEnabled(false);
+    if (serverJobId) void cancelAgentJob(serverJobId).catch(() => {});
+    setServerJobId(null);
+    setServerJob(null);
+    setServerMode(false);
     persistMission(null);
     addLog(`🔄 Nexus Lab reset to standby.`);
   };
@@ -1118,6 +1330,10 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setTerminalLogs([]);
     setMorningBrief(null);
     setNightShiftEnabled(false);
+    if (serverJobId) void cancelAgentJob(serverJobId).catch(() => {});
+    setServerJobId(null);
+    setServerJob(null);
+    setServerMode(false);
     persistMission(null);
     addLog(`🔁 Follow-up directive set. Prior mission consensus carried forward.`);
   };
@@ -1747,6 +1963,28 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                   </div>
                 )}
               </div>
+
+              <div className="p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <div className="flex items-center gap-2 text-xs text-slate-300">
+                    <Moon size={14} className="text-sky-300" />
+                    <div>
+                      <div>☁️ Run on server</div>
+                      <div className="text-[10px] text-slate-500 font-normal">
+                        The agent loop runs server-side (plan → research → falsify → Morning Brief).
+                        Close the tab and it keeps working; the result hydrates on your return.
+                      </div>
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={serverMode}
+                    onChange={(e) => setServerMode(e.target.checked)}
+                    disabled={isRunning}
+                    className="rounded text-sky-500 focus:ring-0"
+                  />
+                </label>
+              </div>
             </div>
 
             {/* Execution Buttons */}
@@ -1764,9 +2002,13 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                       ? 'Resume Cycle'
                       : deepDocumentMode
                         ? 'Run Deep Review'
-                        : nightShiftEnabled && executionMode !== 'mini_deliberation'
-                          ? '🌙 Run Night Shift'
-                          : 'Execute Nexus Lab'}
+                        : serverMode
+                          ? nightShiftEnabled && executionMode !== 'mini_deliberation'
+                            ? '🌙☁️ Night Shift on Server'
+                            : '☁️ Run on Server'
+                          : nightShiftEnabled && executionMode !== 'mini_deliberation'
+                            ? '🌙 Run Night Shift'
+                            : 'Execute Nexus Lab'}
                   </span>
                 </button>
               ) : (
@@ -1887,6 +2129,35 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               </div>
             )}
           </div>
+
+          {/* Live server mission progress (plan → research → falsify → brief) */}
+          {serverJob && isRunning && (
+            <div className="p-5 bg-slate-900/90 border border-sky-700/50 rounded-3xl shadow-xl space-y-2.5">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2 text-xs">
+                <span className="font-bold text-sky-300 flex items-center gap-2">
+                  <Loader2 size={13} className="animate-spin" />
+                  Server Mission — {serverJob.progress.phase}
+                </span>
+                <span className="font-mono text-[11px] text-slate-400">${serverJob.usageUSD.toFixed(4)} USD</span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">{serverJob.progress.detail}</p>
+              {serverJob.plan && (
+                <div className="text-[11px] text-slate-400 leading-relaxed">
+                  <span className="text-slate-300 font-semibold">Plan: </span>
+                  {serverJob.plan.summary}
+                </div>
+              )}
+              <div className="flex items-center gap-3 text-[10px] font-mono text-slate-500 flex-wrap">
+                <span>research: {serverJob.research.length}</span>
+                <span>passes: {serverJob.passes.length}</span>
+                <span>sources: {serverJob.citations}</span>
+                {serverJob.spec?.model && <span>model: {serverJob.spec.model.split('/').pop()}</span>}
+              </div>
+              <p className="text-[10px] text-slate-500">
+                You can close this tab — the mission keeps running on the server.
+              </p>
+            </div>
+          )}
 
           {/* Night Shift Morning Brief — the "what changed overnight" changelog */}
           {morningBrief && rounds.length > 0 && (

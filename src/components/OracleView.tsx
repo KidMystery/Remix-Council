@@ -70,6 +70,8 @@ import {
 } from '../lib/briefingDetector';
 import type { OracleCustomModel } from '../lib/oracleModelPool';
 import type { BriefingCandidate } from '../lib/briefingDetector';
+import { launchAgentJob, getAgentJob, cancelAgentJob, isAgentJobTerminal } from '../lib/agentClient';
+import type { AgentJobFull } from '../lib/agentClient';
 import { modelHasVision } from '../lib/modelScoring';
 import { streamOpenRouterCompletion } from '../lib/openrouter';
 import { streamWithTokenGovernor } from '../lib/tokenGovernor';
@@ -137,6 +139,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
   const [customModels, setCustomModels] = useState<OracleCustomModel[]>(() => loadCustomOracleModels());
   const [briefingStoreVersion, setBriefingStoreVersion] = useState(0);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
+  // Server-run briefing (the agent loop lives in server.ts; survives tab close).
+  const [serverBriefingJob, setServerBriefingJob] = useState<AgentJobFull | null>(null);
+  const serverBriefingIdRef = useRef<string | null>(null);
   const [threadDraftTitle, setThreadDraftTitle] = useState('');
   const [confirmClearThreadId, setConfirmClearThreadId] = useState<string | null>(null);
 
@@ -338,6 +343,115 @@ export const OracleView: React.FC<OracleViewProps> = ({
 
   const handleDismissBriefing = () => {
     if (briefingCandidate) dismissBriefingTopic(briefingCandidate.key);
+  };
+
+  /**
+   * Server-run briefing: the agent loop plans, researches (live citations),
+   * and deliberates inside server.ts, then folds the verdict back into a
+   * briefing thread. Survives tab close.
+   */
+  const handleConveneBriefingOnServer = async () => {
+    const candidate = briefingCandidate;
+    if (!candidate || isBusy || serverBriefingIdRef.current) return;
+    const model = activeThread?.model || ORACLE_DEFAULT_MODEL;
+    try {
+      const { id } = await launchAgentJob({
+        goal: `Convene a council briefing on this recurring question: ${candidate.label}. My latest framing: ${candidate.sample}`,
+        mode: 'oracle',
+        model,
+        budget: 'cheap',
+        maxResearchQueries: 3,
+        maxDeliberationPasses: 1,
+        maxJobCostUSD: 1.0,
+      });
+      serverBriefingIdRef.current = id;
+      setServerBriefingJob({
+        id,
+        goal: candidate.label,
+        mode: 'oracle',
+        status: 'planning',
+        progress: { phase: 'planning', detail: 'Server briefing launched — you can close this tab.' },
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        usageUSD: 0,
+        citations: 0,
+        plan: null,
+        research: [],
+        passes: [],
+        verdict: '',
+        citationsList: [],
+      });
+      recordBriefingConvened(candidate.key);
+      const tick = async () => {
+        const jobId = serverBriefingIdRef.current;
+        if (!jobId) return;
+        try {
+          const job = await getAgentJob(jobId);
+          if (!job) return;
+          setServerBriefingJob(job);
+          if (!isAgentJobTerminal(job.status)) {
+            window.setTimeout(tick, 4000);
+            return;
+          }
+          serverBriefingIdRef.current = null;
+          // Fold the verdict into a new briefing thread.
+          const t = newOracleThread(model);
+          t.title = `Council Briefing — ${capitalizeLabel(candidate.label)}`;
+          t.mode = 'mini_deliberation';
+          t.webEnabled = activeThread?.webEnabled ?? true;
+          t.reflectEnabled = activeThread?.reflectEnabled ?? true;
+          t.rotateVoices = false;
+          const sourcesBlock =
+            (job.citationsList || []).length > 0
+              ? `\n\n**Sources**\n${job.citationsList
+                  .slice(0, 8)
+                  .map((s) => `- [${s.title || s.url}](${s.url})`)
+                  .join('\n')}`
+              : '';
+          const content =
+            job.status === 'done'
+              ? `${job.verdict}${sourcesBlock}`
+              : `⚠️ The server briefing ${job.status === 'stopped_budget' ? 'hit its cost cap before finishing' : job.status === 'failed' ? 'failed' : 'was interrupted'}. What it had so far:\n\n${job.passes[job.passes.length - 1]?.consensus || job.error || '(nothing)'}`;
+          t.messages = [
+            {
+              id: `brief_${Date.now()}`,
+              role: 'user',
+              content: `Please convene a full mini-council on this recurring question: ${candidate.label}\n\nMy latest framing:\n${candidate.sample}`,
+              timestamp: Date.now(),
+            },
+            {
+              id: `brief_${Date.now()}_a`,
+              role: 'assistant',
+              content,
+              model,
+              timestamp: Date.now() + 1,
+            },
+          ];
+          t.updatedAt = Date.now();
+          const next = [t, ...threadsRef.current];
+          threadsRef.current = next;
+          setThreads(next);
+          setActiveId(t.id);
+          saveOracleThreads(next);
+          setServerBriefingJob(null);
+        } catch (err) {
+          console.warn('[Oracle] Server briefing poll failed:', err);
+          window.setTimeout(tick, 6000);
+        }
+      };
+      window.setTimeout(tick, 1500);
+    } catch (err: any) {
+      console.warn('[Oracle] Server briefing launch failed:', err);
+      setServerBriefingJob(null);
+    }
+  };
+
+  const handleCancelServerBriefing = () => {
+    const id = serverBriefingIdRef.current;
+    if (!id) return;
+    void cancelAgentJob(id).catch(() => {});
+    serverBriefingIdRef.current = null;
+    setServerBriefingJob(null);
   };
 
   const handleClearActiveThreadMessages = (threadId: string) => {
@@ -953,12 +1067,21 @@ export const OracleView: React.FC<OracleViewProps> = ({
               <button
                 type="button"
                 onClick={handleConveneBriefing}
-                disabled={isBusy}
+                disabled={isBusy || Boolean(serverBriefingJob)}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-xs font-bold cursor-pointer shadow-md transition-colors"
                 title="Convene a mini-council to settle this recurring question"
               >
                 <Sparkles size={13} />
                 Convene mini-council
+              </button>
+              <button
+                type="button"
+                onClick={handleConveneBriefingOnServer}
+                disabled={isBusy || Boolean(serverBriefingJob)}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs text-sky-300 hover:text-sky-200 border border-sky-700/60 hover:border-sky-500 cursor-pointer disabled:opacity-50"
+                title="Run the briefing on the server: it plans, researches with live citations, and deliberates — close the tab and it keeps working"
+              >
+                ☁ on server
               </button>
               <button
                 type="button"
@@ -970,6 +1093,28 @@ export const OracleView: React.FC<OracleViewProps> = ({
                 Later
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Live server-briefing progress */}
+        {serverBriefingJob && (
+          <div className="flex items-center gap-3 flex-wrap p-3 bg-sky-950/50 border border-sky-700/50 rounded-2xl text-xs">
+            <Loader2 size={14} className="text-sky-300 animate-spin shrink-0" />
+            <div className="flex-1 min-w-[200px] text-slate-300">
+              <span className="font-semibold text-sky-200">Server briefing</span> —{' '}
+              {serverBriefingJob.progress.detail}
+              {serverBriefingJob.usageUSD > 0 && (
+                <span className="font-mono text-[10px] text-slate-400"> · ${serverBriefingJob.usageUSD.toFixed(4)} USD</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={handleCancelServerBriefing}
+              className="text-[11px] text-slate-400 hover:text-red-300 border border-slate-700 hover:border-red-500/60 px-2 py-1 rounded-lg cursor-pointer"
+              title="Cancel the server briefing"
+            >
+              Cancel
+            </button>
           </div>
         )}
 
