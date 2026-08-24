@@ -2,6 +2,8 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { z } from 'zod';
+import { GoogleGenAI, Modality } from '@google/genai';
+import { allocateCouncilSeats } from './src/lib/serverModelAllocator';
 
 // Works under both ESM (tsx dev) and the CJS production bundle (esbuild).
 const __filename =
@@ -17,9 +19,57 @@ export function resolvePort(raw?: string | number): number {
 
 const PORT = resolvePort(process.env.PORT);
 
-// Model validation pattern
-const ALLOWED_MODEL_PATTERN =
-  /^(google\/[a-z0-9.-]+|anthropic\/[a-z0-9.-]+|openai\/[a-z0-9.-]+|deepseek\/[a-z0-9.-]+|meta-llama\/[a-z0-9.-]+|nvidia\/[a-z0-9.-]+|qwen\/[a-z0-9.-]+|mistralai\/[a-z0-9.-]+|poolside\/[a-z0-9.-]+|inclusionai\/[a-z0-9.-]+)(:[a-z]+)?$/i;
+// Lazy Gemini GenAI client initialization
+let geminiClient: GoogleGenAI | null = null;
+function getGeminiClient(): GoogleGenAI {
+  if (!geminiClient) {
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) {
+      throw new Error('GEMINI_API_KEY is not configured on the server.');
+    }
+    geminiClient = new GoogleGenAI({
+      apiKey: key,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
+  return geminiClient;
+}
+
+// Packages raw 16-bit linear PCM audio into a standard 44-byte WAV container
+function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
+  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const dataSize = pcmBuffer.length;
+  const header = Buffer.alloc(44);
+
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+const TtsRequestSchema = z.object({
+  text: z.string().min(1).max(10000),
+  voice: z.enum(['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr']).optional(),
+});
+
+// Model validation pattern: allows standard provider/model(:variant) formats
+const ALLOWED_MODEL_PATTERN = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(:[a-zA-Z0-9_.-]+)?$/;
 
 // Deliberation payload schema
 const CouncilRequestSchema = z.object({
@@ -196,6 +246,44 @@ export async function startServer(portOverride?: number) {
     }
   });
 
+  // 3b. Model Allocation Endpoint
+  app.post('/api/council/allocate', requireCouncilAuth, requireRateLimit, async (req, res) => {
+    try {
+      const AllocationRequestSchema = z.object({
+        domain: z.enum(['code', 'math', 'finance', 'creative', 'general']).default('general'),
+        budgetTier: z.enum(['free', 'cheap', 'quality']).default('cheap'),
+        personas: z.array(z.object({ id: z.string(), name: z.string(), role: z.string(), model: z.string().optional() })),
+        synthesizer: z.object({ id: z.string(), name: z.string(), role: z.string(), model: z.string().optional() }),
+        humanOverrides: z.record(z.string(), z.string()).optional(),
+      });
+
+      const parsed = AllocationRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'Invalid allocation parameters', details: parsed.error.issues });
+      }
+
+      // Refresh catalog if needed
+      const now = Date.now();
+      if (!cachedCatalog || now - lastCatalogFetchTime > CATALOG_CACHE_TTL_MS) {
+        const resp = await fetch('https://openrouter.ai/api/v1/models');
+        if (resp.ok) {
+          const data = await resp.json();
+          cachedCatalog = data.data || [];
+          lastCatalogFetchTime = now;
+        }
+      }
+
+      const plan = allocateCouncilSeats({
+        ...parsed.data,
+        catalog: cachedCatalog || [],
+      });
+
+      return res.json({ data: plan });
+    } catch (err: any) {
+      return res.status(500).json({ error: 'Allocation failed', message: err.message });
+    }
+  });
+
   // 4. Account balance route
   app.get('/api/council/account', requireCouncilAuth, async (_req, res) => {
     const openrouterKey = process.env.OPENROUTER_API_KEY;
@@ -233,6 +321,78 @@ export async function startServer(portOverride?: number) {
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Failed to fetch OpenRouter account' });
+    }
+  });
+
+  // 4b. Studio-Grade Google Neural Text-to-Speech (Gemini Flash TTS)
+  app.post('/api/tts', requireRateLimit, async (req, res) => {
+    const parseResult = TtsRequestSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({ error: 'Invalid TTS request payload', details: parseResult.error.issues });
+    }
+
+    const { text, voice = 'Kore' } = parseResult.data;
+
+    // Clean text: strip markdown fences, links, headings, citations, formatting
+    const cleanText = text
+      .replace(/```[\s\S]*?```/g, ' Code snippet omitted. ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/https?:\/\/\S+/g, '')
+      .replace(/^[#*>\-\s]+/gm, '')
+      .replace(/[*_~`]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!cleanText) {
+      return res.status(400).json({ error: 'No readable speech text provided.' });
+    }
+
+    // Limit text to ~2000 characters for high-speed, instant neural generation
+    const textToSpeak = cleanText.length > 2000 ? cleanText.substring(0, 2000) + '...' : cleanText;
+
+    try {
+      const ai = getGeminiClient();
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-tts-preview',
+        contents: [{ parts: [{ text: textToSpeak }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: voice },
+            },
+          },
+        },
+      });
+
+      const part = response.candidates?.[0]?.content?.parts?.[0];
+      const base64Audio = part?.inlineData?.data;
+
+      if (!base64Audio) {
+        throw new Error('No audio returned from Gemini TTS model.');
+      }
+
+      const rawBuffer = Buffer.from(base64Audio, 'base64');
+      let wavBase64 = base64Audio;
+      // If raw linear PCM, wrap in standard WAV container header
+      if (rawBuffer.length < 4 || rawBuffer.toString('utf8', 0, 4) !== 'RIFF') {
+        const wavBuffer = pcmToWav(rawBuffer, 24000, 1, 16);
+        wavBase64 = wavBuffer.toString('base64');
+      }
+
+      return res.json({
+        audio: `data:audio/wav;base64,${wavBase64}`,
+        voice,
+        format: 'audio/wav',
+        model: 'gemini-3.1-flash-tts-preview',
+      });
+    } catch (err: any) {
+      console.warn('[Gemini TTS generation error]', err);
+      return res.status(500).json({
+        error: err?.message || 'Failed to generate speech with Gemini TTS',
+        fallbackToWebSpeech: true,
+      });
     }
   });
 

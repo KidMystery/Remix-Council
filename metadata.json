@@ -1,7 +1,9 @@
 {
   "name": "Remix AI Council Chamber",
   "description": "A multi-LLM deliberation tool that synthesizes consensus through a 3-stage pipeline.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "microphone"
+  ],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
