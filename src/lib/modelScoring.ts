@@ -17,6 +17,11 @@ const ROUTER_IDS = new Set([
   'openrouter/validated',
 ]);
 
+/** True when a (normalized, lowercase) model id is an OpenRouter router alias. */
+export function isOpenRouterRouterId(id: string): boolean {
+  return ROUTER_IDS.has(String(id || '').trim().toLowerCase());
+}
+
 export function parsePrice(v: unknown): number {
   const n = parseFloat(String(v ?? '0'));
   return Number.isFinite(n) && n >= 0 ? n : 0;
@@ -50,7 +55,7 @@ export function modelPricePerM(m: RawOpenRouterModel): number {
 export function isUsableCatalogModel(m: RawOpenRouterModel | null | undefined): m is RawOpenRouterModel {
   if (!m || !m.id) return false;
   const id = String(m.id).toLowerCase();
-  if (ROUTER_IDS.has(id)) return false;
+  if (isOpenRouterRouterId(id)) return false;
   if (!id.includes('/')) return false;
   if (id.startsWith('local/') || id.startsWith('ollama/') || id.startsWith('lmstudio/')) return false;
   return true;

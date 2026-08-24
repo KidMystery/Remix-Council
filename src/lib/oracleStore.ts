@@ -6,6 +6,8 @@
  * A separate global Bible persists knowledge across all threads.
  */
 
+import type { OracleCustomModel } from './oracleModelPool';
+
 export interface OracleImage {
   name: string;
   /** data URL (base64) of the attached image */
@@ -64,9 +66,9 @@ const MAX_MESSAGES = 200;
 export const ORACLE_DEFAULT_MODEL = 'google/gemini-2.5-flash';
 
 /**
- * Curated frontier defaults (verified live against OpenRouter, Aug 2026).
+ * Curated frontier defaults (verified live against OpenRouter, Aug 24 2026).
  * Kept to current frontier models only — the full catalog remains available
- * in Settings → Oracle for manual picks.
+ * in Settings → Oracle for manual picks, plus any custom id the owner adds.
  */
 export const DEFAULT_MINI_DELIBERATION_MODELS: string[] = [
   'anthropic/claude-sonnet-4.5',
@@ -79,17 +81,24 @@ export const DEFAULT_ROTATION_ROSTER: string[] = [
   'openai/gpt-5.1',
   'google/gemini-2.5-pro',
   'google/gemini-3.7-flash',
-  'deepseek/deepseek-r1',
+  'deepseek/deepseek-v4-flash-0731',
 ];
 
-/** Oracle's curated model list — current frontier only (vision-accurate). */
+/**
+ * Oracle's curated model list — current frontier only, every id live-checked
+ * against the OpenRouter catalog on Aug 24 2026. Vision flags come from each
+ * model's actual catalog architecture (input_modalities), not guesswork.
+ */
 export const ORACLE_MODEL_OPTIONS: { id: string; name: string; tag?: string; vision: boolean }[] = [
   { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', tag: 'Frontier', vision: true },
+  { id: 'anthropic/claude-fable-5', name: 'Claude Fable 5', tag: 'Flagship', vision: true },
   { id: 'openai/gpt-5.1', name: 'GPT-5.1', tag: 'Frontier', vision: true },
   { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', tag: 'Frontier', vision: true },
   { id: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', tag: 'Fast Frontier', vision: true },
   { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', tag: 'Fast Workhorse', vision: true },
-  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', tag: 'Deep Reasoning', vision: false },
+  { id: 'meta/muse-spark-1.2', name: 'Muse Spark 1.2', tag: 'Frontier', vision: true },
+  { id: 'z-ai/glm-5.3', name: 'GLM 5.3', tag: 'Reasoning', vision: false },
+  { id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek V4 Flash', tag: 'Fast Frontier', vision: false },
 ];
 
 /**
@@ -185,8 +194,23 @@ export function saveGlobalBible(bible: OracleBible): void {
   }
 }
 
-export function exportOracleThreads(threads: OracleThread[], globalBible: OracleBible): string {
-  return JSON.stringify({ version: 1, exportedAt: Date.now(), threads, globalBible }, null, 2);
+export function exportOracleThreads(
+  threads: OracleThread[],
+  globalBible: OracleBible,
+  extras?: { customModels?: OracleCustomModel[]; directList?: string[] }
+): string {
+  return JSON.stringify(
+    {
+      version: 1,
+      exportedAt: Date.now(),
+      threads,
+      globalBible,
+      customModels: extras?.customModels,
+      directList: extras?.directList,
+    },
+    null,
+    2
+  );
 }
 
 export function importOracleThreads(jsonString: string): {
@@ -194,6 +218,7 @@ export function importOracleThreads(jsonString: string): {
   message: string;
   threads?: OracleThread[];
   globalBible?: OracleBible;
+  extras?: { customModels?: OracleCustomModel[]; directList?: string[] };
 } {
   let parsed: any;
   try {
@@ -204,10 +229,22 @@ export function importOracleThreads(jsonString: string): {
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.threads)) {
     return { success: false, message: 'Invalid import format: expected an object with a "threads" array.' };
   }
+  const extras =
+    Array.isArray(parsed.customModels) || Array.isArray(parsed.directList)
+      ? {
+          customModels: Array.isArray(parsed.customModels)
+            ? (parsed.customModels.filter((m: any) => m && typeof m.id === 'string') as OracleCustomModel[])
+            : undefined,
+          directList: Array.isArray(parsed.directList)
+            ? (parsed.directList.filter((x: any) => typeof x === 'string') as string[])
+            : undefined,
+        }
+      : undefined;
   return {
     success: true,
     message: `Imported ${parsed.threads.length} thread(s).`,
     threads: parsed.threads as OracleThread[],
     globalBible: parsed.globalBible as OracleBible | undefined,
+    extras,
   };
 }

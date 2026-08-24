@@ -341,7 +341,7 @@ export function SettingsPanel({
           )}
 
           {activeTab === 'oracle_bible' && (
-            <SettingsOracleBibleTab />
+            <SettingsOracleBibleTab catalog={rawModelsCatalog} />
           )}
 
           {activeTab === 'theme' && (

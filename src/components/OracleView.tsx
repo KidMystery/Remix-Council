@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Plus,
   Trash2,
@@ -26,9 +26,6 @@ import {
   Cloud,
   Sliders,
   ChevronDown,
-  Search,
-  Dices,
-  Shuffle,
   Pencil,
   Eraser,
   AlertCircle,
@@ -47,12 +44,21 @@ import {
   saveGlobalBible,
   exportOracleThreads,
   importOracleThreads,
-  ORACLE_MODEL_OPTIONS,
   DEFAULT_MINI_DELIBERATION_MODELS,
   DEFAULT_ROTATION_ROSTER,
   VISION_SAFE_FALLBACK_MODEL,
   ORACLE_THREADS_UPDATED_EVENT,
 } from '../lib/oracleStore';
+import {
+  buildOracleModelOptions,
+  loadCustomOracleModels,
+  saveCustomOracleModels,
+  loadOracleDirectList,
+  saveOracleDirectList,
+  resolveRotationModel,
+  filterVisionSafeRoster,
+} from '../lib/oracleModelPool';
+import type { OracleCustomModel } from '../lib/oracleModelPool';
 import { modelHasVision } from '../lib/modelScoring';
 import { streamOpenRouterCompletion } from '../lib/openrouter';
 import { streamWithTokenGovernor } from '../lib/tokenGovernor';
@@ -117,12 +123,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [driveSyncState, setDriveSyncState] = useState<'idle' | 'syncing' | 'saved' | 'error'>('idle');
   const [lastDriveSync, setLastDriveSync] = useState<number | null>(null);
-  const [showRosterModal, setShowRosterModal] = useState(false);
-  const [searchModelQuery, setSearchModelQuery] = useState('');
+  const [customModels, setCustomModels] = useState<OracleCustomModel[]>(() => loadCustomOracleModels());
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
   const [threadDraftTitle, setThreadDraftTitle] = useState('');
-  const [randomizeFlash, setRandomizeFlash] = useState(false);
-  const [randomizedModelName, setRandomizedModelName] = useState<string | null>(null);
   const [confirmClearThreadId, setConfirmClearThreadId] = useState<string | null>(null);
 
   const threadsRef = useRef(threads);
@@ -140,6 +143,8 @@ export const OracleView: React.FC<OracleViewProps> = ({
       threadsRef.current = loaded;
       setThreads(loaded);
       setActiveId((prev) => (loaded.some((t) => t.id === prev) ? prev : loaded[0]?.id || null));
+      // The custom model pool / direct palette may have changed too.
+      setCustomModels(loadCustomOracleModels());
     };
     window.addEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
     return () => window.removeEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
@@ -160,42 +165,12 @@ export const OracleView: React.FC<OracleViewProps> = ({
     }
   }, [threads.length]);
 
-  // Combine built-in curated options with live catalog models and availableModels
-  const combinedModelOptions = React.useMemo(() => {
-    const map = new Map<string, { id: string; name: string; tag?: string; vision: boolean }>();
-    // Seed curated
-    for (const opt of ORACLE_MODEL_OPTIONS) {
-      map.set(opt.id, opt);
-    }
-    // Seed available (vision flag from the live catalog when it's loaded)
-    for (const m of availableModels) {
-      if (!map.has(m.id)) {
-        const entry = Array.isArray(catalog)
-          ? catalog.find((c) => c?.id?.toLowerCase() === m.id.toLowerCase())
-          : undefined;
-        map.set(m.id, {
-          id: m.id,
-          name: m.name || m.id.split('/').pop() || m.id,
-          tag: 'Catalog',
-          vision: entry ? modelHasVision(entry) : true,
-        });
-      }
-    }
-    // Seed catalog
-    if (Array.isArray(catalog)) {
-      for (const m of catalog) {
-        if (!map.has(m.id)) {
-          map.set(m.id, {
-            id: m.id,
-            name: m.name || m.id.split('/').pop() || m.id,
-            tag: m.pricing?.prompt === '0' || m.id.endsWith(':free') ? 'Free Tier' : 'Catalog',
-            vision: Boolean(m.architecture?.modality?.includes('image->') || m.description?.toLowerCase().includes('vision')),
-          });
-        }
-      }
-    }
-    return Array.from(map.values());
-  }, [availableModels, catalog]);
+  // Curated roster + the owner's custom models, each classified against the
+  // live catalog (source of truth). Used by the vision guard and rotation.
+  const combinedModelOptions = useMemo(
+    () => buildOracleModelOptions(catalog, customModels),
+    [catalog, customModels]
+  );
 
   // Drive sync
   useEffect(() => {
@@ -260,6 +235,25 @@ export const OracleView: React.FC<OracleViewProps> = ({
 
   const handleNewThread = () => {
     const t = newOracleThread(activeThread?.model);
+    if (activeThread) {
+      // New threads inherit the active thread's mode, rosters, and toggles —
+      // the models you added to Auto-Rotate are the ones that rotate.
+      t.mode = activeThread.mode || 'direct';
+      t.miniDeliberationModels = [
+        ...(activeThread.miniDeliberationModels && activeThread.miniDeliberationModels.length > 0
+          ? activeThread.miniDeliberationModels
+          : DEFAULT_MINI_DELIBERATION_MODELS),
+      ];
+      t.rotationModels = [
+        ...(activeThread.rotationModels && activeThread.rotationModels.length > 0
+          ? activeThread.rotationModels
+          : DEFAULT_ROTATION_ROSTER),
+      ];
+      t.reflectEnabled = activeThread.reflectEnabled;
+      t.webEnabled = activeThread.webEnabled;
+      t.rotateVoices = activeThread.rotateVoices;
+      t.rotateVoiceModels = activeThread.rotateVoiceModels;
+    }
     const next = [t, ...threadsRef.current];
     threadsRef.current = next;
     setThreads(next);
@@ -279,37 +273,6 @@ export const OracleView: React.FC<OracleViewProps> = ({
     const thread = threadsRef.current.find((t) => t.id === id);
     if (!thread) return;
     commitThread({ ...thread, ...patch, updatedAt: Date.now() });
-  };
-
-  const handleRandomizeModel = () => {
-    if (!activeId || combinedModelOptions.length === 0) return;
-    const currentModelId = activeThread?.model;
-    const choices = combinedModelOptions.filter((m) => m.id !== currentModelId);
-    const pool = choices.length > 0 ? choices : combinedModelOptions;
-    const picked = pool[Math.floor(Math.random() * pool.length)];
-    if (!picked) return;
-
-    if (activeThread?.mode === 'mini_deliberation') {
-      // Pick 3 random distinct models for deliberation
-      const shuffled = [...combinedModelOptions].sort(() => 0.5 - Math.random());
-      const selected = shuffled.slice(0, 3).map((m) => m.id);
-      patchThread(activeId, { miniDeliberationModels: selected });
-      setRandomizedModelName(`Deliberation Roster (${selected.length} Models)`);
-    } else if (activeThread?.mode === 'rotation') {
-      // Pick 4 random models for rotation
-      const shuffled = [...combinedModelOptions].sort(() => 0.5 - Math.random());
-      const selected = shuffled.slice(0, 4).map((m) => m.id);
-      patchThread(activeId, { rotationModels: selected });
-      setRandomizedModelName(`Rotation Roster (${selected.length} Models)`);
-    } else {
-      // Direct model pick
-      patchThread(activeId, { model: picked.id });
-      setRandomizedModelName(picked.name);
-    }
-
-    setRandomizeFlash(true);
-    setTimeout(() => setRandomizeFlash(false), 700);
-    setTimeout(() => setRandomizedModelName(null), 3500);
   };
 
   const handleClearActiveThreadMessages = (threadId: string) => {
@@ -454,8 +417,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
           : enrichedText;
 
       // Vision guard: when images are attached, only models that can actually see
-      // them should run. Text-only models get swapped to a vision-capable
-      // fallback and the swap is surfaced in the answer header note.
+      // them should run. Text-only models (including custom entries) get dropped
+      // or swapped to a vision-capable fallback, and the swap is surfaced in the
+      // answer header note.
       const isModelVisionOk = (modelId: string): boolean => {
         const opt = combinedModelOptions.find((o) => o.id === modelId);
         if (opt) return opt.vision;
@@ -471,13 +435,17 @@ export const OracleView: React.FC<OracleViewProps> = ({
           latest.miniDeliberationModels && latest.miniDeliberationModels.length > 0
             ? latest.miniDeliberationModels
             : DEFAULT_MINI_DELIBERATION_MODELS;
-        const visionOk = roster.filter(isModelVisionOk);
-        if (visionOk.length === 0) {
-          visionSafePanelModels = [VISION_SAFE_FALLBACK_MODEL];
+        const { safe, dropped, usedFallback } = filterVisionSafeRoster(
+          roster,
+          isModelVisionOk,
+          VISION_SAFE_FALLBACK_MODEL
+        );
+        if (usedFallback) {
+          visionSafePanelModels = safe;
           visionNote = `No vision-capable models in the panel — all routed to ${VISION_SAFE_FALLBACK_MODEL.split('/').pop()}. `;
-        } else if (visionOk.length < roster.length) {
-          visionSafePanelModels = visionOk;
-          visionNote = `Panel limited to vision-capable models: ${visionOk.map((m) => m.split('/').pop()).join(', ')}. `;
+        } else if (dropped.length > 0) {
+          visionSafePanelModels = safe;
+          visionNote = `Panel limited to vision-capable models: ${safe.map((m) => m.split('/').pop()).join(', ')}. `;
         }
       }
 
@@ -579,11 +547,12 @@ export const OracleView: React.FC<OracleViewProps> = ({
         // --- DIRECT OR ROTATION MODE ---
         let selectedModel = effectiveModel;
         if (mode === 'rotation') {
-          const rotationList =
-            latest.rotationModels && latest.rotationModels.length > 0
-              ? latest.rotationModels
-              : DEFAULT_ROTATION_ROSTER;
-          selectedModel = rotationList[(latest.turnCount || 0) % rotationList.length];
+          // Deterministic cycling through the thread's roster (wrap-around).
+          selectedModel = resolveRotationModel(
+            latest.turnCount || 0,
+            latest.rotationModels,
+            DEFAULT_ROTATION_ROSTER
+          );
         }
 
         const voice = latest.rotateVoices ? pickVoice(latest.turnCount || 0) : null;
@@ -736,7 +705,10 @@ export const OracleView: React.FC<OracleViewProps> = ({
   };
 
   const handleExport = () => {
-    const json = exportOracleThreads(threadsRef.current, globalBibleRef.current);
+    const json = exportOracleThreads(threadsRef.current, globalBibleRef.current, {
+      customModels: loadCustomOracleModels(),
+      directList: loadOracleDirectList(),
+    });
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -762,6 +734,19 @@ export const OracleView: React.FC<OracleViewProps> = ({
           globalBibleRef.current = result.globalBible;
           setGlobalBible(result.globalBible);
           saveGlobalBible(result.globalBible);
+        }
+        // Restore the custom model pool and Direct palette from the export.
+        if (result.extras?.customModels && result.extras.customModels.length > 0) {
+          const existing = new Set(loadCustomOracleModels().map((m) => m.id));
+          const mergedCustom = [
+            ...loadCustomOracleModels(),
+            ...result.extras.customModels.filter((m) => m && m.id && !existing.has(m.id)),
+          ];
+          saveCustomOracleModels(mergedCustom);
+          setCustomModels(loadCustomOracleModels());
+        }
+        if (result.extras?.directList && result.extras.directList.length > 0) {
+          saveOracleDirectList(result.extras.directList);
         }
       } else {
         console.warn('[Oracle] Import failed:', result.message);
@@ -1209,137 +1194,6 @@ export const OracleView: React.FC<OracleViewProps> = ({
           <OracleComposer onSend={handleSend} isBusy={isBusy} onStop={handleStop} />
         </div>
       </div>
-
-      {/* Roster & Model Selection Modal */}
-      {showRosterModal && activeThread && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className="w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-5 space-y-4 max-h-[85vh] flex flex-col">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Sliders className="text-fuchsia-400 w-5 h-5" />
-                <h3 className="text-sm font-bold text-white">
-                  {currentMode === 'mini_deliberation'
-                    ? 'Configure Mini Deliberation Panel'
-                    : 'Configure Model Rotation Roster'}
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowRosterModal(false)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg cursor-pointer"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-400">
-              {currentMode === 'mini_deliberation'
-                ? 'Select which models will deliberate concurrently before The Oracle synthesizes the final consensus:'
-                : 'Select the models to rotate through turn-by-turn during this conversation:'}
-            </p>
-
-            <div className="relative">
-              <Search size={13} className="absolute left-3 top-2.5 text-slate-500" />
-              <input
-                type="text"
-                placeholder="Filter models by name or id..."
-                value={searchModelQuery}
-                onChange={(e) => setSearchModelQuery(e.target.value)}
-                className="w-full bg-slate-950 text-slate-200 text-xs pl-8 pr-3 py-2 rounded-xl border border-slate-800 focus:outline-none focus:border-indigo-500"
-              />
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar min-h-[220px]">
-              {combinedModelOptions
-                .filter(
-                  (m) =>
-                    !searchModelQuery ||
-                    m.name.toLowerCase().includes(searchModelQuery.toLowerCase()) ||
-                    m.id.toLowerCase().includes(searchModelQuery.toLowerCase())
-                )
-                .map((m) => {
-                  const targetList =
-                    currentMode === 'mini_deliberation'
-                      ? activeThread.miniDeliberationModels || DEFAULT_MINI_DELIBERATION_MODELS
-                      : activeThread.rotationModels || DEFAULT_ROTATION_ROSTER;
-                  const isSelected = targetList.includes(m.id);
-
-                  const toggleModel = () => {
-                    let nextList: string[];
-                    if (isSelected) {
-                      nextList = targetList.filter((x) => x !== m.id);
-                      if (nextList.length === 0) nextList = [m.id]; // keep at least 1
-                    } else {
-                      nextList = [...targetList, m.id];
-                    }
-
-                    if (currentMode === 'mini_deliberation') {
-                      patchThread(activeThread.id, { miniDeliberationModels: nextList });
-                    } else {
-                      patchThread(activeThread.id, { rotationModels: nextList });
-                    }
-                  };
-
-                  return (
-                    <div
-                      key={m.id}
-                      onClick={toggleModel}
-                      className={`flex items-center justify-between p-2.5 rounded-xl border cursor-pointer transition-all ${
-                        isSelected
-                          ? 'bg-indigo-950/50 border-indigo-600 text-white'
-                          : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700'
-                      }`}
-                    >
-                      <div className="min-w-0 pr-2">
-                        <div className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
-                          <span>{m.name}</span>
-                          {m.tag && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
-                              {m.tag}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[10px] font-mono text-slate-500 truncate">{m.id}</div>
-                      </div>
-                      <div
-                        className={`w-5 h-5 rounded-md flex items-center justify-center border text-xs ${
-                          isSelected
-                            ? 'bg-indigo-600 border-indigo-500 text-white'
-                            : 'border-slate-700 bg-slate-900'
-                        }`}
-                      >
-                        {isSelected && <Check size={12} />}
-                      </div>
-                    </div>
-                  );
-                })}
-            </div>
-
-            <div className="flex items-center justify-between pt-2 border-t border-slate-800">
-              <button
-                type="button"
-                onClick={() => {
-                  if (currentMode === 'mini_deliberation') {
-                    patchThread(activeThread.id, { miniDeliberationModels: [...DEFAULT_MINI_DELIBERATION_MODELS] });
-                  } else {
-                    patchThread(activeThread.id, { rotationModels: [...DEFAULT_ROTATION_ROSTER] });
-                  }
-                }}
-                className="text-xs text-slate-400 hover:text-white cursor-pointer"
-              >
-                Reset to Default
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowRosterModal(false)}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl cursor-pointer"
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
