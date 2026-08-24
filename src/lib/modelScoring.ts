@@ -90,22 +90,40 @@ export function scoreCandidateForTier(
   }
 }
 
+/** True when the catalog model accepts image input (per OpenRouter architecture data). */
+export function modelHasVision(m: RawOpenRouterModel | null | undefined): boolean {
+  if (!m) return false;
+  const arch = (m as any)?.architecture;
+  const inputModalities: string[] = Array.isArray(arch?.input_modalities) ? arch.input_modalities : [];
+  if (inputModalities.includes('image')) return true;
+  const modality: string = arch?.modality || '';
+  return /image/.test(modality);
+}
+
 /**
  * Picks the best live catalog model for a tier.
  * `usedIds` excludes models already assigned to other seats (diversity).
- * Returns undefined when the tier pool is empty (e.g. no live free models).
+ * `requireVision` restricts candidates to image-capable models (used when the
+ * user attached an image — no point seating a model that can't see it).
+ * Returns undefined when the (possibly filtered) tier pool is empty.
  */
 export function pickBestFromCatalog(
   catalog: RawOpenRouterModel[],
   tier: ModelTier,
   preferOrg?: string,
-  usedIds?: Iterable<string>
+  usedIds?: Iterable<string>,
+  requireVision?: boolean
 ): RawOpenRouterModel | undefined {
   if (!Array.isArray(catalog) || catalog.length === 0) return undefined;
   const used = new Set(Array.from(usedIds || []).map((id) => String(id).toLowerCase()));
 
   let pool = catalog.filter(isUsableCatalogModel);
   pool = pool.filter((m) => (tier === 'free' ? pricingIsFree(m) : !pricingIsFree(m)));
+  if (requireVision) {
+    const visionPool = pool.filter((m) => modelHasVision(m));
+    if (visionPool.length === 0) return undefined;
+    pool = visionPool;
+  }
   if (pool.length === 0) return undefined;
 
   let best: RawOpenRouterModel | undefined;

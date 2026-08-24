@@ -63,7 +63,11 @@ const MAX_MESSAGES = 200;
 
 export const ORACLE_DEFAULT_MODEL = 'google/gemini-2.5-flash';
 
-/** Curated live-model defaults (verified against OpenRouter, Aug 2026). */
+/**
+ * Curated frontier defaults (verified live against OpenRouter, Aug 2026).
+ * Kept to current frontier models only — the full catalog remains available
+ * in Settings → Oracle for manual picks.
+ */
 export const DEFAULT_MINI_DELIBERATION_MODELS: string[] = [
   'anthropic/claude-sonnet-4.5',
   'openai/gpt-5.1',
@@ -73,23 +77,45 @@ export const DEFAULT_MINI_DELIBERATION_MODELS: string[] = [
 export const DEFAULT_ROTATION_ROSTER: string[] = [
   'anthropic/claude-sonnet-4.5',
   'openai/gpt-5.1',
-  'google/gemini-2.5-flash',
-  'deepseek/deepseek-chat',
-  'meta-llama/llama-3.3-70b-instruct',
+  'google/gemini-2.5-pro',
+  'google/gemini-3.7-flash',
+  'deepseek/deepseek-r1',
 ];
 
+/** Oracle's curated model list — current frontier only (vision-accurate). */
 export const ORACLE_MODEL_OPTIONS: { id: string; name: string; tag?: string; vision: boolean }[] = [
-  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', tag: 'Fast & Smart', vision: true },
+  { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', tag: 'Frontier', vision: true },
+  { id: 'openai/gpt-5.1', name: 'GPT-5.1', tag: 'Frontier', vision: true },
+  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', tag: 'Frontier', vision: true },
   { id: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', tag: 'Fast Frontier', vision: true },
-  { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', tag: 'Top Frontier', vision: true },
-  { id: 'openai/gpt-5.1', name: 'GPT-5.1', tag: 'Omni Frontier', vision: true },
-  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', tag: 'Deep Context', vision: true },
-  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat', tag: 'Efficient Reasoning', vision: false },
-  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', tag: 'Math & Logic', vision: false },
-  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct', tag: 'Open Weights', vision: false },
-  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra 550B (Free)', tag: 'Free Tier', vision: false },
-  { id: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (Free)', tag: 'Free Tier', vision: false },
+  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', tag: 'Fast Workhorse', vision: true },
+  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', tag: 'Deep Reasoning', vision: false },
 ];
+
+/**
+ * Fallback vision-capable model for image attachments when the chosen model
+ * is text-only (verified live, Aug 2026).
+ */
+export const VISION_SAFE_FALLBACK_MODEL = 'google/gemini-2.5-flash';
+
+/** Broadcast when Oracle threads are edited outside the Oracle view (Settings). */
+export const ORACLE_THREADS_UPDATED_EVENT = 'council-oracle-threads-updated';
+
+/** Patches a stored Oracle thread by id and persists + broadcasts the update. */
+export function patchOracleThread(
+  threadId: string,
+  patch: Partial<Omit<OracleThread, 'id'>>
+): OracleThread[] {
+  const threads = loadOracleThreads();
+  const updated = threads.map((t) => (t.id === threadId ? { ...t, ...patch, updatedAt: Date.now() } : t));
+  saveOracleThreads(updated);
+  try {
+    window.dispatchEvent(new CustomEvent(ORACLE_THREADS_UPDATED_EVENT));
+  } catch {
+    /* non-browser environment */
+  }
+  return updated;
+}
 
 export function newOracleThread(model: string = ORACLE_DEFAULT_MODEL): OracleThread {
   const now = Date.now();

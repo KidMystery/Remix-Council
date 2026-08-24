@@ -1,4 +1,4 @@
-import { pickBestFromCatalog, isUsableCatalogModel } from './modelScoring';
+import { pickBestFromCatalog, isUsableCatalogModel, modelHasVision } from './modelScoring';
 
 export type TaskDomain = 'code' | 'math' | 'finance' | 'creative' | 'general';
 export type BudgetTier = 'free' | 'cheap' | 'quality';
@@ -24,6 +24,12 @@ export interface CouncilAllocationPlan {
   seats: Record<string, AllocatedSeat>;
   synthesizer: AllocatedSeat;
   estimatedCostPerRoundUSD: number;
+  /**
+   * True when vision was required (image attached) but at least one seated
+   * model has no image input — the UI should warn instead of silently
+   * wasting the user's time on a model that can't see the attachment.
+   */
+  visionGap: boolean;
 }
 
 export const DEPRECATED_MODEL_PATTERNS = [
@@ -70,8 +76,10 @@ export function allocateCouncilSeats(params: {
   synthesizer: { id: string; name: string; role: string; model?: string };
   humanOverrides?: Record<string, string>; // personaId -> requested modelId
   catalog: any[];
+  /** Restrict dynamic selection to image-capable models (image attachment present). */
+  visionRequired?: boolean;
 }): CouncilAllocationPlan {
-  const { domain, budgetTier, personas, synthesizer, humanOverrides = {}, catalog } = params;
+  const { domain, budgetTier, personas, synthesizer, humanOverrides = {}, catalog, visionRequired = false } = params;
 
   // Domain-specific benchmark favorites (current Pareto tier, Aug 2026).
   // These are PREFERENCES: before any candidate is seated, it is validated
@@ -114,11 +122,24 @@ export function allocateCouncilSeats(params: {
    * vanished, dynamically picks the best live model for the same tier.
    * Free-tier honesty: when the live catalog has no zero-cost models, the
    * seat is downgraded to a cheap paid model instead of seating a dead id.
+   * Vision honesty: when vision is required, a live-but-text-only candidate
+   * is swapped for a live vision-capable model (if one exists).
    */
   const resolveLive = (candidate: string, tier: BudgetTier, used: Set<string>): string => {
     if (liveIds.size === 0) return candidate; // offline — trust the curated preference
-    if (liveIds.has(candidate.toLowerCase())) return candidate;
+    const candLower = candidate.toLowerCase();
+    const candEntry = liveCatalog.find((m) => m.id.toLowerCase() === candLower);
+    const candUsable = candEntry ? (visionRequired ? modelHasVision(candEntry) : true) : false;
+    if (candUsable) return candidate;
     const preferOrg = candidate.split('/')[0];
+    if (visionRequired) {
+      const vision =
+        tier === 'free'
+          ? pickBestFromCatalog(liveCatalog, 'free', preferOrg, used, true) ||
+            pickBestFromCatalog(liveCatalog, 'cheap', preferOrg, used, true)
+          : pickBestFromCatalog(liveCatalog, tier, preferOrg, used, true);
+      if (vision) return vision.id;
+    }
     if (tier === 'free') {
       const free = pickBestFromCatalog(liveCatalog, 'free', preferOrg, used);
       if (free) return free.id;
@@ -241,11 +262,22 @@ export function allocateCouncilSeats(params: {
   });
   estRoundUSD += (4000 / 1_000_000) * synthSeat.pricing.promptUSDPer1M + (1500 / 1_000_000) * synthSeat.pricing.completionUSDPer1M;
 
+  // Vision gap: vision was required, but some seat is a verified text-only
+  // model (e.g. only text-only models exist in the tier pool). The UI should
+  // tell the user rather than silently ignoring their image.
+  const visionGap = visionRequired
+    ? [...Object.values(seats), synthSeat].some((s) => {
+        const entry = liveCatalog.find((m) => m.id.toLowerCase() === s.assignedModel.toLowerCase());
+        return entry ? !modelHasVision(entry) : false;
+      })
+    : false;
+
   return {
     domain,
     budgetTier,
     seats,
     synthesizer: synthSeat,
     estimatedCostPerRoundUSD: estRoundUSD,
+    visionGap,
   };
 }

@@ -24,6 +24,7 @@ import {
   X,
   Eye,
   Loader2,
+  ChevronDown,
 } from 'lucide-react';
 import type {
   Persona,
@@ -452,7 +453,21 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [consensusMetrics, setConsensusMetrics] = useState<ConsensusMetric[]>([]);
   const [missionStatus, setMissionStatus] = useState<PersistedMission['status']>('idle');
   const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
+  // Clean-by-default display: the telemetry terminal is collapsed until
+  // expanded, and the deliberation feed shows only the final verdict plus
+  // one-line summaries of earlier cycles (expandable).
+  const [showTerminal, setShowTerminal] = useState(false);
+  const [showFullDeliberation, setShowFullDeliberation] = useState(false);
   const [showCostApprovalModal, setShowCostApprovalModal] = useState(false);
+
+  // Auto-open the telemetry terminal while a mission runs; collapse it when the
+  // run finishes so the results view stays clean.
+  const wasRunningRef = useRef(false);
+  useEffect(() => {
+    if (isRunning && !wasRunningRef.current) setShowTerminal(true);
+    if (!isRunning && wasRunningRef.current) setShowTerminal(false);
+    wasRunningRef.current = isRunning;
+  }, [isRunning]);
   const [estimatedMissionCost, setEstimatedMissionCost] = useState(0);
   const [showDossier, setShowDossier] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
@@ -709,6 +724,11 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
     const totalPasses = plan.length;
 
+    // Self-correction memory: each cycle's chair consensus is carried into the
+    // next cycle, which is instructed to falsify it before building on it.
+    let previousSynthesis: string | null = null;
+    let previousMetric: ConsensusMetric | undefined;
+
     for (let qi = 0; qi < plan.length && !pauseRequestedRef.current; qi++) {
       const p = plan[qi];
       const chair =
@@ -787,11 +807,18 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
           role: activeRosterSynthesizer.role || 'Chair',
         };
 
+        // Reconsideration pass: from cycle 2 onward, the chair must adversarially
+        // re-examine the previous consensus instead of simply repeating it.
+        const reconsiderBlock =
+          qi > 0 && previousSynthesis
+            ? `\n\n[Self-Correction Pass — do NOT simply repeat the previous cycle]:\nPrevious consensus (${previousMetric?.agreementScore ?? 'unknown'}% agreement):\n${previousSynthesis.slice(0, 3500)}\n\nInstructions:\n1) Adversarially falsify the previous consensus: hunt for factual errors, unsupported claims, missing failure modes, and overconfident generalizations.\n2) Re-derive any critical claim you cannot defend from the panel's findings; if you have web tooling, prefer live verification over memory.\n3) Only change the consensus where you have substantive justification.\n4) State explicitly: what you changed versus the previous cycle and why, and list the top remaining risks/pitfalls.`
+            : '';
+
         const synthRes = await streamPersonaWithFallback({
           persona: chairPersona,
           messages: [
             { role: 'system', content: 'You are the Presiding Nexus Chair. Synthesize decisive consensus, list immutable invariants, and calculate convergence alignment. After your synthesis append exactly one fenced JSON block with keys: agreementScore (integer 0-100), keyConsensusPoints (array), keyDisagreements (array), panelistAlignment (object of persona id -> integer 0-100).' },
-            { role: 'user', content: `Synthesize ${p.label} findings:\n\n${s1Text}` },
+            { role: 'user', content: `Synthesize ${p.label} findings:\n\n${s1Text}${reconsiderBlock}` },
           ],
           policy,
           rawModels: catalog,
@@ -846,6 +873,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
         accumulatedMetrics = [...accumulatedMetrics, consensusMetric];
         setConsensusMetrics(accumulatedMetrics);
+        previousSynthesis = synthesis;
+        previousMetric = consensusMetric;
         addLog(`✨ ${p.label} consensus: ${consensusMetric.agreementScore}% alignment.`);
       } catch (err: any) {
         addLog(`❌ Chair synthesis error: ${err.message}`);
@@ -1629,46 +1658,123 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
             <ConsensusVisualizer metric={latestMetric} personas={personas} roundIndex={currentIteration} />
           )}
 
-          {/* Live Execution Terminal */}
+          {/* Live Execution Terminal (collapsed by default for a clean view) */}
           <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 shadow-xl space-y-2">
-            <div className="flex items-center justify-between text-xs border-b border-slate-800 pb-2">
+            <button
+              type="button"
+              onClick={() => setShowTerminal((v) => !v)}
+              className="w-full flex items-center justify-between text-xs cursor-pointer group"
+              aria-expanded={showTerminal}
+            >
               <div className="flex items-center gap-2 text-emerald-400 font-mono">
                 <Terminal size={14} />
                 <span>NEXUS-RUNTIME-TELEMETRY</span>
+                {terminalLogs.length > 0 && (
+                  <span className="text-slate-500 font-sans text-[10px]">
+                    {terminalLogs.length} log{terminalLogs.length === 1 ? '' : 's'}
+                  </span>
+                )}
               </div>
-              <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            </div>
+              <div className="flex items-center gap-2">
+                {isRunning && <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />}
+                <span className="text-[10px] text-slate-500 group-hover:text-slate-300">
+                  {showTerminal ? 'hide' : 'show'}
+                </span>
+                <ChevronDown
+                  size={14}
+                  className={`text-slate-500 transition-transform ${showTerminal ? 'rotate-180' : ''}`}
+                />
+              </div>
+            </button>
 
-            <div className="bg-slate-950 rounded-2xl p-3.5 font-mono text-[11px] text-emerald-300/90 max-h-48 overflow-y-auto space-y-1">
-              {terminalLogs.length === 0 ? (
-                <div className="text-slate-600 italic">Ready for autonomous execution...</div>
-              ) : (
-                terminalLogs.map((log, i) => <div key={i}>{log}</div>)
-              )}
-            </div>
+            {showTerminal && (
+              <div className="bg-slate-950 rounded-2xl p-3.5 font-mono text-[11px] text-emerald-300/90 max-h-48 overflow-y-auto space-y-1 border-t border-slate-800 pt-2.5">
+                {terminalLogs.length === 0 ? (
+                  <div className="text-slate-600 italic">Ready for autonomous execution...</div>
+                ) : (
+                  terminalLogs.map((log, i) => <div key={i}>{log}</div>)
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Iteration Findings Feed */}
+          {/* Iteration Findings Feed — clean by default: final verdict in full,
+              earlier cycles as one-liners. Toggle reveals the full thread. */}
           {rounds.length > 0 && (
             <div className="space-y-4">
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                <Layers size={14} className="text-emerald-400" />
-                <span>Synthesized Convergence Verdicts</span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                  <Layers size={14} className="text-emerald-400" />
+                  <span>Synthesized Convergence Verdicts</span>
+                </div>
+                {rounds.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowFullDeliberation((v) => !v)}
+                    className="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-500 px-2.5 py-1 rounded-lg cursor-pointer transition-colors"
+                    title="Toggle the full deliberation thread (all cycles, complete text)"
+                  >
+                    <ChevronDown size={12} className={`transition-transform ${showFullDeliberation ? 'rotate-180' : ''}`} />
+                    {showFullDeliberation ? 'Clean view' : 'Full deliberation'}
+                  </button>
+                )}
               </div>
 
-              {rounds.map((r, idx) => (
-                <div key={r.id} className="p-5 bg-slate-900/90 border border-slate-800 rounded-3xl shadow-xl space-y-3">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 text-xs">
-                    <span className="font-bold text-emerald-400">Cycle {idx + 1} Consensus</span>
-                    <span className="text-slate-400 font-mono text-[11px]">
-                      {new Date(r.timestamp || r.createdAt || Date.now()).toLocaleTimeString()}
-                    </span>
+              {/* Earlier cycles: one-line summary (or full, when expanded) */}
+              {rounds.slice(0, -1).map((r, idx) => {
+                const content = r.deliberation?.stage3?.content || '';
+                const score = r.deliberation?.stage3?.consensusMetric?.agreementScore;
+                return (
+                  <div key={r.id}>
+                    {showFullDeliberation ? (
+                      <div className="p-5 bg-slate-900/90 border border-slate-800 rounded-3xl shadow-xl space-y-3 mb-3">
+                        <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 text-xs">
+                          <span className="font-bold text-emerald-400">Cycle {idx + 1} Consensus</span>
+                          <span className="text-slate-400 font-mono text-[11px]">
+                            {new Date(r.timestamp || r.createdAt || Date.now()).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        {content && <MessageMarkdown content={content} />}
+                      </div>
+                    ) : (
+                      <div className="mb-2 flex items-baseline gap-2 px-4 py-2.5 bg-slate-900/60 border border-slate-800/80 rounded-2xl text-[11px] text-slate-400">
+                        <span className="font-bold text-emerald-400/90 shrink-0">
+                          Cycle {idx + 1}
+                        </span>
+                        {typeof score === 'number' && (
+                          <span className="shrink-0 font-mono text-cyan-300/90">{score}% aligned</span>
+                        )}
+                        <span className="truncate" title={content.replace(/\s+/g, ' ')}>
+                          {content ? content.replace(/^#+\s*/gm, '').replace(/[*_`>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 160) : 'No synthesis'}
+                        </span>
+                      </div>
+                    )}
                   </div>
-                  {r.deliberation?.stage3?.content && (
-                    <MessageMarkdown content={r.deliberation.stage3.content} />
-                  )}
-                </div>
-              ))}
+                );
+              })}
+
+              {/* Final cycle: always shown in full */}
+              {(() => {
+                const r = rounds[rounds.length - 1];
+                const idx = rounds.length - 1;
+                return (
+                  <div className="p-5 bg-slate-900/90 border border-emerald-800/40 rounded-3xl shadow-xl space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 text-xs">
+                      <span className="font-bold text-emerald-300">
+                        Cycle {idx + 1} Consensus {rounds.length > 1 && <span className="text-emerald-500/70 font-semibold">— Final Verdict</span>}
+                      </span>
+                      <span className="text-slate-400 font-mono text-[11px]">
+                        {new Date(r.timestamp || r.createdAt || Date.now()).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    {r.deliberation?.stage3?.content ? (
+                      <MessageMarkdown content={r.deliberation.stage3.content} />
+                    ) : (
+                      <div className="text-slate-500 italic">No synthesis recorded for this cycle.</div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>

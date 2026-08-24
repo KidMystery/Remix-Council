@@ -1,5 +1,8 @@
 import { RawOpenRouterModel, MODEL_PRESETS, cleanModelName } from './presets';
 import { getAuthorOrganization, isFreeModel, estimatedCost } from './modelMapper';
+import { modelHasVision } from './modelScoring';
+
+export type ModelHealthStatus = 'live' | 'delisted' | 'unknown';
 
 export interface ModelDetails {
   id: string;
@@ -16,6 +19,10 @@ export interface ModelDetails {
   fallbackInfo?: string;
   alsoInPresets?: string[];
   qualityComparisonText?: string;
+  /** Live-verified in the OpenRouter catalog / delisted / not verifiable. */
+  health: ModelHealthStatus;
+  /** Image input capability from catalog architecture data (null = unknown). */
+  hasVision: boolean | null;
 }
 
 export function getModelDetails(
@@ -25,10 +32,24 @@ export function getModelDetails(
   fallbackLogs?: Array<{ personaId: string; originalModel: string; fallbackModel: string; reason: string }>,
   currentPresetId?: string
 ): ModelDetails {
-  const modelObj = rawModelsCatalog?.find((m) => m.id === modelId) || null;
+  const modelObj = rawModelsCatalog?.find((m) => m.id.toLowerCase() === modelId.toLowerCase()) || null;
 
   // 1. Display name
   const displayName = cleanModelName(modelId, modelObj?.name);
+
+  // 1b. Health + vision (only claimable when a live catalog is available)
+  let health: ModelHealthStatus = 'unknown';
+  let hasVision: boolean | null = null;
+  if (rawModelsCatalog && rawModelsCatalog.length > 0) {
+    if (modelObj) {
+      health = 'live';
+      hasVision = modelHasVision(modelObj);
+    } else if (modelId.includes('/')) {
+      // OpenRouter-form id that is not in the live catalog → delisted.
+      // Direct-provider ids (no slash) can't be verified here → unknown.
+      health = 'delisted';
+    }
+  }
 
   // 2. Author Organization
   const rawOrg = getAuthorOrganization(modelId);
@@ -177,6 +198,8 @@ export function getModelDetails(
     fallbackInfo,
     alsoInPresets: alsoInPresets.length > 0 ? alsoInPresets : undefined,
     qualityComparisonText,
+    health,
+    hasVision,
   };
 }
 

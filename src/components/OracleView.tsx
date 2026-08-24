@@ -50,7 +50,10 @@ import {
   ORACLE_MODEL_OPTIONS,
   DEFAULT_MINI_DELIBERATION_MODELS,
   DEFAULT_ROTATION_ROSTER,
+  VISION_SAFE_FALLBACK_MODEL,
+  ORACLE_THREADS_UPDATED_EVENT,
 } from '../lib/oracleStore';
+import { modelHasVision } from '../lib/modelScoring';
 import { streamOpenRouterCompletion } from '../lib/openrouter';
 import { streamWithTokenGovernor } from '../lib/tokenGovernor';
 import { pickVoice } from '../lib/oracleVoices';
@@ -130,6 +133,18 @@ export const OracleView: React.FC<OracleViewProps> = ({
   liveAnswerRef.current = liveAnswer;
   const abortRef = useRef<AbortController | null>(null);
 
+  // Reload threads when they are edited outside the Oracle view (Settings → Oracle tab).
+  useEffect(() => {
+    const handleUpdated = () => {
+      const loaded = loadOracleThreads();
+      threadsRef.current = loaded;
+      setThreads(loaded);
+      setActiveId((prev) => (loaded.some((t) => t.id === prev) ? prev : loaded[0]?.id || null));
+    };
+    window.addEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
+    return () => window.removeEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
+  }, []);
+
   const { speak, stop, speakingId, loadingId, voice: activeVoice, setVoice, availableVoices } = useSpeech();
   const [showVoiceDropdown, setShowVoiceDropdown] = useState(false);
   const { credits, refresh: refreshCredits } = useOpenRouterCredits();
@@ -152,14 +167,17 @@ export const OracleView: React.FC<OracleViewProps> = ({
     for (const opt of ORACLE_MODEL_OPTIONS) {
       map.set(opt.id, opt);
     }
-    // Seed available
+    // Seed available (vision flag from the live catalog when it's loaded)
     for (const m of availableModels) {
       if (!map.has(m.id)) {
+        const entry = Array.isArray(catalog)
+          ? catalog.find((c) => c?.id?.toLowerCase() === m.id.toLowerCase())
+          : undefined;
         map.set(m.id, {
           id: m.id,
           name: m.name || m.id.split('/').pop() || m.id,
           tag: 'Catalog',
-          vision: true,
+          vision: entry ? modelHasVision(entry) : true,
         });
       }
     }
@@ -435,6 +453,34 @@ export const OracleView: React.FC<OracleViewProps> = ({
             ]
           : enrichedText;
 
+      // Vision guard: when images are attached, only models that can actually see
+      // them should run. Text-only models get swapped to a vision-capable
+      // fallback and the swap is surfaced in the answer header note.
+      const isModelVisionOk = (modelId: string): boolean => {
+        const opt = combinedModelOptions.find((o) => o.id === modelId);
+        if (opt) return opt.vision;
+        const entry = Array.isArray(catalog)
+          ? catalog.find((m) => m?.id?.toLowerCase() === modelId.toLowerCase())
+          : undefined;
+        return entry ? modelHasVision(entry) : true; // unknown → lenient (offline)
+      };
+      let visionNote: string | undefined;
+      let visionSafePanelModels: string[] | undefined;
+      if (images.length > 0 && mode === 'mini_deliberation') {
+        const roster =
+          latest.miniDeliberationModels && latest.miniDeliberationModels.length > 0
+            ? latest.miniDeliberationModels
+            : DEFAULT_MINI_DELIBERATION_MODELS;
+        const visionOk = roster.filter(isModelVisionOk);
+        if (visionOk.length === 0) {
+          visionSafePanelModels = [VISION_SAFE_FALLBACK_MODEL];
+          visionNote = `No vision-capable models in the panel — all routed to ${VISION_SAFE_FALLBACK_MODEL.split('/').pop()}. `;
+        } else if (visionOk.length < roster.length) {
+          visionSafePanelModels = visionOk;
+          visionNote = `Panel limited to vision-capable models: ${visionOk.map((m) => m.split('/').pop()).join(', ')}. `;
+        }
+      }
+
       const answerId = `m_${now}_a`;
 
       let answerText = '';
@@ -445,14 +491,15 @@ export const OracleView: React.FC<OracleViewProps> = ({
       if (mode === 'mini_deliberation') {
         // --- MINI DELIBERATION MODE ---
         const deliberationModels =
-          latest.miniDeliberationModels && latest.miniDeliberationModels.length > 0
+          visionSafePanelModels ||
+          (latest.miniDeliberationModels && latest.miniDeliberationModels.length > 0
             ? latest.miniDeliberationModels
-            : DEFAULT_MINI_DELIBERATION_MODELS;
+            : DEFAULT_MINI_DELIBERATION_MODELS);
 
         setLiveAnswer({
           id: answerId,
           text: '',
-          headerNote: `Mini Deliberation (${deliberationModels.map((m) => m.split('/').pop()).join(', ')})...`,
+          headerNote: `${visionNote || ''}Mini Deliberation (${deliberationModels.map((m) => m.split('/').pop()).join(', ')})...`.trim(),
         });
 
         // Parallel proposal gathering with resilient error suppression
@@ -551,9 +598,15 @@ export const OracleView: React.FC<OracleViewProps> = ({
         const threadModelIsFree = (selectedModel || '').endsWith(':free');
         const voiceModelWanted =
           voice && latest.rotateVoiceModels && !threadModelIsFree && voice.model;
-        const answerModel = voiceModelWanted ? voice.model! : selectedModel;
+        let answerModel = voiceModelWanted ? voice.model! : selectedModel;
 
-        setLiveAnswer({ id: answerId, text: '', headerNote: undefined });
+        // Vision guard for direct/rotation: swap a text-only model when images are attached.
+        if (images.length > 0 && !isModelVisionOk(answerModel)) {
+          visionNote = `${answerModel.split('/').pop()} can't read images — routed to ${VISION_SAFE_FALLBACK_MODEL.split('/').pop()} instead. `;
+          answerModel = VISION_SAFE_FALLBACK_MODEL;
+        }
+
+        setLiveAnswer({ id: answerId, text: '', headerNote: visionNote });
 
         const res = await streamWithTokenGovernor({
           model: answerModel,
@@ -588,7 +641,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
         timestamp: Date.now(),
         model: answerModelUsed,
         voice: usedVoice,
-        note: govNote,
+        note: visionNote ? `${visionNote}${govNote ? ` ${govNote}` : ''}`.trim() : govNote,
       };
 
       latest = {
@@ -989,86 +1042,30 @@ export const OracleView: React.FC<OracleViewProps> = ({
                       ? 'bg-cyan-600 text-white shadow-sm'
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
-                  title="Model Rotation: Rotates across chosen frontier models turn-by-turn"
+                  title="Auto-Rotate: cycles through your chosen frontier models turn-by-turn (automated)"
                 >
                   <RefreshCw size={11} />
-                  Rotation
+                  Auto-Rotate
                 </button>
               </div>
 
-              {/* Model Picker / Roster Config */}
-              {currentMode === 'direct' ? (
-                <div className="flex items-center gap-1.5">
-                  <select
-                    value={activeThread?.model || ''}
-                    onChange={(e) => activeId && patchThread(activeId, { model: e.target.value })}
-                    className="bg-slate-950 text-slate-200 text-xs px-2.5 py-1.5 rounded-lg border border-slate-800 focus:outline-none focus:border-indigo-500 cursor-pointer max-w-[190px]"
-                    title="Active Model"
-                  >
-                    {combinedModelOptions.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name} {m.tag ? `(${m.tag})` : ''}
-                      </option>
-                    ))}
-                  </select>
-
-                  {/* Randomize Model Button */}
-                  <button
-                    type="button"
-                    onClick={handleRandomizeModel}
-                    className={`inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer min-h-[32px] ${
-                      randomizeFlash
-                        ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold scale-105 shadow-md shadow-amber-500/40'
-                        : 'bg-slate-950 hover:bg-slate-800 text-amber-300 border-amber-500/30 hover:border-amber-400/60'
-                    }`}
-                    title="Randomize Oracle Model: Selects a random model from available frontier & catalog options"
-                    aria-label="Randomize model"
-                  >
-                    <Dices size={13} className={randomizeFlash ? 'animate-spin text-slate-950' : 'text-amber-400'} />
-                    <span className="font-semibold text-[11px]">Randomize</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setShowRosterModal(true)}
-                    className="inline-flex items-center gap-1.5 text-xs text-slate-300 bg-slate-950 hover:bg-slate-800 border border-slate-800 px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors"
-                    title="Configure participating models"
-                  >
-                    <Sliders size={12} className="text-fuchsia-400" />
-                    <span>
-                      {currentMode === 'mini_deliberation'
-                        ? `${(activeThread?.miniDeliberationModels || DEFAULT_MINI_DELIBERATION_MODELS).length} Models`
-                        : `${(activeThread?.rotationModels || DEFAULT_ROTATION_ROSTER).length} Models in Rotation`}
-                    </span>
-                  </button>
-
-                  {/* Randomize Roster Button */}
-                  <button
-                    type="button"
-                    onClick={handleRandomizeModel}
-                    className={`inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer min-h-[32px] ${
-                      randomizeFlash
-                        ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold scale-105 shadow-md shadow-amber-500/40'
-                        : 'bg-slate-950 hover:bg-slate-800 text-amber-300 border-amber-500/30 hover:border-amber-400/60'
-                    }`}
-                    title="Randomize participating models"
-                    aria-label="Randomize roster models"
-                  >
-                    <Shuffle size={12} className={randomizeFlash ? 'animate-spin text-slate-950' : 'text-amber-400'} />
-                    <span className="font-semibold text-[11px]">Randomize</span>
-                  </button>
-                </div>
-              )}
-
-              {/* Ephemeral Notification for Randomized Selection */}
-              {randomizedModelName && (
-                <div className="text-[11px] font-mono text-amber-300 bg-amber-950/70 border border-amber-500/40 px-2 py-1 rounded-lg animate-fadeIn flex items-center gap-1">
-                  <Sparkles size={11} className="text-amber-400 animate-pulse" />
-                  <span>Picked: {randomizedModelName}</span>
-                </div>
-              )}
+              {/* Model & Modes now live in Settings → Oracle (kept off the main page) */}
+              <button
+                type="button"
+                onClick={() => onOpenSettings?.('oracle_bible')}
+                className="inline-flex items-center gap-1.5 text-xs text-slate-300 bg-slate-950 hover:bg-slate-800 border border-slate-800 px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors"
+                title="Model, mode & roster configuration — Settings → Oracle"
+                aria-label="Model and modes settings"
+              >
+                <Sliders size={12} className="text-fuchsia-400" />
+                <span>
+                  {currentMode === 'direct'
+                    ? 'Model & Modes'
+                    : currentMode === 'mini_deliberation'
+                      ? 'Deliberation Panel'
+                      : 'Auto-Rotate Roster'}
+                </span>
+              </button>
 
               {/* Toggles */}
               <div className="flex items-center gap-1">
@@ -1171,7 +1168,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
                   {currentMode === 'mini_deliberation'
                     ? '✨ Mini Deliberation mode active: top frontier models will debate in parallel and synthesize an aligned consensus.'
                     : currentMode === 'rotation'
-                      ? '🔄 Model Rotation active: cycles through top frontier models each turn.'
+                      ? '🔄 Auto-Rotate active: cycles through top frontier models each turn.'
                       : '⚡ Direct mode active: swift responses with self-updating Living Memory.'}
                 </p>
               </div>

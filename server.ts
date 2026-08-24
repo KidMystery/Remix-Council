@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { z } from 'zod';
 import { GoogleGenAI, Modality } from '@google/genai';
 import { allocateCouncilSeats } from './src/lib/serverModelAllocator';
+import { pickBestFromCatalog, type ModelTier } from './src/lib/modelScoring';
 
 // Works under both ESM (tsx dev) and the CJS production bundle (esbuild).
 const __filename =
@@ -255,6 +256,7 @@ export async function startServer(portOverride?: number) {
         personas: z.array(z.object({ id: z.string(), name: z.string(), role: z.string(), model: z.string().optional() })),
         synthesizer: z.object({ id: z.string(), name: z.string(), role: z.string(), model: z.string().optional() }),
         humanOverrides: z.record(z.string(), z.string()).optional(),
+        visionRequired: z.boolean().optional().default(false),
       });
 
       const parsed = AllocationRequestSchema.safeParse(req.body);
@@ -262,14 +264,19 @@ export async function startServer(portOverride?: number) {
         return res.status(400).json({ error: 'Invalid allocation parameters', details: parsed.error.issues });
       }
 
-      // Refresh catalog if needed
+      // Refresh catalog if needed; a failed refresh falls back to the last
+      // cached snapshot (stale-but-working beats a hard 500).
       const now = Date.now();
       if (!cachedCatalog || now - lastCatalogFetchTime > CATALOG_CACHE_TTL_MS) {
-        const resp = await fetch('https://openrouter.ai/api/v1/models');
-        if (resp.ok) {
-          const data = await resp.json();
-          cachedCatalog = data.data || [];
-          lastCatalogFetchTime = now;
+        try {
+          const resp = await fetch('https://openrouter.ai/api/v1/models');
+          if (resp.ok) {
+            const data = await resp.json();
+            cachedCatalog = data.data || [];
+            lastCatalogFetchTime = now;
+          }
+        } catch (e) {
+          console.warn('[council] Catalog refresh failed; using last cached snapshot:', (e as any)?.message);
         }
       }
 
@@ -429,6 +436,29 @@ export async function startServer(portOverride?: number) {
       return res.status(400).json({ error: `Unsupported model identifier: ${rawModel}` });
     }
 
+    // Server-side liveness guard: the client validates models against the
+    // live catalog, but hand-entered or stale ids can still arrive. When we
+    // hold a catalog and the requested model has vanished from OpenRouter,
+    // resolve the best live substitute instead of burning the request on a
+    // guaranteed 404. Free mode may only be substituted with free models.
+    let resolvedModel = rawModel;
+    if (cachedCatalog && cachedCatalog.length > 0) {
+      const liveIds = new Set(cachedCatalog.map((m: any) => String(m?.id || '').toLowerCase()));
+      if (!liveIds.has(rawModel.toLowerCase())) {
+        const tier: ModelTier = budget === 'free' ? 'free' : budget === 'quality' ? 'quality' : 'cheap';
+        const replacement = pickBestFromCatalog(cachedCatalog as any[], tier, rawModel.split('/')[0]);
+        if (replacement) {
+          console.warn(`[council] Model "${rawModel}" is not in the live catalog; substituting "${replacement.id}".`);
+          resolvedModel = replacement.id;
+        } else if (budget === 'free') {
+          return res.status(409).json({
+            error: `"${rawModel}" is no longer available on OpenRouter and no zero-cost substitute is live. Refresh the model list or pick another model.`,
+            modelDelisted: true,
+          });
+        }
+      }
+    }
+
     const openrouterKey = process.env.OPENROUTER_API_KEY?.trim() || '';
 
     if (budget === 'free' && !openrouterKey) {
@@ -445,7 +475,7 @@ export async function startServer(portOverride?: number) {
     const timeoutId = setTimeout(() => abortCtrl.abort(), 110_000);
 
     const payload: Record<string, any> = {
-      model: rawModel,
+      model: resolvedModel,
       messages,
       temperature: temperature ?? 0.7,
       stream: stream ?? true,
@@ -491,6 +521,15 @@ export async function startServer(portOverride?: number) {
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
 
+        // Tell the client about a server-side model substitution (client SSE
+        // parsers ignore events without a choices array, so this is safe to
+        // prepend to the upstream stream).
+        if (resolvedModel !== rawModel) {
+          res.write(
+            `data: ${JSON.stringify({ event: 'model_resolved', requested: rawModel, resolved: resolvedModel })}\n\n`
+          );
+        }
+
         // Abort the upstream stream promptly if the client disconnects (Stop button).
         const onClientClose = () => {
           abortCtrl.abort();
@@ -518,6 +557,10 @@ export async function startServer(portOverride?: number) {
         }
       } else {
         const json = await upstreamResp.json();
+        if (resolvedModel !== rawModel) {
+          json.resolved_model = resolvedModel;
+          json.requested_model = rawModel;
+        }
         return res.status(upstreamResp.status).json(json);
       }
     } catch (error: any) {
