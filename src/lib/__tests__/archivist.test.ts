@@ -5,6 +5,7 @@ import {
   formatCost,
   countTotalSessionCost,
   countRoundCost,
+  splitRecentRounds,
 } from '../archivist';
 import { CouncilRound } from '../../types';
 
@@ -91,6 +92,53 @@ describe('Archivist utility tests', () => {
       ];
       const sessionMetrics = countTotalSessionCost(rounds);
       expect(sessionMetrics.totalTokens).toBeGreaterThan(countRoundCost(mockRound).totalTokens);
+    });
+  });
+
+  describe('splitRecentRounds (hierarchical memory)', () => {
+    const mkRound = (id: string, query: string, consensus: string): CouncilRound =>
+      ({
+        id,
+        userQuery: query,
+        timestamp: Date.now(),
+        synthesis: { content: consensus, status: 'completed' },
+        deliberation: { stage1: {}, stage2: {} },
+      }) as any;
+
+    it('splits the session into a verbatim recent window and older rounds', () => {
+      const rounds = [
+        mkRound('r1', 'Q1', 'C1'),
+        mkRound('r2', 'Q2', 'C2'),
+        mkRound('r3', 'Q3', 'C3'),
+        mkRound('r4', 'Q4', 'C4'),
+      ];
+      const split = splitRecentRounds(rounds, 2);
+      expect(split.window).toBe(2);
+      expect(split.olderRounds.map((r) => r.id)).toEqual(['r1', 'r2']);
+      // Verbatim recent window keeps the two most recent consensus blocks.
+      expect(split.recentBlock).toContain('C3');
+      expect(split.recentBlock).toContain('C4');
+      expect(split.recentBlock).not.toContain('C1');
+    });
+
+    it('keeps everything verbatim when the window covers all rounds', () => {
+      const rounds = [mkRound('r1', 'Q1', 'C1'), mkRound('r2', 'Q2', 'C2')];
+      const split = splitRecentRounds(rounds, 2);
+      expect(split.olderRounds).toEqual([]);
+      expect(split.recentBlock).toContain('C1');
+      expect(split.recentBlock).toContain('C2');
+    });
+
+    it('clamps the window into the valid 1..10 range', () => {
+      const rounds = [mkRound('r1', 'Q1', 'C1'), mkRound('r2', 'Q2', 'C2')];
+      expect(splitRecentRounds(rounds, 0).window).toBe(1);
+      expect(splitRecentRounds(rounds, 99).window).toBe(10);
+    });
+
+    it('returns an empty recent block for an empty session', () => {
+      const split = splitRecentRounds([], 2);
+      expect(split.recentBlock).toBe('');
+      expect(split.olderRounds).toEqual([]);
     });
   });
 });

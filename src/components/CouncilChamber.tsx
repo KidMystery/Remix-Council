@@ -12,6 +12,7 @@ import {
   History,
   Sparkles,
   ChevronDown,
+  FileDown,
 } from 'lucide-react';
 import type {
   Persona,
@@ -30,7 +31,7 @@ import { compressSessionContext } from '../lib/contextCompressor';
 import { preprocessLargeAttachment } from '../lib/chunkProcessor';
 import { shouldEnableWebSearch } from '../lib/webGrounding';
 import { detectTaskDomain, applySmartModelSelection } from '../lib/smartModelSelector';
-import { countRoundCost, formatCost, getModelRates, estimateTokens } from '../lib/archivist';
+import { countRoundCost, formatCost, getModelRates, estimateTokens, splitRecentRounds } from '../lib/archivist';
 import { DollarCostGovernor } from '../lib/dollarCostGovernor';
 import { allocateCouncilSeats } from '../lib/serverModelAllocator';
 import { pricingIsFree } from '../lib/modelScoring';
@@ -76,6 +77,12 @@ export interface CouncilChamberProps {
   panelTimeoutSeconds?: number;
   stopAfterStage1?: boolean;
   maxRoundCostCeiling?: number;
+  /** Hierarchical memory: how many recent rounds stay verbatim (older ones get condensed). */
+  archivistRecentRounds?: number;
+  /** Strict no-fallback mode: surface raw model errors instead of swapping models. */
+  disableFallback?: boolean;
+  /** Simple questions resolve to the single-model Quick Panel path. */
+  useSingleModelForSimple?: boolean;
   autoSaveState?: AutoSaveState;
   lastSavedAt?: number | null;
   isSaving?: boolean;
@@ -190,6 +197,9 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   panelTimeoutSeconds = 120,
   stopAfterStage1 = false,
   maxRoundCostCeiling = 0,
+  archivistRecentRounds = 2,
+  disableFallback = false,
+  useSingleModelForSimple = false,
   autoSaveState,
   lastSavedAt,
   isSaving,
@@ -418,6 +428,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
           sessionId: activeSessionId ?? undefined,
           signal: call.signal,
           maxTokens: synthesisMaxTokens,
+          disableFallback,
           onToken: (chunk) => {
             fullSynthesis += chunk;
             dispatch({ type: 'UPDATE_SYNTHESIS_TOKEN', payload: { roundId: roundToSynthesize.id, chunk } });
@@ -541,13 +552,29 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     dispatch({ type: 'UPSERT_ROUND', payload: currentRoundState });
     onUpdateRound(activeSessionId, { ...currentRoundState });
 
+    // Hierarchical memory (Council Archivist): the `archivistRecentRounds`
+    // most recent rounds stay verbatim; older rounds are condensed into an
+    // executive summary. Both feed the panel as prior-consensus memory.
     let contextSummary = '';
     if (rounds.length >= 3) {
-      try {
-        contextSummary = await compressSessionContext(rounds);
-      } catch {
-        // Fallback gracefully without context summary
+      const split = splitRecentRounds(rounds, archivistRecentRounds);
+      const memoryParts: string[] = [];
+      if (split.olderRounds.length > 1) {
+        try {
+          const condensed = await compressSessionContext(
+            split.olderRounds,
+            'google/gemini-2.5-flash',
+            { keepLast: true }
+          );
+          if (condensed) memoryParts.push(`[Condensed Earlier Rounds]:\n${condensed}`);
+        } catch {
+          // Without a condensed summary, the verbatim recent window still carries memory.
+        }
       }
+      if (split.recentBlock) {
+        memoryParts.push(`[Recent Deliberations — Verbatim Consensus]:\n${split.recentBlock}`);
+      }
+      contextSummary = memoryParts.join('\n\n');
     }
 
     let fullQuery = preparedQuery || (await prepareQuery(roundToRun));
@@ -654,6 +681,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
             signal: call.signal,
             maxTokens: stageTokenLimit,
             webSearch: webEnabled,
+            disableFallback,
             onToken: (chunk) => {
               accumulated += chunk;
               dispatch({ type: 'UPDATE_STAGE1_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
@@ -808,6 +836,7 @@ If the question contains code, documents, or attached files, treat them as avail
             sessionId: activeSessionId ?? undefined,
             signal: call.signal,
             maxTokens: stageTokenLimit,
+            disableFallback,
             onToken: (chunk) => {
               accumulated += chunk;
               dispatch({ type: 'UPDATE_STAGE2_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
@@ -881,11 +910,67 @@ If the question contains code, documents, or attached files, treat them as avail
     }
   };
 
+  /** Builds a full Markdown dossier of the active session (query, proposals, critiques, synthesis, sources). */
+  const buildSessionMarkdown = (): string => {
+    const title = activeSession?.title || 'Council Deliberation';
+    const visible = localRounds.length > 0 ? localRounds : rounds;
+    const lines: string[] = [`# ${title}`, '', `Exported ${new Date().toLocaleString()} — ${visible.length} round(s)`, ''];
+    visible.forEach((r, i) => {
+      lines.push(`## Round ${i + 1}`, '', `**Query:** ${r.userQuery}`, '');
+      const s1 = Object.entries(r.deliberation?.stage1 || {}).filter(([, v]) => v.status === 'completed');
+      if (s1.length > 0) {
+        lines.push('### Panel Proposals');
+        s1.forEach(([id, v]) => {
+          const p = personas.find((x) => x.id === id);
+          lines.push(`**${p?.name || id}** (${(v as any).actualModel || (v as any).model || ''}):`, '', (v as any).content || '', '');
+        });
+      }
+      const s2 = Object.entries(r.deliberation?.stage2 || {}).filter(([, v]) => v.status === 'completed');
+      if (s2.length > 0) {
+        lines.push('### Peer Review');
+        s2.forEach(([id, v]) => {
+          const p = personas.find((x) => x.id === id);
+          lines.push(`**${p?.name || id}** reviews:`, '', (v as any).content || '', '');
+        });
+      }
+      const synth = r.synthesis?.content || r.deliberation?.stage3?.content;
+      if (synth) lines.push('### Chair Synthesis', '', synth, '');
+      const grounding = r.synthesis?.grounding;
+      if (grounding?.sources?.length) {
+        lines.push('### Web Sources', '', ...grounding.sources.map((s) => `- ${s.title ? `${s.title} ` : ''}(${s.url})`), '');
+      }
+      lines.push('---', '');
+    });
+    return lines.join('\n');
+  };
+
+  const handleExportSession = () => {
+    try {
+      const md = buildSessionMarkdown();
+      const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `council-${(activeSession?.title || 'session').replace(/[^a-z0-9]/gi, '_').toLowerCase()}.md`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast?.('Session exported as Markdown', 'success');
+    } catch (err) {
+      showToast?.(`Export failed: ${(err as any)?.message}`, 'error');
+    }
+  };
+
   const handleDeliberate = async (query: string, attachedFiles: AttachedTextFile[], isFollowUp: boolean) => {
     if (!acquireDeliberationLock()) return;
 
     try {
-      const resolvedMode = resolveExecutionMode(executionMode, query, attachedFiles);
+      // "Use Single Model for Simple Questions" pins new deliberations to the
+      // single-primary-model Quick Panel path (no multi-panel peer review).
+      const resolvedMode = useSingleModelForSimple
+        ? 'quick_panel'
+        : resolveExecutionMode(executionMode, query, attachedFiles);
       const newRound: CouncilRound = {
         id: `round_${Date.now()}`,
         userQuery: query,
@@ -1004,6 +1089,7 @@ If the question contains code, documents, or attached files, treat them as avail
           signal: call.signal,
           maxTokens: maxTokens || 4000,
           webSearch: webEnabled,
+          disableFallback,
           onToken: (chunk) => {
             dispatch({ type: 'UPDATE_STAGE1_TOKEN', payload: { roundId: currentRoundState.id, personaId: persona.id, chunk } });
           },
@@ -1196,6 +1282,19 @@ If the question contains code, documents, or attached files, treat them as avail
               >
                 <Plus size={13} />
                 <span className="font-semibold">New Thread</span>
+              </button>
+            )}
+
+            {/* Export Session as Markdown */}
+            {rounds.length > 0 && (
+              <button
+                type="button"
+                onClick={handleExportSession}
+                className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 hover:border-slate-600 transition-colors cursor-pointer min-h-[34px]"
+                title="Export this thread (queries, proposals, critiques, syntheses, web sources) as a Markdown file"
+              >
+                <FileDown size={13} className="text-emerald-400" />
+                <span className="font-medium">Export .md</span>
               </button>
             )}
 

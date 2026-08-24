@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   classifyTriggerReason,
   computeOrderedBackupList,
@@ -6,8 +6,17 @@ import {
   getStoredFallbackEvents,
   clearStoredFallbackEvents,
   FallbackEvent,
+  streamPersonaWithFallback,
 } from '../fallbackManager';
+import { DEFAULT_POLICY } from '../executionPolicy';
 import { Persona } from '../../types';
+import { streamOpenRouterCompletion } from '../openrouter';
+
+vi.mock('../openrouter', () => ({
+  streamOpenRouterCompletion: vi.fn(),
+}));
+
+const mockedStream = streamOpenRouterCompletion as unknown as ReturnType<typeof vi.fn>;
 
 // Mock localStorage for node environment
 const localStorageMock = (() => {
@@ -171,6 +180,50 @@ describe('Fallback Manager tests', () => {
       expect(checkTruncation('max_tokens')).toBe(true);
       expect(checkTruncation('stop')).toBe(false);
       expect(checkTruncation(undefined)).toBe(false);
+    });
+  });
+
+  describe('streamPersonaWithFallback strict no-fallback mode', () => {
+    const persona: Persona = {
+      id: 'skeptic',
+      name: 'Skeptic',
+      role: 'Critic',
+      avatar: '🛡️',
+      model: 'google/gemini-2.5-flash',
+      systemPrompt: '',
+      color: '',
+    };
+
+    beforeEach(() => {
+      mockedStream.mockReset();
+    });
+
+    it('surfaces the raw error without trying backup models', async () => {
+      mockedStream.mockRejectedValueOnce(new Error('HTTP 402: credit balance too low'));
+      await expect(
+        streamPersonaWithFallback({
+          persona,
+          messages: [{ role: 'user', content: 'hi' }],
+          policy: DEFAULT_POLICY, // allowProviderFallback: true — must be ignored in strict mode
+          disableFallback: true,
+        })
+      ).rejects.toThrow('HTTP 402: credit balance too low');
+      expect(mockedStream).toHaveBeenCalledTimes(1);
+      expect(mockedStream.mock.calls[0][0].model).toBe(persona.model);
+    });
+
+    it('returns the pinned model result with fallbackOccurred=false on success', async () => {
+      mockedStream.mockResolvedValueOnce({ content: 'ok', actualModel: persona.model });
+      const res = await streamPersonaWithFallback({
+        persona,
+        messages: [{ role: 'user', content: 'hi' }],
+        policy: DEFAULT_POLICY,
+        disableFallback: true,
+      });
+      expect(res.content).toBe('ok');
+      expect(res.actualModel).toBe(persona.model);
+      expect(res.fallbackOccurred).toBe(false);
+      expect(mockedStream).toHaveBeenCalledTimes(1);
     });
   });
 });

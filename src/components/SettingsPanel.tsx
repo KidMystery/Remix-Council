@@ -37,8 +37,6 @@ interface SettingsPanelProps {
   setSynthesisMaxTokens?: (val: number) => void;
   panelTimeoutSeconds?: number;
   setPanelTimeoutSeconds?: (val: number) => void;
-  isProCompareEnabled?: boolean;
-  handleToggleProCompare?: () => void;
   setIsAuditModalOpen?: (val: boolean) => void;
   onRefreshModels?: (options?: { force?: boolean; applyToPersonas?: boolean }) => Promise<any>;
   activePresetId?: PresetId;
@@ -61,8 +59,6 @@ interface SettingsPanelProps {
   setUseSingleModelForSimple?: (val: boolean) => void;
   archivistRecentRounds?: number;
   setArchivistRecentRounds?: (val: number) => void;
-  proCompareModelId?: string;
-  setProCompareModelId?: (modelId: string) => void;
   disableFallback?: boolean;
   setDisableFallback?: (val: boolean) => void;
   disableLoadingOverlay?: boolean;
@@ -105,8 +101,6 @@ export function SettingsPanel({
   setSynthesisMaxTokens,
   panelTimeoutSeconds = 120,
   setPanelTimeoutSeconds,
-  isProCompareEnabled,
-  handleToggleProCompare,
   setIsAuditModalOpen,
   onRefreshModels,
   activePresetId: propActivePresetId,
@@ -128,8 +122,6 @@ export function SettingsPanel({
   setUseSingleModelForSimple,
   archivistRecentRounds = 2,
   setArchivistRecentRounds,
-  proCompareModelId = 'anthropic/claude-sonnet-4.5',
-  setProCompareModelId,
   disableFallback = false,
   setDisableFallback,
   disableLoadingOverlay = false,
@@ -322,8 +314,6 @@ export function SettingsPanel({
               setSynthesisMaxTokens={setSynthesisMaxTokens}
               panelTimeoutSeconds={panelTimeoutSeconds}
               setPanelTimeoutSeconds={setPanelTimeoutSeconds}
-              isProCompareEnabled={isProCompareEnabled}
-              handleToggleProCompare={handleToggleProCompare}
               setIsAuditModalOpen={setIsAuditModalOpen}
               maxRoundCostCeiling={maxRoundCostCeiling}
               setMaxRoundCostCeiling={setMaxRoundCostCeiling}
@@ -333,8 +323,6 @@ export function SettingsPanel({
               setUseSingleModelForSimple={setUseSingleModelForSimple}
               archivistRecentRounds={archivistRecentRounds}
               setArchivistRecentRounds={setArchivistRecentRounds}
-              proCompareModelId={proCompareModelId}
-              setProCompareModelId={setProCompareModelId}
               disableFallback={disableFallback}
               setDisableFallback={setDisableFallback}
               disableLoadingOverlay={disableLoadingOverlay}

@@ -19,8 +19,6 @@ interface SettingsAdvancedTabProps {
   setSynthesisMaxTokens?: (val: number) => void;
   panelTimeoutSeconds: number;
   setPanelTimeoutSeconds?: (val: number) => void;
-  isProCompareEnabled?: boolean;
-  handleToggleProCompare?: () => void;
   setIsAuditModalOpen?: (val: boolean) => void;
   maxRoundCostCeiling: number;
   setMaxRoundCostCeiling?: (val: number) => void;
@@ -30,8 +28,6 @@ interface SettingsAdvancedTabProps {
   setUseSingleModelForSimple?: (val: boolean) => void;
   archivistRecentRounds?: number;
   setArchivistRecentRounds?: (val: number) => void;
-  proCompareModelId?: string;
-  setProCompareModelId?: (modelId: string) => void;
   disableFallback?: boolean;
   setDisableFallback?: (val: boolean) => void;
   disableLoadingOverlay?: boolean;
@@ -65,8 +61,6 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
   setSynthesisMaxTokens,
   panelTimeoutSeconds,
   setPanelTimeoutSeconds,
-  isProCompareEnabled,
-  handleToggleProCompare,
   setIsAuditModalOpen,
   maxRoundCostCeiling,
   setMaxRoundCostCeiling,
@@ -76,8 +70,6 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
   setUseSingleModelForSimple,
   archivistRecentRounds = 2,
   setArchivistRecentRounds,
-  proCompareModelId = 'anthropic/claude-sonnet-4.5',
-  setProCompareModelId,
   disableFallback = false,
   setDisableFallback,
   disableLoadingOverlay = false,
@@ -216,83 +208,6 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
         <div className="pt-3 space-y-3 border-t border-slate-200/60 dark:border-slate-800/60">
           <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Features & Logs</h3>
           <div className="flex items-center justify-between">
-            <div>
-              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block">
-                Blind Pro Compare (Phase 2)
-              </label>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                Runs an independent adversarial evaluation alongside council consensus.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={handleToggleProCompare}
-              className={`px-3 py-1 rounded-md text-xs font-bold transition-colors ${
-                isProCompareEnabled
-                  ? 'bg-purple-600 text-white'
-                  : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
-              }`}
-            >
-              {isProCompareEnabled ? 'ON' : 'OFF'}
-            </button>
-          </div>
-
-          {/* Pro Compare Model Selector */}
-          {isProCompareEnabled && (
-            <div className="p-3 bg-purple-50/60 dark:bg-purple-950/30 rounded-lg border border-purple-200 dark:border-purple-800/50 space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="text-xs font-semibold text-purple-900 dark:text-purple-300">
-                  Target "Pro" Model
-                </label>
-                <span className="text-[10px] font-mono text-purple-700 dark:text-purple-400">
-                  {proCompareModelId}
-                </span>
-              </div>
-              {setProCompareModelId && (
-                <select
-                  value={proCompareModelId}
-                  onChange={(e) => setProCompareModelId(e.target.value)}
-                  aria-label="Target Pro Model for Blind Comparison"
-                  className="w-full text-xs font-mono p-2 rounded-md bg-white dark:bg-slate-900 border border-purple-300 dark:border-purple-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-purple-500"
-                >
-                  <optgroup label="Recommended Pro Engines">
-                    <option value="anthropic/claude-sonnet-4.5">Claude Sonnet 4.5 (Anthropic)</option>
-                    <option value="openai/gpt-5.1">GPT-5.1 (OpenAI)</option>
-                    <option value="google/gemini-2.5-pro">Gemini 2.5 Pro (Google)</option>
-                    <option value="deepseek/deepseek-r1">DeepSeek R1 (DeepSeek)</option>
-                    <option value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B (Meta)</option>
-                    <option value="google/gemini-3.7-flash">Gemini 3.7 Flash (Google)</option>
-                  </optgroup>
-                  {availableModels.length > 0 && (
-                    <optgroup label="All Available Models">
-                      {availableModels
-                        .filter(
-                          (m) =>
-                            ![
-                              'anthropic/claude-sonnet-4.5',
-                              'openai/gpt-5.1',
-                              'google/gemini-2.5-pro',
-                              'deepseek/deepseek-r1',
-                              'meta-llama/llama-3.3-70b-instruct',
-                              'google/gemini-3.7-flash',
-                            ].includes(m.id)
-                        )
-                        .map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.name || m.id}
-                          </option>
-                        ))}
-                    </optgroup>
-                  )}
-                </select>
-              )}
-              <p className="text-[10px] text-purple-700/80 dark:text-purple-300/70 leading-relaxed">
-                Uses the adversarial evaluation system prompt to critically review, challenge assumptions, and independently benchmark against the council's synthesized output.
-              </p>
-            </div>
-          )}
-
-          <div className="flex items-center justify-between">
             <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
               Telemetry & Audit Logs
             </label>
@@ -425,7 +340,7 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
               />
             </label>
             <p className="text-[11px] text-slate-500">
-              For quick panel requests, uses 1 single primary model instead of full multi-panel deliberation.
+              Routes new deliberations to the single-model Quick Panel (one primary model, no multi-panel peer review). Fastest and cheapest mode.
             </p>
           </div>
 

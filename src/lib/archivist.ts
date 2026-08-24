@@ -345,3 +345,40 @@ export async function buildArchivistContext(
   result.archivistSummary = archivistSummary;
   return result;
 }
+
+/**
+ * Hierarchical memory (used by the Chamber's run loop):
+ * recent rounds stay verbatim; older rounds are handed off for compression.
+ */
+export interface HierarchicalMemorySplit {
+  /** Number of rounds kept in the verbatim recent window. */
+  window: number;
+  /** Verbatim consensus of the most recent `window` rounds. '' when none. */
+  recentBlock: string;
+  /** Older rounds that should be compressed into an executive summary. */
+  olderRounds: CouncilRound[];
+}
+
+/**
+ * Splits a session's rounds into a verbatim "recent" window (the Archivist
+ * slider) and the older rounds that need condensing. Pure — no LLM calls.
+ */
+export function splitRecentRounds(
+  rounds: CouncilRound[],
+  window = 2
+): HierarchicalMemorySplit {
+  const w = Math.max(1, Math.min(10, Math.floor(window) || 1));
+  const recent = rounds.slice(-w);
+  const olderRounds = rounds.slice(0, Math.max(0, rounds.length - w));
+
+  const recentBlock = recent
+    .map((r, i) => {
+      const consensus =
+        r.synthesis?.content || r.deliberation?.stage3?.content || '(no consensus recorded)';
+      const label = `Round ${rounds.length - recent.length + i + 1} ("${(r.userQuery || '').slice(0, 140)}")`;
+      return `${label}\n${consensus.slice(0, 2400)}`;
+    })
+    .join('\n\n---\n\n');
+
+  return { window: w, recentBlock, olderRounds };
+}

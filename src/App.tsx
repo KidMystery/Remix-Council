@@ -93,13 +93,11 @@ export default function App() {
   const [quickPanelMaxTokens, setQuickPanelMaxTokens] = useState(350);
   const [synthesisMaxTokens, setSynthesisMaxTokens] = useState(500);
   const [panelTimeoutSeconds, setPanelTimeoutSeconds] = useState(120);
-  const [isProCompareEnabled, setIsProCompareEnabled] = useState(false);
   const [autoSelectModels, setAutoSelectModels] = useState(true);
   const [maxRoundCostCeiling, setMaxRoundCostCeiling] = useState(0);
   const [stopAfterStage1, setStopAfterStage1] = useState(false);
   const [useSingleModelForSimple, setUseSingleModelForSimple] = useState(false);
   const [archivistRecentRounds, setArchivistRecentRounds] = useState(2);
-  const [proCompareModelId, setProCompareModelId] = useState('anthropic/claude-sonnet-4.5');
   const [disableFallback, setDisableFallback] = useState(false);
   const [disableLoadingOverlay, setDisableLoadingOverlay] = useState(false);
   const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>({
@@ -319,6 +317,9 @@ export default function App() {
               panelTimeoutSeconds={panelTimeoutSeconds}
               stopAfterStage1={stopAfterStage1}
               maxRoundCostCeiling={maxRoundCostCeiling}
+              archivistRecentRounds={archivistRecentRounds}
+              disableFallback={disableFallback}
+              useSingleModelForSimple={useSingleModelForSimple}
               autoSaveState={autoSaveState}
               lastSavedAt={lastSavedAt}
               isSaving={isSaving}
@@ -370,8 +371,6 @@ export default function App() {
         setSynthesisMaxTokens={setSynthesisMaxTokens}
         panelTimeoutSeconds={panelTimeoutSeconds}
         setPanelTimeoutSeconds={setPanelTimeoutSeconds}
-        isProCompareEnabled={isProCompareEnabled}
-        handleToggleProCompare={() => setIsProCompareEnabled((v) => !v)}
         setIsAuditModalOpen={setIsAuditModalOpen}
         onRefreshModels={hookRecs.refreshModelRecommendations}
         activePresetId={activePresetId}
@@ -393,8 +392,6 @@ export default function App() {
         setUseSingleModelForSimple={setUseSingleModelForSimple}
         archivistRecentRounds={archivistRecentRounds}
         setArchivistRecentRounds={setArchivistRecentRounds}
-        proCompareModelId={proCompareModelId}
-        setProCompareModelId={setProCompareModelId}
         disableFallback={disableFallback}
         setDisableFallback={setDisableFallback}
         disableLoadingOverlay={disableLoadingOverlay}

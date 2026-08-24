@@ -8,12 +8,16 @@ import { streamOpenRouter } from './openrouter';
  */
 export async function compressSessionContext(
   rounds: CouncilRound[],
-  compressionModel: string = 'google/gemini-2.5-flash'
+  compressionModel: string = 'google/gemini-2.5-flash',
+  options: { keepLast?: boolean } = {}
 ): Promise<string> {
   if (rounds.length <= 1) return '';
 
-  // Take all rounds except the most recent active one
-  const priorRounds = rounds.slice(0, -1);
+  // Default: summarize everything except the most recent active round.
+  // With keepLast, every round in the input is summarized (used when the
+  // caller already excluded the active round — e.g. hierarchical memory).
+  const priorRounds = options.keepLast ? rounds : rounds.slice(0, -1);
+  if (priorRounds.length === 0) return '';
   const contextCorpus = priorRounds
     .map((r, i) => {
       const s3 = r.deliberation?.stage3?.content || 'No final synthesis recorded.';

@@ -165,6 +165,8 @@ export interface StreamPersonaWithFallbackOptions {
   query?: string;
   webSearch?: boolean;
   onGrounding?: (grounding: GroundingData) => void;
+  /** Strict no-fallback mode: surface raw errors instead of swapping models. */
+  disableFallback?: boolean;
 }
 
 export interface StreamPersonaWithFallbackResult {
@@ -184,7 +186,7 @@ export interface StreamPersonaWithFallbackResult {
 export async function streamPersonaWithFallback(
   options: StreamPersonaWithFallbackOptions
 ): Promise<StreamPersonaWithFallbackResult> {
-  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding } = options;
+  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding, disableFallback } = options;
 
   const isFreeOnlyPreset = policy.budget === 'free';
   const originalModel = persona.model;
@@ -195,6 +197,22 @@ export async function streamPersonaWithFallback(
   // forbid paid upgrades; free→free swaps are always allowed.
   let startModel = originalModel;
   let policySubstituted = false;
+  // Strict no-fallback mode: pin to the configured model and surface raw errors.
+  if (disableFallback) {
+    const strictRes = await streamOpenRouterCompletion({
+      model: originalModel,
+      messages,
+      temperature,
+      maxTokens,
+      budget: budget || policy.budget,
+      query,
+      signal,
+      webSearch,
+      onToken,
+      onGrounding,
+    });
+    return { ...strictRes, actualModel: strictRes.actualModel || originalModel, fallbackOccurred: false };
+  }
   if (isFreeOnlyPreset && !isFreeModelId(originalModel, rawModels)) {
     const freeCandidates = computeOrderedBackupList({
       activePersonas: [persona],
@@ -269,6 +287,7 @@ export async function streamPersonaWithFallback(
         webSearch,
         onToken,
         onGrounding,
+        disableFallback,
       };
 
       const streamResult = await streamOpenRouterCompletion(streamOptions);
