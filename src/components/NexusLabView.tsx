@@ -63,7 +63,7 @@ export interface NexusLabViewProps {
   costCeiling: CostCeilingConfig;
 }
 
-export type NexusExecutionMode = 'autonomous' | 'mini_deliberation' | 'model_rotation';
+export type NexusExecutionMode = 'agent' | 'autonomous' | 'mini_deliberation' | 'model_rotation';
 export type NexusEnginePreset = 'frontier_trio' | 'deep_reasoning' | 'fast_and_free' | 'active_council' | 'custom';
 
 export const CURATED_NEXUS_MODELS = [
@@ -282,6 +282,15 @@ export function getPresetRoster(
   return { personas: basePersonas, synthesizer: baseSynthesizer };
 }
 
+/** Safe hostname for citation chips (annotations should always carry URLs). */
+function sourceHost(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return String(url || '').slice(0, 40) || 'source';
+  }
+}
+
 const MISSIONS_STORAGE_KEY = 'nexus-missions-v1';
 const ARCHIVE_STORAGE_KEY = 'nexus-missions-archive-v1';
 const MAX_STORED_CONTENT_CHARS = 5000;
@@ -304,6 +313,8 @@ interface PersistedMission {
   nightShift?: { cycles: number; paceMinutes: number } | null;
   /** Server-run agent job (re-attachable after a reload or tab close). */
   serverJobId?: string | null;
+  /** Which execution mode produced this mission. */
+  executionMode?: string | null;
 }
 
 function loadArchive(): PersistedMission[] {
@@ -416,7 +427,9 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [followUpDirective, setFollowUpDirective] = useState('');
   const [followUpContext, setFollowUpContext] = useState<string | null>(null);
   const [maxIterations, setMaxIterations] = useState(3);
-  const [executionMode, setExecutionMode] = useState<NexusExecutionMode>('autonomous');
+  // Agent Mode is the default: assess -> plan -> research -> deliberate ->
+  // fact-check -> answer, executed by the server-side agent loop.
+  const [executionMode, setExecutionMode] = useState<NexusExecutionMode>('agent');
   const [enginePreset, setEnginePreset] = useState<NexusEnginePreset>('frontier_trio');
   const [activePreset, setActivePreset] = useState<'fast_and_free' | 'deep_council'>('deep_council');
   
@@ -518,6 +531,10 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       if (persisted.serverJobId) {
         setServerMode(true);
         setServerJobId(persisted.serverJobId);
+        setExecutionMode('agent');
+      }
+      if (persisted.executionMode && ['agent', 'autonomous', 'mini_deliberation', 'model_rotation'].includes(persisted.executionMode)) {
+        setExecutionMode(persisted.executionMode as NexusExecutionMode);
       }
       if (persisted.attachedFiles && Array.isArray(persisted.attachedFiles)) {
         setAttachedFiles(persisted.attachedFiles);
@@ -687,7 +704,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     const estCost = getEstimatedCost();
     setEstimatedMissionCost(estCost);
 
-    if (serverMode) {
+    if (executionMode === 'agent' || serverMode) {
       startServerAgentExecution();
       return;
     }
@@ -714,7 +731,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
     const attachmentContext =
       attachedFiles.length > 0
-        ? attachedFiles.map((f) => `--- File: ${f.name} ---\n${f.content.slice(0, 8000)}`).join('\n\n')
+        ? attachedFiles.map((f) => `--- File: ${f.name} ---\n${f.content.slice(0, 15000)}`).join('\n\n')
         : '';
     const carriedContext = followUpContext ? `[Prior Mission Consensus Memory]\n${followUpContext.slice(0, 6000)}` : '';
     const context = [carriedContext, attachmentContext].filter(Boolean).join('\n\n');
@@ -723,7 +740,9 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     const capRaw = costCeiling.requireApprovalAboveDollars;
     const jobCap = capRaw > 0 ? Math.min(25, Math.max(0.5, capRaw)) : undefined;
 
-    addLog(`☁️ Launching server-side mission (plan → research → falsify → Morning Brief)...`);
+    addLog(
+      `☁️ Launching server-side agent mission (assess → plan → research → falsify → fact-check)${jobCap ? ` — capped at $${jobCap.toFixed(2)}` : ' — server cost cap applies'}...`
+    );
     try {
       const { id } = await launchAgentJob({
         goal: missionGoal,
@@ -752,6 +771,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         morningBrief: null,
         nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
         serverJobId: id,
+        executionMode,
         updatedAt: Date.now(),
       });
       addLog(`📡 Server mission ${id} accepted — you can close this tab; it keeps working.`);
@@ -835,6 +855,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       morningBrief: job.brief || null,
       nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
       serverJobId: job.id,
+      executionMode,
       updatedAt: Date.now(),
     });
     addLog(`✨ Server mission complete — ${job.passes.length} pass(es), ${job.research.length} research item(s), ${(job.citationsList || []).length} source(s).`);
@@ -1157,6 +1178,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         attachedFiles,
         morningBrief,
         nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
+        executionMode,
         updatedAt: Date.now(),
       });
 
@@ -1251,6 +1273,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       attachedFiles,
       morningBrief: finalMorningBrief || morningBrief,
       nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
+        executionMode,
       updatedAt: Date.now(),
     });
   };
@@ -1665,6 +1688,23 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">
                 Execution Mode
               </label>
+              <button
+                type="button"
+                onClick={() => setExecutionMode('agent')}
+                disabled={isRunning}
+                className={`w-full py-2.5 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-2 border ${
+                  executionMode === 'agent'
+                    ? 'bg-sky-500 text-slate-950 shadow-md shadow-sky-500/20 border-sky-400'
+                    : 'text-slate-300 bg-slate-950/80 border-slate-700 hover:border-sky-600'
+                }`}
+                title="Server-side agent: it assesses the question, drafts a plan, researches with live citations, deliberates, fact-checks, then answers — and keeps working if you close the tab"
+              >
+                <Cpu size={14} />
+                <span className="flex-1 text-left">⚡ Agent Mode</span>
+                <span className={`text-[10px] font-mono ${executionMode === 'agent' ? 'text-slate-900' : 'text-sky-400'}`}>
+                  plan → research → fact-check
+                </span>
+              </button>
               <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-950/80 rounded-2xl border border-slate-800">
                 <button
                   type="button"
@@ -1839,7 +1879,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               <label className="flex items-center justify-between p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer hover:border-slate-700">
                 <div className="flex items-center gap-2 text-xs text-slate-300">
                   <Globe size={14} className="text-cyan-400" />
-                  <span>Live Web Grounding</span>
+                  <span>{executionMode === 'agent' ? 'Live Research (with citations)' : 'Live Web Grounding'}</span>
                 </div>
                 <input
                   type="checkbox"
@@ -1850,21 +1890,31 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 />
               </label>
 
-              <label className="flex items-center justify-between p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer hover:border-slate-700">
-                <div className="flex items-center gap-2 text-xs text-slate-300">
-                  <Code2 size={14} className="text-purple-400" />
-                  <span>Sandboxed Code Verifier</span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={enableCodeSandbox}
-                  onChange={(e) => setEnableCodeSandbox(e.target.checked)}
-                  disabled={isRunning}
-                  className="rounded text-emerald-500 focus:ring-0"
-                />
-              </label>
+              {executionMode === 'agent' && (
+                <p className="text-[10px] text-slate-500 leading-relaxed px-1 -mt-1">
+                  Agent Mode researches on the server — each research pass cites its sources, and the
+                  final verdict is fact-checked against them. Off = the agent reasons from its own
+                  knowledge only.
+                </p>
+              )}
 
-              <div className="p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl space-y-2">
+              {executionMode !== 'agent' && (
+                <label className="flex items-center justify-between p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer hover:border-slate-700">
+                  <div className="flex items-center gap-2 text-xs text-slate-300">
+                    <Code2 size={14} className="text-purple-400" />
+                    <span>Sandboxed Code Verifier</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={enableCodeSandbox}
+                    onChange={(e) => setEnableCodeSandbox(e.target.checked)}
+                    disabled={isRunning}
+                    className="rounded text-emerald-500 focus:ring-0"
+                  />
+                </label>
+              )}
+
+              <div className={`p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl space-y-2 ${executionMode === 'agent' ? 'hidden' : ''}`}>
                 <label className="flex items-center justify-between cursor-pointer">
                   <div className="flex items-center gap-2 text-xs text-slate-300">
                     <Layers size={14} className="text-emerald-400" />
@@ -1964,7 +2014,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 )}
               </div>
 
-              <div className="p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl">
+              <div className={`p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl ${executionMode === 'agent' ? 'hidden' : ''}`}>
                 <label className="flex items-center justify-between cursor-pointer">
                   <div className="flex items-center gap-2 text-xs text-slate-300">
                     <Moon size={14} className="text-sky-300" />
@@ -1998,17 +2048,21 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 >
                   <Play size={13} className="fill-current" />
                   <span>
-                    {currentIteration > 0
-                      ? 'Resume Cycle'
-                      : deepDocumentMode
-                        ? 'Run Deep Review'
-                        : serverMode
-                          ? nightShiftEnabled && executionMode !== 'mini_deliberation'
-                            ? '🌙☁️ Night Shift on Server'
-                            : '☁️ Run on Server'
-                          : nightShiftEnabled && executionMode !== 'mini_deliberation'
-                            ? '🌙 Run Night Shift'
-                            : 'Execute Nexus Lab'}
+                    {executionMode === 'agent'
+                      ? currentIteration > 0
+                        ? 'Resume Agent Mission'
+                        : '⚡ Run Agent Mode'
+                      : currentIteration > 0
+                        ? 'Resume Cycle'
+                        : deepDocumentMode
+                          ? 'Run Deep Review'
+                          : serverMode
+                            ? nightShiftEnabled && executionMode !== 'mini_deliberation'
+                              ? '🌙☁️ Night Shift on Server'
+                              : '☁️ Run on Server'
+                            : nightShiftEnabled && executionMode !== 'mini_deliberation'
+                              ? '🌙 Run Night Shift'
+                              : 'Execute Nexus Lab'}
                   </span>
                 </button>
               ) : (
@@ -2130,23 +2184,62 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
             )}
           </div>
 
-          {/* Live server mission progress (plan → research → falsify → brief) */}
-          {serverJob && isRunning && (
+          {/* Live server agent mission (assess → plan → research → falsify → fact-check) */}
+          {serverJob && !isAgentJobTerminal(serverJob.status) && (
             <div className="p-5 bg-slate-900/90 border border-sky-700/50 rounded-3xl shadow-xl space-y-2.5">
               <div className="flex items-center justify-between border-b border-slate-800 pb-2 text-xs">
                 <span className="font-bold text-sky-300 flex items-center gap-2">
                   <Loader2 size={13} className="animate-spin" />
-                  Server Mission — {serverJob.progress.phase}
+                  Agent Mission — {serverJob.progress.phase}
                 </span>
                 <span className="font-mono text-[11px] text-slate-400">${serverJob.usageUSD.toFixed(4)} USD</span>
               </div>
               <p className="text-[11px] text-slate-400 leading-relaxed">{serverJob.progress.detail}</p>
               {serverJob.plan && (
-                <div className="text-[11px] text-slate-400 leading-relaxed">
-                  <span className="text-slate-300 font-semibold">Plan: </span>
-                  {serverJob.plan.summary}
+                <div className="space-y-1.5 text-[11px] text-slate-400">
+                  <div>
+                    <span className="text-slate-300 font-semibold">Plan: </span>
+                    {serverJob.plan.summary}
+                  </div>
+                  {serverJob.plan.steps.length > 0 && (
+                    <ul className="space-y-0.5 pl-4 list-disc">
+                      {serverJob.plan.steps.map((s, i) => (
+                        <li key={i} className="truncate" title={s}>{s}</li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
+              {serverJob.research.map((r, i) => (
+                <div key={i} className="p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl space-y-1">
+                  <div className="text-[10px] font-mono text-cyan-300 flex items-center gap-2 flex-wrap">
+                    <Globe size={11} />
+                    {r.query}
+                    {r.sources.length > 0 && (
+                      <span className="text-slate-500">({r.sources.length} source{r.sources.length === 1 ? '' : 's'})</span>
+                    )}
+                  </div>
+                  {r.findings && (
+                    <p className="text-[10px] text-slate-400 leading-relaxed line-clamp-3">{r.findings}</p>
+                  )}
+                  {r.sources.length > 0 && (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {r.sources.slice(0, 4).map((s, j) => (
+                        <a
+                          key={j}
+                          href={s.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[9px] font-mono text-sky-400 hover:text-sky-300 bg-sky-950/60 border border-sky-800/60 px-1.5 py-0.5 rounded"
+                          title={s.title || s.url}
+                        >
+                          {s.title || sourceHost(s.url)}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
               <div className="flex items-center gap-3 text-[10px] font-mono text-slate-500 flex-wrap">
                 <span>research: {serverJob.research.length}</span>
                 <span>passes: {serverJob.passes.length}</span>
@@ -2154,7 +2247,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 {serverJob.spec?.model && <span>model: {serverJob.spec.model.split('/').pop()}</span>}
               </div>
               <p className="text-[10px] text-slate-500">
-                You can close this tab — the mission keeps running on the server.
+                You can close this tab — the mission keeps working on the server.
               </p>
             </div>
           )}
@@ -2169,6 +2262,73 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               <div className="text-xs text-slate-200 leading-relaxed">
                 <MessageMarkdown content={morningBrief} />
               </div>
+            </div>
+          )}
+
+          {/* Completed agent mission report: the plan, research, and citations
+              stay visible alongside the hydrated verdict cards below. */}
+          {serverJob && isAgentJobTerminal(serverJob.status) && rounds.length > 0 && (
+            <div className="p-5 bg-slate-900/90 border border-slate-800 rounded-3xl shadow-xl space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2 text-xs">
+                <span className="font-bold text-sky-300 flex items-center gap-2">
+                  <CheckCircle2 size={13} className="text-emerald-400" />
+                  Agent Mission Report
+                </span>
+                <span className="font-mono text-[11px] text-slate-400">
+                  {serverJob.status === 'done' ? 'complete' : serverJob.status} · ${serverJob.usageUSD.toFixed(4)} USD
+                </span>
+              </div>
+              {serverJob.plan && (
+                <div className="space-y-1.5 text-[11px] text-slate-400">
+                  <div className="text-slate-300 font-semibold text-xs">The plan</div>
+                  <p>{serverJob.plan.summary}</p>
+                  {serverJob.plan.steps.length > 0 && (
+                    <ul className="space-y-0.5 pl-4 list-disc">
+                      {serverJob.plan.steps.map((s, i) => (
+                        <li key={i}>{s}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              {serverJob.research.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-slate-300 font-semibold text-xs">What was researched</div>
+                  {serverJob.research.map((r, i) => (
+                    <div key={i} className="p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl space-y-1.5">
+                      <div className="text-[10px] font-mono text-cyan-300 flex items-center gap-2 flex-wrap">
+                        <Globe size={11} />
+                        {r.query}
+                      </div>
+                      {r.findings && !r.findings.startsWith('[Research failed') && (
+                        <p className="text-[10px] text-slate-400 leading-relaxed max-h-24 overflow-y-auto">{r.findings}</p>
+                      )}
+                      {r.sources.length > 0 && (
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {r.sources.map((s, j) => (
+                            <a
+                              key={j}
+                              href={s.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[9px] font-mono text-sky-400 hover:text-sky-300 bg-sky-950/60 border border-sky-800/60 px-1.5 py-0.5 rounded"
+                              title={s.title || s.url}
+                            >
+                              {s.title || sourceHost(s.url)}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {serverJob.confidence && (
+                <div className="text-[11px] text-slate-400 leading-relaxed border-t border-slate-800 pt-2">
+                  <span className="text-slate-300 font-semibold">Confidence: </span>
+                  {serverJob.confidence}
+                </div>
+              )}
             </div>
           )}
 
