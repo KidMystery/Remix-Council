@@ -97,6 +97,8 @@ export default function App() {
   const [maxRoundCostCeiling, setMaxRoundCostCeiling] = useState(0);
   const [stopAfterStage1, setStopAfterStage1] = useState(false);
   const [useSingleModelForSimple, setUseSingleModelForSimple] = useState(false);
+  // Confidence Ledger — opt-in Chamber add-on (default off).
+  const [outcomeTrackingEnabled, setOutcomeTrackingEnabled] = useState(false);
   const [archivistRecentRounds, setArchivistRecentRounds] = useState(2);
   const [disableFallback, setDisableFallback] = useState(false);
   const [disableLoadingOverlay, setDisableLoadingOverlay] = useState(false);
@@ -320,6 +322,7 @@ export default function App() {
               archivistRecentRounds={archivistRecentRounds}
               disableFallback={disableFallback}
               useSingleModelForSimple={useSingleModelForSimple}
+              outcomeTrackingEnabled={outcomeTrackingEnabled}
               autoSaveState={autoSaveState}
               lastSavedAt={lastSavedAt}
               isSaving={isSaving}
@@ -389,6 +392,8 @@ export default function App() {
         stopAfterStage1={stopAfterStage1}
         setStopAfterStage1={setStopAfterStage1}
         useSingleModelForSimple={useSingleModelForSimple}
+        outcomeTrackingEnabled={outcomeTrackingEnabled}
+        setOutcomeTrackingEnabled={setOutcomeTrackingEnabled}
         setUseSingleModelForSimple={setUseSingleModelForSimple}
         archivistRecentRounds={archivistRecentRounds}
         setArchivistRecentRounds={setArchivistRecentRounds}

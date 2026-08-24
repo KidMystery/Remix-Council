@@ -44,6 +44,7 @@ import {
   saveGlobalBible,
   exportOracleThreads,
   importOracleThreads,
+  ORACLE_DEFAULT_MODEL,
   DEFAULT_MINI_DELIBERATION_MODELS,
   DEFAULT_ROTATION_ROSTER,
   VISION_SAFE_FALLBACK_MODEL,
@@ -58,7 +59,17 @@ import {
   resolveRotationModel,
   filterVisionSafeRoster,
 } from '../lib/oracleModelPool';
+import {
+  detectBriefingCandidates,
+  filterBriefingCandidates,
+  loadBriefingStore,
+  recordBriefingConvened,
+  dismissBriefingTopic,
+  capitalizeLabel,
+  ORACLE_BRIEFINGS_UPDATED_EVENT,
+} from '../lib/briefingDetector';
 import type { OracleCustomModel } from '../lib/oracleModelPool';
+import type { BriefingCandidate } from '../lib/briefingDetector';
 import { modelHasVision } from '../lib/modelScoring';
 import { streamOpenRouterCompletion } from '../lib/openrouter';
 import { streamWithTokenGovernor } from '../lib/tokenGovernor';
@@ -124,6 +135,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
   const [driveSyncState, setDriveSyncState] = useState<'idle' | 'syncing' | 'saved' | 'error'>('idle');
   const [lastDriveSync, setLastDriveSync] = useState<number | null>(null);
   const [customModels, setCustomModels] = useState<OracleCustomModel[]>(() => loadCustomOracleModels());
+  const [briefingStoreVersion, setBriefingStoreVersion] = useState(0);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
   const [threadDraftTitle, setThreadDraftTitle] = useState('');
   const [confirmClearThreadId, setConfirmClearThreadId] = useState<string | null>(null);
@@ -146,8 +158,13 @@ export const OracleView: React.FC<OracleViewProps> = ({
       // The custom model pool / direct palette may have changed too.
       setCustomModels(loadCustomOracleModels());
     };
+    const handleBriefingsUpdated = () => setBriefingStoreVersion((v) => v + 1);
     window.addEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
-    return () => window.removeEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
+    window.addEventListener(ORACLE_BRIEFINGS_UPDATED_EVENT, handleBriefingsUpdated);
+    return () => {
+      window.removeEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
+      window.removeEventListener(ORACLE_BRIEFINGS_UPDATED_EVENT, handleBriefingsUpdated);
+    };
   }, []);
 
   const { speak, stop, speakingId, loadingId, voice: activeVoice, setVoice, availableVoices } = useSpeech();
@@ -171,6 +188,26 @@ export const OracleView: React.FC<OracleViewProps> = ({
     () => buildOracleModelOptions(catalog, customModels),
     [catalog, customModels]
   );
+
+  // Unasked Verdict: locally detect topics the owner keeps circling across
+  // threads (zero tokens) and offer a council briefing on the top candidate.
+  const briefingCandidate: BriefingCandidate | null = useMemo(() => {
+    try {
+      const store = loadBriefingStore();
+      if (!store.settings.enabled) return null;
+      const candidates = filterBriefingCandidates(
+        detectBriefingCandidates(threads, {
+          minMentions: store.settings.minMentions,
+          lookbackDays: store.settings.lookbackDays,
+        }),
+        store
+      );
+      return candidates[0] || null;
+    } catch {
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threads, briefingStoreVersion]);
 
   // Drive sync
   useEffect(() => {
@@ -275,6 +312,34 @@ export const OracleView: React.FC<OracleViewProps> = ({
     commitThread({ ...thread, ...patch, updatedAt: Date.now() });
   };
 
+  const handleConveneBriefing = () => {
+    const candidate = briefingCandidate;
+    if (!candidate || isBusy) return;
+    const t = newOracleThread(activeThread?.model || ORACLE_DEFAULT_MODEL);
+    t.title = `Council Briefing — ${capitalizeLabel(candidate.label)}`;
+    t.mode = 'mini_deliberation';
+    t.miniDeliberationModels = [
+      ...(activeThread?.miniDeliberationModels && activeThread.miniDeliberationModels.length > 0
+        ? activeThread.miniDeliberationModels
+        : DEFAULT_MINI_DELIBERATION_MODELS),
+    ];
+    t.webEnabled = activeThread?.webEnabled ?? true;
+    t.reflectEnabled = activeThread?.reflectEnabled ?? true;
+    t.rotateVoices = false;
+    const next = [t, ...threadsRef.current];
+    threadsRef.current = next;
+    setThreads(next);
+    setActiveId(t.id);
+    saveOracleThreads(next);
+    recordBriefingConvened(candidate.key);
+    const text = `Please convene a full mini-council on this recurring question: ${candidate.label}\n\nMy latest framing:\n${candidate.sample}`;
+    void handleSend(text, [], [], undefined, false, t.id);
+  };
+
+  const handleDismissBriefing = () => {
+    if (briefingCandidate) dismissBriefingTopic(briefingCandidate.key);
+  };
+
   const handleClearActiveThreadMessages = (threadId: string) => {
     patchThread(threadId, { messages: [] });
     setConfirmClearThreadId(null);
@@ -333,11 +398,13 @@ export const OracleView: React.FC<OracleViewProps> = ({
     images: OracleImage[],
     files: OracleTextFile[],
     modelOverride?: string,
-    isRetry = false
+    isRetry = false,
+    threadIdOverride?: string
   ) => {
     if (!text.trim() && images.length === 0 && files.length === 0) return;
-    if (!activeId || isBusy) return;
-    const thread = threadsRef.current.find((t) => t.id === activeId);
+    const targetThreadId = threadIdOverride || activeId;
+    if (!targetThreadId || isBusy) return;
+    const thread = threadsRef.current.find((t) => t.id === targetThreadId);
     if (!thread) return;
 
     const controller = new AbortController();
@@ -867,6 +934,44 @@ export const OracleView: React.FC<OracleViewProps> = ({
             )}
           </div>
         </header>
+
+        {/* Unasked Verdict — a topic the owner keeps circling across threads */}
+        {briefingCandidate && (
+          <div className="flex items-center gap-3 flex-wrap p-3.5 bg-gradient-to-r from-amber-950/70 via-slate-900 to-slate-900 border border-amber-600/40 rounded-2xl shadow-lg">
+            <span className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/40 shrink-0">
+              <Sparkles size={16} className="text-amber-300" />
+            </span>
+            <div className="flex-1 min-w-[240px] text-xs text-slate-300 leading-relaxed">
+              <span className="font-semibold text-amber-200">You've circled this one a few times.</span>{' '}
+              Asked about{' '}
+              <span className="font-mono text-amber-300">“{briefingCandidate.label}”</span> in{' '}
+              {briefingCandidate.threads} thread{briefingCandidate.threads === 1 ? '' : 's'} across{' '}
+              {briefingCandidate.mentions} question{briefingCandidate.mentions === 1 ? '' : 's'}. Want a
+              council briefing on it?
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleConveneBriefing}
+                disabled={isBusy}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-xs font-bold cursor-pointer shadow-md transition-colors"
+                title="Convene a mini-council to settle this recurring question"
+              >
+                <Sparkles size={13} />
+                Convene mini-council
+              </button>
+              <button
+                type="button"
+                onClick={handleDismissBriefing}
+                disabled={isBusy}
+                className="inline-flex items-center px-2.5 py-1.5 rounded-xl text-xs text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-500 cursor-pointer disabled:opacity-50"
+                title="Snooze this suggestion (a new mention will bring it back)"
+              >
+                Later
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Controls and Thread Strip */}
         <div className="flex flex-col space-y-3">

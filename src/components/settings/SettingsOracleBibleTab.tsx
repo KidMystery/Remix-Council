@@ -27,6 +27,11 @@ import {
   restoreDefaultOracleDirectList,
   defaultOracleDirectList,
 } from '../../lib/oracleModelPool';
+import {
+  loadBriefingStore,
+  updateBriefingSettings,
+} from '../../lib/briefingDetector';
+import type { BriefingSettings } from '../../lib/briefingDetector';
 import type { OracleCustomModel, OracleModelOption, OracleModelStatus } from '../../lib/oracleModelPool';
 import type { RawOpenRouterModel } from '../../types';
 import { copyToClipboard } from '../../lib/clipboard';
@@ -63,6 +68,14 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
     vision: boolean | null;
   } | null>(null);
   const [customInputError, setCustomInputError] = useState<string | null>(null);
+  const [briefingSettings, setBriefingSettings] = useState<BriefingSettings>(
+    () => loadBriefingStore().settings
+  );
+
+  const handleBriefingSettingsChange = (patch: Partial<BriefingSettings>) => {
+    const next = updateBriefingSettings(patch);
+    setBriefingSettings(next);
+  };
 
   // ---- Model & Modes (moved off the main Oracle page) ----
   const [modelDraft, setModelDraft] = useState<{
@@ -737,6 +750,52 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
               })}
             </div>
           )}
+        </div>
+
+        {/* Council Briefings (Unasked Verdict) — zero-token local suggestions */}
+        <div className="space-y-1.5 border-t border-slate-200 dark:border-slate-800 pt-3">
+          <div className="flex items-center justify-between gap-2">
+            <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
+              Council Briefings (Unasked Verdict)
+            </label>
+            <input
+              type="checkbox"
+              checked={briefingSettings.enabled}
+              onChange={(e) => handleBriefingSettingsChange({ enabled: e.target.checked })}
+              className="rounded text-fuchsia-500 focus:ring-0 cursor-pointer"
+            />
+          </div>
+          <p className="text-[10px] text-slate-500 dark:text-slate-400">
+            The Oracle notices when you keep circling the same decision-style question across threads
+            and offers to convene a mini-council. Detection is local and costs nothing — nothing runs
+            until you click “Convene”. Personal topics are always excluded.
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="flex items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-400">
+              Suggest after
+              <select
+                value={briefingSettings.minMentions}
+                onChange={(e) => handleBriefingSettingsChange({ minMentions: parseInt(e.target.value) || 3 })}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-[11px] rounded-lg px-2 py-1 outline-none"
+              >
+                {[2, 3, 4, 5, 6].map((n) => (
+                  <option key={n} value={n}>{n} mentions</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-400">
+              looking back
+              <select
+                value={briefingSettings.lookbackDays}
+                onChange={(e) => handleBriefingSettingsChange({ lookbackDays: parseInt(e.target.value) || 14 })}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-[11px] rounded-lg px-2 py-1 outline-none"
+              >
+                {[3, 7, 14, 30].map((n) => (
+                  <option key={n} value={n}>{n} days</option>
+                ))}
+              </select>
+            </label>
+          </div>
         </div>
 
         <div className="flex items-center justify-end gap-2 pt-1">

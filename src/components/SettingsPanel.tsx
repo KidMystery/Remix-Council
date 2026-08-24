@@ -57,6 +57,8 @@ interface SettingsPanelProps {
   setStopAfterStage1?: (val: boolean) => void;
   useSingleModelForSimple?: boolean;
   setUseSingleModelForSimple?: (val: boolean) => void;
+  outcomeTrackingEnabled?: boolean;
+  setOutcomeTrackingEnabled?: (val: boolean) => void;
   archivistRecentRounds?: number;
   setArchivistRecentRounds?: (val: number) => void;
   disableFallback?: boolean;
@@ -119,6 +121,8 @@ export function SettingsPanel({
   stopAfterStage1 = false,
   setStopAfterStage1,
   useSingleModelForSimple = false,
+  outcomeTrackingEnabled = false,
+  setOutcomeTrackingEnabled,
   setUseSingleModelForSimple,
   archivistRecentRounds = 2,
   setArchivistRecentRounds,
@@ -321,6 +325,8 @@ export function SettingsPanel({
               setStopAfterStage1={setStopAfterStage1}
               useSingleModelForSimple={useSingleModelForSimple}
               setUseSingleModelForSimple={setUseSingleModelForSimple}
+              outcomeTrackingEnabled={outcomeTrackingEnabled}
+              setOutcomeTrackingEnabled={setOutcomeTrackingEnabled}
               archivistRecentRounds={archivistRecentRounds}
               setArchivistRecentRounds={setArchivistRecentRounds}
               disableFallback={disableFallback}

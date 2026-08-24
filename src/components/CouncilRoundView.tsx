@@ -15,8 +15,11 @@ import {
   AlertTriangle,
   Trash2,
   Loader2,
+  Target,
 } from 'lucide-react';
 import type { CouncilRound, Persona } from '../types';
+import { OUTCOME_LABELS } from '../lib/outcomeLedger';
+import type { TrackedOutcome, LedgerOutcome } from '../lib/outcomeLedger';
 import { useSpeech } from '../hooks/useSpeech';
 import { copyToClipboard } from '../lib/clipboard';
 import { countRoundCost, formatCost } from '../lib/archivist';
@@ -38,6 +41,11 @@ export interface CouncilRoundViewProps {
   onDeleteRound?: (roundId: string) => void;
   isDeliberating?: boolean;
   showConsensusVisualizer?: boolean;
+  /** Confidence Ledger (opt-in): whether outcome tracking is enabled. */
+  outcomeTrackingEnabled?: boolean;
+  trackedOutcome?: TrackedOutcome | null;
+  onTrackRound?: () => void;
+  onSetOutcome?: (outcome: LedgerOutcome) => void;
 }
 
 interface CardHeaderProps {
@@ -209,6 +217,10 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
   onRegeneratePersona,
   onForkBranch,
   onDeleteRound,
+  outcomeTrackingEnabled = false,
+  trackedOutcome = null,
+  onTrackRound,
+  onSetOutcome,
   isDeliberating = false,
   showConsensusVisualizer = false,
 }) => {
@@ -420,6 +432,52 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
             </button>
           ) : (
             <>
+              {outcomeTrackingEnabled && round.synthesis?.status === 'completed' && (
+                <div
+                  className="flex items-center gap-0.5 p-0.5 rounded-lg border border-slate-700 bg-slate-950/70"
+                  title="Confidence Ledger — only rounds you explicitly track are recorded"
+                >
+                  {!trackedOutcome ? (
+                    <button
+                      onClick={onTrackRound}
+                      disabled={isDeliberating}
+                      className="inline-flex items-center gap-1 text-[10px] font-mono text-cyan-300 hover:text-cyan-200 px-2 py-1 rounded-md transition-colors disabled:opacity-50 cursor-pointer"
+                      title="Track this verdict and mark how it turns out"
+                    >
+                      <Target size={11} />
+                      <span>Track verdict</span>
+                    </button>
+                  ) : (
+                    <>
+                      {(['worked', 'didnt', 'ignored', 'pending'] as LedgerOutcome[]).map((o) => {
+                        const active = trackedOutcome.outcome === o;
+                        return (
+                          <button
+                            key={o}
+                            onClick={() => onSetOutcome?.(o)}
+                            disabled={isDeliberating}
+                            title={OUTCOME_LABELS[o]}
+                            aria-label={`Mark verdict: ${OUTCOME_LABELS[o]}`}
+                            className={`inline-flex items-center justify-center w-7 h-6 rounded-md text-[11px] font-bold transition-colors disabled:opacity-50 cursor-pointer ${
+                              active
+                                ? o === 'worked'
+                                  ? 'bg-emerald-600/30 text-emerald-300 border border-emerald-600/60'
+                                  : o === 'didnt'
+                                    ? 'bg-red-600/30 text-red-300 border border-red-600/60'
+                                    : o === 'ignored'
+                                      ? 'bg-slate-700/60 text-slate-300 border border-slate-500/60'
+                                      : 'bg-amber-600/30 text-amber-300 border border-amber-600/60'
+                                : 'text-slate-500 hover:text-slate-300'
+                            }`}
+                          >
+                            {o === 'worked' ? '✓' : o === 'didnt' ? '✗' : o === 'ignored' ? '↷' : '…'}
+                          </button>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
+              )}
               {onForkBranch && (
                 <button
                   onClick={() => setIsForking(!isForking)}

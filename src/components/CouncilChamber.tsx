@@ -13,6 +13,7 @@ import {
   Sparkles,
   ChevronDown,
   FileDown,
+  Target,
 } from 'lucide-react';
 import type {
   Persona,
@@ -40,6 +41,16 @@ import { CouncilRoundView } from './CouncilRoundView';
 import { Composer } from './Composer';
 import { CouncilSummaryBar } from './CouncilSummaryBar';
 import { CHAIRMAN_PROMPT } from '../data';
+import {
+  loadOutcomeLedger,
+  trackOutcome,
+  setTrackedOutcome,
+  buildLedgerStats,
+  describeStat,
+  classifyOutcomeDomain,
+  MIN_RESOLVED_FOR_RATIO,
+} from '../lib/outcomeLedger';
+import type { TrackedOutcome, LedgerOutcome } from '../lib/outcomeLedger';
 
 export interface CouncilSettings {
   enableChunking: boolean;
@@ -83,6 +94,8 @@ export interface CouncilChamberProps {
   disableFallback?: boolean;
   /** Simple questions resolve to the single-model Quick Panel path. */
   useSingleModelForSimple?: boolean;
+  /** Opt-in Confidence Ledger: track verdict outcomes (default off). */
+  outcomeTrackingEnabled?: boolean;
   autoSaveState?: AutoSaveState;
   lastSavedAt?: number | null;
   isSaving?: boolean;
@@ -200,6 +213,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   archivistRecentRounds = 2,
   disableFallback = false,
   useSingleModelForSimple = false,
+  outcomeTrackingEnabled = false,
   autoSaveState,
   lastSavedAt,
   isSaving,
@@ -222,6 +236,39 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   const [lastDomain, setLastDomain] = useState<string | undefined>(undefined);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
+  // Confidence Ledger (opt-in add-on): only rounds the owner explicitly tracks.
+  const [outcomeLedger, setOutcomeLedger] = useState<TrackedOutcome[]>(() => loadOutcomeLedger());
+  const [showTrackRecord, setShowTrackRecord] = useState(false);
+
+  const handleTrackRound = (round: CouncilRound) => {
+    const personasList: TrackedOutcome['personas'] = [];
+    const models: string[] = [];
+    Object.entries(round.deliberation?.stage1 || {}).forEach(([pid, r]) => {
+      const persona = personas.find((p) => p.id === pid);
+      const model = r.actualModel || r.model;
+      personasList.push({ id: pid, name: persona?.name || pid, model });
+      if (model) models.push(model);
+    });
+    if (round.deliberation?.stage3?.model) models.push(round.deliberation.stage3.model);
+    if (round.synthesis?.model) models.push(round.synthesis.model);
+    const next = trackOutcome({
+      id: round.id,
+      sessionId: activeSessionId || undefined,
+      query: round.userQuery,
+      domain: classifyOutcomeDomain(round.userQuery, round.attachedTextFiles),
+      personas: personasList,
+      models: [...new Set(models)],
+    });
+    setOutcomeLedger(next);
+  };
+
+  const handleSetRoundOutcome = (roundId: string, outcome: LedgerOutcome) => {
+    setOutcomeLedger(setTrackedOutcome(roundId, outcome));
+  };
+
+  const ledgerStats = outcomeTrackingEnabled
+    ? buildLedgerStats(outcomeLedger)
+    : { total: { tracked: 0, resolved: 0, correct: 0, wrong: 0 }, byPersona: {}, byModel: {}, byDomain: {} };
 
   /** Human-readable error text (AbortError => clean "Stopped" message). */
   const friendlyError = (err: any): string =>
@@ -1319,6 +1366,82 @@ If the question contains code, documents, or attached files, treat them as avail
               </button>
             )}
 
+            {/* Confidence Ledger — opt-in track record */}
+            {outcomeTrackingEnabled && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowTrackRecord((v) => !v)}
+                  className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 hover:border-slate-600 transition-colors cursor-pointer min-h-[34px]"
+                  title="Who was right, for you? — the ledger of tracked verdict outcomes"
+                >
+                  <Target size={13} className="text-cyan-400" />
+                  <span className="font-medium">Track Record</span>
+                  {outcomeLedger.length > 0 && (
+                    <span className="text-[9px] font-mono text-cyan-300 bg-cyan-950/80 border border-cyan-800/60 px-1.5 py-0.5 rounded-full">
+                      {outcomeLedger.length}
+                    </span>
+                  )}
+                </button>
+                {showTrackRecord && (
+                  <div className="absolute right-0 mt-1.5 w-80 max-w-[90vw] bg-slate-950 border border-slate-700 rounded-xl shadow-2xl p-3 z-50 space-y-2 animate-fadeIn text-xs">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                      <span className="font-semibold text-slate-200">Confidence Ledger</span>
+                      <button
+                        type="button"
+                        onClick={() => setShowTrackRecord(false)}
+                        className="text-slate-500 hover:text-slate-300 cursor-pointer"
+                        aria-label="Close track record"
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                    {outcomeLedger.length === 0 ? (
+                      <p className="text-slate-400 text-[11px] leading-relaxed">
+                        Nothing tracked yet. On any completed round, click{' '}
+                        <span className="text-cyan-300">Track verdict</span>, then mark how it
+                        turned out. Only what you explicitly track is recorded.
+                      </p>
+                    ) : (
+                      <>
+                        <div className="text-[11px] text-slate-400">
+                          Overall: <span className="text-slate-200 font-mono">{describeStat(ledgerStats.total)}</span>
+                        </div>
+                        {Object.keys(ledgerStats.byPersona).length > 0 && (
+                          <div className="space-y-1">
+                            <div className="text-[10px] uppercase tracking-wider text-slate-500">By panelist</div>
+                            {Object.entries(ledgerStats.byPersona).map(([id, row]) => (
+                              <div key={id} className="flex items-center justify-between gap-2 text-[11px]">
+                                <span className="text-slate-300 truncate">{row.name}</span>
+                                <span className="font-mono text-slate-400 shrink-0">{describeStat(row)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {Object.keys(ledgerStats.byModel).length > 0 && (
+                          <div className="space-y-1">
+                            <div className="text-[10px] uppercase tracking-wider text-slate-500">By model</div>
+                            {Object.entries(ledgerStats.byModel)
+                              .sort((a, b) => b[1].tracked - a[1].tracked)
+                              .map(([model, row]) => (
+                                <div key={model} className="flex items-center justify-between gap-2 text-[11px]">
+                                  <span className="text-slate-300 truncate font-mono">{model.split('/').pop()}</span>
+                                  <span className="font-mono text-slate-400 shrink-0">{describeStat(row)}</span>
+                                </div>
+                              ))}
+                          </div>
+                        )}
+                        <p className="text-[10px] text-slate-500 leading-relaxed border-t border-slate-800 pt-1.5">
+                          Ratios appear after {MIN_RESOLVED_FOR_RATIO} resolved outcomes — until then
+                          the ledger says it's still gathering evidence.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Dynamic Clear Active History */}
             {onClearActiveHistory && rounds.length > 0 && (
               <ConfirmButton
@@ -1438,6 +1561,10 @@ If the question contains code, documents, or attached files, treat them as avail
             } : undefined}
             isDeliberating={isDeliberating}
             showConsensusVisualizer={effectiveSettings.showConsensusVisualizer}
+            outcomeTrackingEnabled={outcomeTrackingEnabled}
+            trackedOutcome={outcomeLedger.find((e) => e.id === round.id) || null}
+            onTrackRound={() => handleTrackRound(round)}
+            onSetOutcome={(o) => handleSetRoundOutcome(round.id, o)}
           />
         ))}
       </div>

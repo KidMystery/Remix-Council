@@ -25,6 +25,7 @@ import {
   Eye,
   Loader2,
   ChevronDown,
+  Moon,
 } from 'lucide-react';
 import type {
   Persona,
@@ -291,6 +292,9 @@ interface PersistedMission {
   estimatedCost: number;
   attachedFiles?: AttachedTextFile[];
   updatedAt: number;
+  /** Night Shift morning-brief changelog (what changed overnight). */
+  morningBrief?: string | null;
+  nightShift?: { cycles: number; paceMinutes: number } | null;
 }
 
 function loadArchive(): PersistedMission[] {
@@ -438,6 +442,11 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [enableCodeSandbox, setEnableCodeSandbox] = useState(true);
   const [deepDocumentMode, setDeepDocumentMode] = useState(false);
   const [pagesPerChunk, setPagesPerChunk] = useState(20);
+  // Night Shift: deeper falsification passes + a Morning Brief changelog.
+  const [nightShiftEnabled, setNightShiftEnabled] = useState(false);
+  const [nightShiftCycles, setNightShiftCycles] = useState(5);
+  const [nightShiftPaceMinutes, setNightShiftPaceMinutes] = useState(0);
+  const [morningBrief, setMorningBrief] = useState<string | null>(null);
   const [documentPlan, setDocumentPlan] = useState<DocumentChunkPlan | null>(null);
 
   const [attachedFiles, setAttachedFiles] = useState<AttachedTextFile[]>([]);
@@ -487,6 +496,12 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       setConsensusMetrics(persisted.consensusMetrics);
       setMissionStatus(persisted.status);
       setEstimatedMissionCost(persisted.estimatedCost);
+      setMorningBrief(persisted.morningBrief || null);
+      if (persisted.nightShift) {
+        setNightShiftEnabled(true);
+        setNightShiftCycles(persisted.nightShift.cycles || 5);
+        setNightShiftPaceMinutes(persisted.nightShift.paceMinutes || 0);
+      }
       if (persisted.attachedFiles && Array.isArray(persisted.attachedFiles)) {
         setAttachedFiles(persisted.attachedFiles);
       }
@@ -603,7 +618,9 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
           return pricingIsFree(m);
         }));
     const activePersonas = activeRosterPersonas.filter((p) => p.enabled !== false);
-    const passes = executionMode === 'mini_deliberation' ? 1 : maxIterations;
+    let passes = executionMode === 'mini_deliberation' ? 1 : maxIterations;
+    // Night Shift adds one more paid pass: the Morning Brief synthesis.
+    if (nightShiftEnabled && passes > 1) passes += 1;
     return calculateEstimatedCost(activePersonas, catalog, passes, isFree);
   };
 
@@ -668,6 +685,21 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     let docChunks: ReturnType<typeof chunkDocuments>['chunks'] = [];
     let documentLedger = '';
 
+    // Night Shift widens the falsification ladder and (optionally) paces it out.
+    const effectiveIterations =
+      executionMode === 'mini_deliberation'
+        ? maxIterations
+        : nightShiftEnabled
+          ? Math.max(2, nightShiftCycles)
+          : maxIterations;
+    if (nightShiftEnabled && executionMode !== 'mini_deliberation') {
+      addLog(
+        `🌙 Night Shift armed: ${effectiveIterations} falsification passes${
+          nightShiftPaceMinutes > 0 ? `, ${nightShiftPaceMinutes} min pacing between passes` : ''
+        } + Morning Brief. Runs while this tab is open.`
+      );
+    }
+
     if (needsChunking) {
       docPlan = chunkDocuments(textSources, { pagesPerChunk });
       docChunks = docPlan.chunks;
@@ -698,7 +730,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         },
       ];
     } else if (executionMode === 'model_rotation') {
-      addLog(`🔄 Initializing Nexus Model Rotation across ${maxIterations} specialized cycles...`);
+      addLog(`🔄 Initializing Nexus Model Rotation across ${effectiveIterations} specialized cycles...`);
       const rotationThemes = [
         'Cycle 1: Strategic Foundations & Core Architecture',
         'Cycle 2: Operational Implementation, Code & Vulnerability Audit',
@@ -707,18 +739,18 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         'Cycle 5: Comprehensive Cross-Model Alignment & Verification',
         'Cycle 6: Final Hardened Blueprint & Actionable Execution',
       ];
-      plan = Array.from({ length: maxIterations }, (_, i) => ({
+      plan = Array.from({ length: effectiveIterations }, (_, i) => ({
         label: `🔄 ${rotationThemes[i % rotationThemes.length]}`,
         iter: i + 1,
         query: `[Nexus Model Rotation — ${rotationThemes[i % rotationThemes.length]}]:\nDirective: ${missionGoal}${attachmentContext}${carriedContext}\n\nLead Panelist Seat: ${activePersonas[i % activePersonas.length]?.name || 'Specialist'}.\nFocus deeply on the specific domain of this rotation cycle.`,
         rotationFocus: rotationThemes[i % rotationThemes.length],
       }));
     } else {
-      addLog(`🚀 Initializing Nexus Lab Mission with ${maxIterations} autonomous cycles...`);
-      plan = Array.from({ length: maxIterations }, (_, i) => ({
-        label: `⚡ Cycle ${i + 1}/${maxIterations}`,
+      addLog(`🚀 Initializing Nexus Lab Mission with ${effectiveIterations} autonomous cycles...`);
+      plan = Array.from({ length: effectiveIterations }, (_, i) => ({
+        label: `⚡ Cycle ${i + 1}/${effectiveIterations}`,
         iter: i + 1,
-        query: `[Nexus Lab Cycle ${i + 1}/${maxIterations}]:\nDirective: ${missionGoal}${attachmentContext}${carriedContext}`,
+        query: `[Nexus Lab Cycle ${i + 1}/${effectiveIterations}]:\nDirective: ${missionGoal}${attachmentContext}${carriedContext}`,
       }));
     }
 
@@ -809,9 +841,23 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
         // Reconsideration pass: from cycle 2 onward, the chair must adversarially
         // re-examine the previous consensus instead of simply repeating it.
+        // Night Shift escalates the falsification focus pass by pass.
+        const NIGHT_SHIFT_ESCALATION = [
+          'the factual claims and cited numbers',
+          'the cost, pricing, and estimate assumptions',
+          'the failure modes, edge cases, and risks',
+          'the overconfident generalizations and unstated assumptions',
+          'whether the final recommendation is actually actionable given real constraints',
+        ];
+        const nightShiftFocus =
+          nightShiftEnabled && qi > 0
+            ? `\n5) Night Shift focus for this pass — concentrate your falsification on: ${
+                NIGHT_SHIFT_ESCALATION[(qi - 1) % NIGHT_SHIFT_ESCALATION.length]
+              }.`
+            : '';
         const reconsiderBlock =
           qi > 0 && previousSynthesis
-            ? `\n\n[Self-Correction Pass — do NOT simply repeat the previous cycle]:\nPrevious consensus (${previousMetric?.agreementScore ?? 'unknown'}% agreement):\n${previousSynthesis.slice(0, 3500)}\n\nInstructions:\n1) Adversarially falsify the previous consensus: hunt for factual errors, unsupported claims, missing failure modes, and overconfident generalizations.\n2) Re-derive any critical claim you cannot defend from the panel's findings; if you have web tooling, prefer live verification over memory.\n3) Only change the consensus where you have substantive justification.\n4) State explicitly: what you changed versus the previous cycle and why, and list the top remaining risks/pitfalls.`
+            ? `\n\n[Self-Correction Pass — do NOT simply repeat the previous cycle]:\nPrevious consensus (${previousMetric?.agreementScore ?? 'unknown'}% agreement):\n${previousSynthesis.slice(0, 3500)}\n\nInstructions:\n1) Adversarially falsify the previous consensus: hunt for factual errors, unsupported claims, missing failure modes, and overconfident generalizations.\n2) Re-derive any critical claim you cannot defend from the panel's findings; if you have web tooling, prefer live verification over memory.\n3) Only change the consensus where you have substantive justification.\n4) State explicitly: what you changed versus the previous cycle and why, and list the top remaining risks/pitfalls.${nightShiftFocus}`
             : '';
 
         const synthRes = await streamPersonaWithFallback({
@@ -906,12 +952,71 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         consensusMetrics: accumulatedMetrics,
         estimatedCost: getEstimatedCost(),
         attachedFiles,
+        morningBrief,
+        nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
         updatedAt: Date.now(),
       });
 
-      // Short delay between iterations
-      await new Promise((r) => setTimeout(r, 800));
+      // Inter-pass pacing. Night Shift can spread passes out across the night;
+      // the wait stays interruptible so Pause always responds quickly.
+      if (nightShiftEnabled && qi < plan.length - 1 && nightShiftPaceMinutes > 0) {
+        addLog(
+          `🌙 Night Shift: pacing ${nightShiftPaceMinutes} min before the next falsification pass (the mission keeps working while this tab is open).`
+        );
+        const paceMs = nightShiftPaceMinutes * 60_000;
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < paceMs && !pauseRequestedRef.current) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      } else {
+        await new Promise((r) => setTimeout(r, 800));
+      }
     }
+
+    // Night Shift Morning Brief: one final chair pass that turns the whole
+    // cycle history into a "what changed overnight" changelog.
+    let finalMorningBrief: string | null = null;
+    if (nightShiftEnabled && totalPasses > 1) {
+      addLog('🌅 Night Shift: writing the Morning Brief (what changed overnight)...');
+      try {
+        const chairPersona: Persona = {
+          ...activeRosterSynthesizer,
+          id: activeRosterSynthesizer.id || 'synthesizer',
+          name: activeRosterSynthesizer.name || 'Presiding Nexus Chair',
+          role: activeRosterSynthesizer.role || 'Chair',
+        };
+        const cycleDigest = accumulatedRounds
+          .map((r, i) => {
+            const content = stripJsonBlocks(
+              r.synthesis?.content || r.deliberation?.stage3?.content || ''
+            );
+            const score = r.synthesis?.consensusMetric?.agreementScore;
+            return `## Cycle ${i + 1} consensus${typeof score === 'number' ? ` (${score}% agreement)` : ''}\n${content.slice(0, 1400)}`;
+          })
+          .join('\n\n');
+        const briefRes = await streamPersonaWithFallback({
+          persona: chairPersona,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are the Presiding Nexus Chair writing the Morning Brief for an overnight Night Shift mission. The owner is waking up and needs a changelog, not a rerun. Output exactly these markdown sections with no preamble:\n## What I set out to do\n## Initial consensus\n## What changed overnight\n(for each reversal: what changed and why it changed)\n## Final verdict\n## Top remaining pitfalls\n## Confidence\n(honest: what supports it, what would raise it — do not oversell).',
+            },
+            {
+              role: 'user',
+              content: `Mission directive:\n${missionGoal}\n\nFull cycle consensus history:\n${cycleDigest}`,
+            },
+          ],
+          policy,
+          rawModels: catalog,
+          sessionId: activeSessionId ?? undefined,
+        });
+        finalMorningBrief = briefRes.content || '';
+      } catch (err: any) {
+        addLog(`❌ Morning Brief failed (final verdicts still stand): ${err.message}`);
+      }
+    }
+    if (finalMorningBrief) setMorningBrief(finalMorningBrief);
 
     const finalMetrics = accumulatedMetrics;
     const lastScore = finalMetrics.length > 0 ? finalMetrics[finalMetrics.length - 1].agreementScore : 50;
@@ -941,6 +1046,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       consensusMetrics: finalMetrics,
       estimatedCost: getEstimatedCost(),
       attachedFiles,
+      morningBrief: finalMorningBrief || morningBrief,
+      nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
       updatedAt: Date.now(),
     });
   };
@@ -966,6 +1073,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setFollowUpDirective('');
     setDocumentPlan(null);
     setShowDossier(false);
+    setMorningBrief(null);
+    setNightShiftEnabled(false);
     persistMission(null);
     addLog(`🔄 Nexus Lab reset to standby.`);
   };
@@ -991,6 +1100,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       consensusMetrics,
       estimatedCost: getEstimatedCost(),
       attachedFiles,
+      morningBrief,
+      nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
       updatedAt: Date.now(),
     };
     pushArchive(finishedMission);
@@ -1005,6 +1116,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setDocumentPlan(null);
     setMissionStatus('idle');
     setTerminalLogs([]);
+    setMorningBrief(null);
+    setNightShiftEnabled(false);
     persistMission(null);
     addLog(`🔁 Follow-up directive set. Prior mission consensus carried forward.`);
   };
@@ -1062,6 +1175,13 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       lines.push(`The mission reached the maximum iteration limit with a final agreement score of ${lastMetric?.agreementScore ?? 'N/A'}%. Consider refining the directive or raising the cycle budget.`);
     }
     lines.push('');
+
+    if (morningBrief) {
+      lines.push(`## 🌅 Morning Brief (Night Shift)`);
+      lines.push('');
+      lines.push(morningBrief);
+      lines.push('');
+    }
 
     return lines.join('\n');
   };
@@ -1565,6 +1685,68 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                   </div>
                 )}
               </div>
+
+              <div className="p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl space-y-2">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <div className="flex items-center gap-2 text-xs text-slate-300">
+                    <Moon size={14} className="text-indigo-300" />
+                    <div>
+                      <div>🌙 Night Shift</div>
+                      <div className="text-[10px] text-slate-500 font-normal">
+                        Deeper falsification passes + a “what changed overnight” Morning Brief.
+                        Runs while this tab is open.
+                      </div>
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={nightShiftEnabled}
+                    onChange={(e) => setNightShiftEnabled(e.target.checked)}
+                    disabled={isRunning}
+                    className="rounded text-indigo-500 focus:ring-0"
+                  />
+                </label>
+
+                {nightShiftEnabled && (
+                  <div className="space-y-1.5 pl-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] text-slate-400">Falsification passes</span>
+                      <select
+                        value={nightShiftCycles}
+                        onChange={(e) => setNightShiftCycles(parseInt(e.target.value) || 5)}
+                        disabled={isRunning}
+                        className="bg-slate-950 text-slate-200 text-xs p-1.5 rounded-lg border border-slate-800"
+                      >
+                        {[3, 4, 5, 6, 7, 8].map((n) => (
+                          <option key={n} value={n}>{n} cycles</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] text-slate-400">Pace between passes</span>
+                      <select
+                        value={nightShiftPaceMinutes}
+                        onChange={(e) => setNightShiftPaceMinutes(parseInt(e.target.value) || 0)}
+                        disabled={isRunning}
+                        className="bg-slate-950 text-slate-200 text-xs p-1.5 rounded-lg border border-slate-800"
+                      >
+                        <option value={0}>None (back-to-back)</option>
+                        <option value={5}>5 min</option>
+                        <option value={10}>10 min</option>
+                        <option value={20}>20 min</option>
+                        <option value={30}>30 min</option>
+                        <option value={60}>1 hr</option>
+                        <option value={120}>2 hr</option>
+                      </select>
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-relaxed">
+                      Each pass falsifies the previous consensus on a different front (facts → costs →
+                      failure modes → assumptions → actionability), then the Chair writes the Morning
+                      Brief changelog. One extra paid pass is added to the cost estimate.
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Execution Buttons */}
@@ -1577,7 +1759,15 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                   className="flex-1 inline-flex items-center justify-center gap-2 py-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 disabled:opacity-50 text-slate-950 font-bold rounded-2xl text-xs shadow-lg shadow-emerald-900/30 transition-all cursor-pointer"
                 >
                   <Play size={13} className="fill-current" />
-                  <span>{currentIteration > 0 ? 'Resume Cycle' : deepDocumentMode ? 'Run Deep Review' : 'Execute Nexus Lab'}</span>
+                  <span>
+                    {currentIteration > 0
+                      ? 'Resume Cycle'
+                      : deepDocumentMode
+                        ? 'Run Deep Review'
+                        : nightShiftEnabled && executionMode !== 'mini_deliberation'
+                          ? '🌙 Run Night Shift'
+                          : 'Execute Nexus Lab'}
+                  </span>
                 </button>
               ) : (
                 <button
@@ -1698,6 +1888,19 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
             )}
           </div>
 
+          {/* Night Shift Morning Brief — the "what changed overnight" changelog */}
+          {morningBrief && rounds.length > 0 && (
+            <div className="p-5 bg-gradient-to-r from-indigo-950/80 via-slate-900 to-slate-900 border border-indigo-700/50 rounded-3xl shadow-xl space-y-2">
+              <div className="flex items-center gap-2 text-xs font-bold text-indigo-300 border-b border-slate-800 pb-2">
+                <Moon size={14} />
+                Morning Brief — what changed overnight
+              </div>
+              <div className="text-xs text-slate-200 leading-relaxed">
+                <MessageMarkdown content={morningBrief} />
+              </div>
+            </div>
+          )}
+
           {/* Iteration Findings Feed — clean by default: final verdict in full,
               earlier cycles as one-liners. Toggle reveals the full thread. */}
           {rounds.length > 0 && (
@@ -1805,12 +2008,20 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-slate-400">Planned Cycles:</span>
-                <span className="font-mono text-slate-300">{maxIterations} Cycles</span>
+                <span className="font-mono text-slate-300">
+                  {nightShiftEnabled && executionMode !== 'mini_deliberation' ? nightShiftCycles : maxIterations} Cycles
+                  {nightShiftEnabled && executionMode !== 'mini_deliberation' ? ' + Morning Brief' : ''}
+                </span>
               </div>
             </div>
 
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              This autonomous mission will orchestrate multi-model panels across {maxIterations} cycles. Confirm execution to proceed.
+              This autonomous mission will orchestrate multi-model panels across{' '}
+              {nightShiftEnabled && executionMode !== 'mini_deliberation' ? nightShiftCycles : maxIterations} cycles
+              {nightShiftEnabled && executionMode !== 'mini_deliberation'
+                ? ', each falsifying the previous consensus, plus a final Morning Brief synthesis'
+                : ''}
+              . Confirm execution to proceed.
             </p>
 
             <div className="flex items-center justify-end gap-3 pt-2">
