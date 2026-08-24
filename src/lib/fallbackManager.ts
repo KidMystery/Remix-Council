@@ -1,5 +1,5 @@
 import type { Persona, RawOpenRouterModel, GroundingData } from '../types';
-import { type ExecutionPolicy, isFreeModelId } from './executionPolicy';
+import { type ExecutionPolicy, assertPolicyModel, isFreeModelId } from './executionPolicy';
 import { streamOpenRouterCompletion, type StreamOpenRouterCompletionOptions } from './openrouter';
 
 export interface FallbackEvent {
@@ -181,73 +181,23 @@ export async function streamPersonaWithFallback(
 
   const isFreeOnlyPreset = policy.budget === 'free';
   const originalModel = persona.model;
-
-  // Free mode: never abort just because the configured model isn't verified
-  // free in the live catalog — auto-select a verified-free replacement instead
-  // (that is the whole point of auto-select). Provider-fallback rules still
-  // forbid paid upgrades; free→free swaps are always allowed.
-  let startModel = originalModel;
-  let policySubstituted = false;
-  if (isFreeOnlyPreset && !isFreeModelId(originalModel, rawModels)) {
-    const freeCandidates = computeOrderedBackupList({
-      activePersonas: [persona],
-      failingPersonaId: persona.id,
-      rawModels,
-      isFreeOnlyPreset: true,
-    });
-    const replacement = freeCandidates[0]?.model;
-    if (!replacement) {
-      throw new Error(
-        `Free mode: "${originalModel}" is not verified free right now and no free models are available in the catalog. Try again in a moment or switch to a paid preset.`
-      );
-    }
-    policySubstituted = true;
-    startModel = replacement;
-    saveFallbackEvent({
-      id: `fb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      timestamp: Date.now(),
-      personaId: persona.id,
-      personaName: persona.name,
-      originalModel,
-      failedModel: originalModel,
-      triggerReason: 'Policy: not free — auto-switched',
-      errorMessage: `"${originalModel}" failed the verified-free check; free mode substituted a free model.`,
-      replacementModel: replacement,
-      replacementModelName: cleanName(replacement),
-      status: 'fallback_success',
-    });
-    console.warn(
-      `[FallbackManager] Free mode: "${originalModel}" is not verified free — auto-switching to "${replacement}".`
-    );
-  }
-
-  // Free mode always allows free→free swaps even when provider fallback is
-  // disabled; that ban exists to prevent silent paid upgrades.
-  const backups: BackupCandidate[] = (policy.allowProviderFallback || isFreeOnlyPreset)
+  const backups: BackupCandidate[] = policy.allowProviderFallback
     ? computeOrderedBackupList({
-        activePersonas: [{ ...persona, model: startModel }],
+        activePersonas: [persona],
         failingPersonaId: persona.id,
         rawModels,
         isFreeOnlyPreset,
       })
     : [];
 
-  const attemptChain: string[] = Array.from(
-    new Set([startModel, ...backups.map((b) => b.model)])
-  );
+  const attemptChain: string[] = [originalModel, ...backups.map((b) => b.model)];
 
   let attempts = 0;
   let lastError: any = null;
 
   for (const currentModel of attemptChain) {
-    // Enforce policy per attempt: in free mode, skip (don't abort on) any
-    // candidate that isn't verified free in the live catalog.
-    if (isFreeOnlyPreset && !isFreeModelId(currentModel, rawModels)) {
-      console.warn(
-        `[FallbackManager] Skipping "${currentModel}" — not verified free in the live catalog.`
-      );
-      continue;
-    }
+    // Enforce policy on every model attempt (free budget => verified free models only).
+    assertPolicyModel(currentModel, policy, rawModels);
 
     attempts++;
     try {
@@ -279,7 +229,7 @@ export async function streamPersonaWithFallback(
       return {
         content: streamContent,
         actualModel: actualExecutedModel,
-        fallbackOccurred: attempts > 1 || policySubstituted,
+        fallbackOccurred: attempts > 1,
         usage: streamResult.usage,
         grounding: streamResult.grounding,
         finishReason: streamResult.finishReason,
@@ -310,15 +260,7 @@ export async function streamPersonaWithFallback(
     }
   }
 
-  throw new Error(
-    isFreeOnlyPreset
-      ? `Every candidate for "${originalModel}" failed or lost free status. Last error: ${
-          lastError?.message || 'unknown'
-        }. Try again shortly or switch to a paid preset.`
-      : `No policy-compliant fallback for "${originalModel}". Last error: ${
-          lastError?.message || 'unknown'
-        }.`
-  );
+  throw new Error(`No policy-compliant fallback for "${originalModel}".`);
 }
 
 function cleanName(modelId: string): string {

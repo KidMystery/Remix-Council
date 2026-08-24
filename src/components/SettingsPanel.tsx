@@ -147,7 +147,7 @@ export function SettingsPanel({
   setEnableWeightTuning,
 }: SettingsPanelProps) {
   const [activeTab, setActiveTab] = useState<'personas' | 'presets' | 'advanced' | 'theme' | 'notifications' | 'account'>('personas');
-  const [usageData, setUsageData] = useState<{ usage: number; limit: number | null; remaining?: number | null } | null>(null);
+  const [usageData, setUsageData] = useState<{ usage: number; limit: number | null } | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editingPersona, setEditingPersona] = useState<Persona | null>(null);
 
@@ -155,7 +155,7 @@ export function SettingsPanel({
 
   useEffect(() => {
     if (credits.limit !== null) {
-      setUsageData({ usage: credits.usage, limit: credits.limit, remaining: credits.remaining });
+      setUsageData({ usage: credits.usage, limit: credits.limit });
     }
   }, [credits]);
 

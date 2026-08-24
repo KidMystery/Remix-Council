@@ -65,7 +65,7 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
       {/* Mobile backdrop overlay for sidebar */}
       {isOpen && (
         <div
-          className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-50 sm:hidden transition-opacity duration-300"
+          className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-40 sm:hidden transition-opacity duration-300"
           onClick={onClose}
         />
       )}
@@ -79,7 +79,7 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
           isOpen
             ? 'translate-x-0 w-80 border-r shadow-2xl sm:shadow-none'
             : '-translate-x-full sm:translate-x-0 w-80 sm:w-0 border-r-0 pointer-events-none sm:pointer-events-auto'
-        } fixed inset-y-0 left-0 sm:static sm:inset-auto shrink-0 bg-white dark:bg-slate-900/98 backdrop-blur-md border-slate-200 dark:border-slate-800 transition-all duration-300 ease-in-out flex flex-col h-full z-50 overflow-hidden`}
+        } fixed inset-y-0 left-0 sm:static sm:inset-auto shrink-0 bg-white dark:bg-slate-900/98 backdrop-blur-md border-slate-200 dark:border-slate-800 transition-all duration-300 ease-in-out flex flex-col h-full z-40 overflow-hidden`}
       >
         {/* Sidebar Header */}
         <div className="p-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">

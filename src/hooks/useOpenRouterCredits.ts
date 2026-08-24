@@ -39,30 +39,13 @@ export function useOpenRouterCredits(pollMs: number = 5 * 60 * 1000) {
       }
       const data = await res.json();
       const inner = data?.data;
-      // Tolerate numbers arriving as strings ("10.05") from the proxy.
-      const toNum = (v: unknown): number | null => {
-        if (typeof v === 'number' && Number.isFinite(v)) return v;
-        if (typeof v === 'string' && v.trim() !== '') {
-          const n = parseFloat(v);
-          if (Number.isFinite(n)) return n;
-        }
-        return null;
-      };
-      const usage = toNum(inner?.usage) ?? 0;
-      const rawLimit = toNum(inner?.limit);
-      const limit = rawLimit !== null && rawLimit > 0 ? rawLimit : null;
-      const reportedRemaining = toNum(inner?.remaining);
-      const remaining =
-        reportedRemaining !== null
-          ? Math.max(0, reportedRemaining)
-          : limit !== null
-            ? Math.max(0, limit - usage)
-            : null;
+      const usage = typeof inner?.usage === 'number' ? inner.usage : 0;
+      const limit = typeof inner?.limit === 'number' && inner.limit > 0 ? inner.limit : null;
       if (mountedRef.current) {
         setCredits({
           usage,
           limit,
-          remaining,
+          remaining: limit !== null ? Math.max(0, limit - usage) : null,
           loading: false,
           error: null,
           isDirectKey: Boolean(inner?.isDirectKey),

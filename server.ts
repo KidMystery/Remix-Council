@@ -292,33 +292,11 @@ export async function startServer(portOverride?: number) {
     }
 
     try {
-      // /api/v1/credits reports purchased credit + spend to date. The previous
-      // /auth/key endpoint's "limit" is a key spend cap (usually unset), which
-      // made the UI display amount *spent* as "remaining". Normalize to plain
-      // numbers here so the client can never misparse string values.
-      const resp = await fetch('https://openrouter.ai/api/v1/credits', {
+      const resp = await fetch('https://openrouter.ai/api/v1/auth/key', {
         headers: { Authorization: `Bearer ${openrouterKey}` },
       });
-      if (!resp.ok) {
-        return res.status(502).json({ error: `OpenRouter credits fetch failed (${resp.status})` });
-      }
       const data = await resp.json();
-      const inner = data?.data || {};
-      const toNum = (v: unknown): number | null => {
-        const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
-        return Number.isFinite(n) ? n : null;
-      };
-      const totalCredits = toNum(inner.total_credits);
-      const totalUsage = toNum(inner.total_usage) ?? 0;
-      const remaining = totalCredits !== null ? Math.max(0, totalCredits - totalUsage) : null;
-      return res.json({
-        data: {
-          limit: totalCredits,
-          usage: totalUsage,
-          remaining,
-          isDirectKey: false,
-        },
-      });
+      return res.json(data);
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Failed to fetch OpenRouter account' });
     }
