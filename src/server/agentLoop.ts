@@ -138,7 +138,7 @@ const NIGHT_SHIFT_ESCALATION = [
 
 const SYSTEM_PROMPTS: Record<AgentMode, string> = {
   nexus:
-    'You are the Presiding Chair of the Nexus Lab — a deliberate, self-falsifying agent. You plan, research with live citations, adversarially test your own consensus across passes, and only then answer. Never present an assumption as a fact. Prefer cited sources over memory.',
+    'You are the Presiding Chair of the Nexus Lab. You work the attached exhibits overnight: inventory them, produce a plan from them, then adversarially falsify that plan. Never invent a file that is not in the exhibits. Prefer the exhibits over web memory. Cite passages. Research the web only for gaps the exhibits cannot answer.',
   oracle:
     'You are the Oracle — an ever-loving, dependable companion (a Hal essential / Jarvis ever-loving presence). You plan, research with live citations, and deliver a clear, warm, decisive answer. Be honest about what you verified versus what you inferred.',
   chamber:
@@ -329,7 +329,7 @@ export class AgentLoopRunner {
   private async execute(job: AgentJob): Promise<AgentLoopResult> {
     const spec = job.spec;
     const free = spec.budget === 'free';
-    const maxQueries = clampInt(spec.maxResearchQueries, 4, 1, MAX_RESEARCH_QUERIES);
+    const maxQueries = clampInt(spec.maxResearchQueries, 4, 0, MAX_RESEARCH_QUERIES);
     const maxPasses = clampInt(spec.maxDeliberationPasses, 3, 1, MAX_DELIBERATION_PASSES);
 
     // Resolve model against the live catalog (server-side liveness guard).
@@ -344,7 +344,7 @@ export class AgentLoopRunner {
     job.spec.model = model;
 
     // ---- 1. Planning ----
-    this.setPhase(job, 'planning', 'Assessing the question and drafting a plan...');
+    this.setPhase(job, 'planning', spec.mode === 'nexus' ? 'Inventorying exhibits and drafting a plan...' : 'Assessing the question and drafting a plan...');
     const baseCtx = spec.context ? `\n\n[Provided context]\n${spec.context.slice(0, MAX_CONTEXT_CHARS)}` : '';
     let plan: AgentJob['plan'] = { summary: spec.goal.slice(0, 200), steps: [], researchQueries: [] };
     try {
@@ -357,7 +357,7 @@ export class AgentLoopRunner {
           },
           {
             role: 'user',
-            content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}\n\nDraft a concise execution plan. Respond ONLY with a fenced JSON block:\n\`\`\`json\n{"summary": "...", "steps": ["..."], "research_queries": ["...", "..."]}\n\`\`\`\nAt most ${maxQueries} research queries, each a precise search phrase. If no live research is needed, use an empty array.`,
+            content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}\n\nDraft a concise execution plan. Respond ONLY with a fenced JSON block:\n\`\`\`json\n{"summary": "...", "steps": ["..."], "research_queries": ["...", "..."]}\n\`\`\`\nAt most ${maxQueries} research queries, each a precise search phrase. If exhibits are attached, inventory them first and use an empty array unless a fact is missing from the files. If no live research is needed, use an empty array.`,
           },
         ],
         { maxTokens: 900 }
@@ -385,7 +385,7 @@ export class AgentLoopRunner {
     }
 
     // ---- 2. Research ----
-    const queries = free ? [] : plan.researchQueries;
+    const queries = free || maxQueries === 0 ? [] : plan.researchQueries.slice(0, maxQueries);
     if (free) {
       job.progress = { phase: 'researching', detail: 'Strict free budget — web research skipped to prevent tool fees.' };
       this.persist();
@@ -519,7 +519,7 @@ export class AgentLoopRunner {
         [
           {
             role: 'system',
-            content: `${SYSTEM_PROMPTS[spec.mode]}\nYou are in the FINALIZE phase. Verify the verdict against the cited research only. Output exactly these markdown sections:\n## Verdict\n## What I verified\n## What I could not verify\n## Confidence\n(honest — what supports it, what would raise it; never oversell)${spec.mode === 'nexus' ? '\n## What changed across passes\n(initial consensus -> reversals -> final position, with reasons)' : ''}\nEnd with:\n## Sources\n(only sources actually relied upon)`,
+            content: `${SYSTEM_PROMPTS[spec.mode]}\nYou are in the FINALIZE phase. Verify the verdict against the exhibits first, then any cited research. Inventing a file is a failure. Output exactly these markdown sections:\n## Verdict\n## What I verified\n## What I could not verify\n## Confidence\n(honest — what supports it, what would raise it; never oversell)${spec.mode === 'nexus' ? '\n## What changed across passes\n(initial consensus -> reversals -> final position, with reasons)' : ''}\nEnd with:\n## Sources\n(only sources actually relied upon)`,
           },
           {
             role: 'user',

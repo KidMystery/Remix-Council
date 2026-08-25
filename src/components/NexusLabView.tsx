@@ -43,7 +43,12 @@ import { ingestFile } from '../lib/evidenceIngest';
 import { stripRoundBodies } from '../lib/evidence';
 import type { EvidenceRecord } from '../types';
 import { summarizeTitle } from '../lib/titleUtils';
-import { chunkDocuments, type DocumentChunkPlan } from '../lib/documentChunker';
+import type { DocumentChunkPlan } from '../lib/documentChunker';
+import {
+  buildOvernightPlan,
+  canLaunchNexus,
+  packExhibitsForServer,
+} from '../lib/nexusExhibits';
 import { ZipFilesModal } from './ZipFilesModal';
 import { MessageMarkdown } from './MessageMarkdown';
 import {
@@ -414,9 +419,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [followUpDirective, setFollowUpDirective] = useState('');
   const [followUpContext, setFollowUpContext] = useState<string | null>(null);
   const [maxIterations, setMaxIterations] = useState(3);
-  // Agent Mode is the default: assess -> plan -> research -> deliberate ->
-  // fact-check -> answer, executed by the server-side agent loop.
-  const [executionMode, setExecutionMode] = useState<NexusExecutionMode>('agent');
+  // Overnight on artifacts is the job. Agent Mode (web theater) is explicit.
+  const [executionMode, setExecutionMode] = useState<NexusExecutionMode>('autonomous');
   const [enginePreset, setEnginePreset] = useState<NexusEnginePreset>('frontier_trio');
   const [activePreset, setActivePreset] = useState<'fast_and_free' | 'deep_council'>('deep_council');
   
@@ -447,12 +451,12 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setEnginePreset('custom');
     setActiveRosterSynthesizer((prev) => ({ ...prev, model: modelId }));
   };
-  const [enableWebGrounding, setEnableWebGrounding] = useState(true);
+  const [enableWebGrounding, setEnableWebGrounding] = useState(false);
   const [enableCodeSandbox, setEnableCodeSandbox] = useState(true);
   const [deepDocumentMode, setDeepDocumentMode] = useState(false);
   const [pagesPerChunk, setPagesPerChunk] = useState(20);
   // Night Shift: deeper falsification passes + a Morning Brief changelog.
-  const [nightShiftEnabled, setNightShiftEnabled] = useState(false);
+  const [nightShiftEnabled, setNightShiftEnabled] = useState(true);
   const [nightShiftCycles, setNightShiftCycles] = useState(5);
   const [nightShiftPaceMinutes, setNightShiftPaceMinutes] = useState(0);
   const [morningBrief, setMorningBrief] = useState<string | null>(null);
@@ -676,7 +680,11 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   };
 
   const handlePreLaunchCheck = () => {
-    if (!missionGoal.trim() && attachedFiles.length === 0) return;
+    const launch = canLaunchNexus({ files: attachedFiles, followUp: followUpContext });
+    if (!launch.ok) {
+      addLog(`⛔ ${launch.reason}`);
+      return;
+    }
 
     const estCost = getEstimatedCost();
     setEstimatedMissionCost(estCost);
@@ -706,23 +714,27 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     const title = summarizeTitle(missionGoal);
     setMissionTitle(title);
 
-    const attachmentContext =
-      attachedFiles.length > 0
-        ? attachedFiles.map((f) => `--- File: ${f.name} ---\n${f.content.slice(0, 15000)}`).join('\n\n')
-        : '';
+    const packed = packExhibitsForServer(attachedFiles);
+    if (!packed.ok && (attachedFiles.length > 0 || !followUpContext)) {
+      addLog(`⛔ ${packed.error}`);
+      setIsRunning(false);
+      setMissionStatus('idle');
+      return;
+    }
     const carriedContext = followUpContext ? `[Prior Mission Consensus Memory]\n${followUpContext.slice(0, 6000)}` : '';
-    const context = [carriedContext, attachmentContext].filter(Boolean).join('\n\n');
+    const context = [carriedContext, packed.ok ? packed.context : ''].filter(Boolean).join('\n\n');
 
-    const budget = enginePreset === 'fast_and_free' ? 'free' : 'cheap';
+    const budget =
+      enginePreset === 'fast_and_free' ? 'free' : enginePreset === 'frontier_trio' || enginePreset === 'deep_reasoning' ? 'quality' : 'cheap';
     const capRaw = costCeiling.requireApprovalAboveDollars;
     const jobCap = capRaw > 0 ? Math.min(25, Math.max(0.5, capRaw)) : undefined;
 
     addLog(
-      `☁️ Launching server-side agent mission (assess → plan → research → falsify → fact-check)${jobCap ? ` — capped at $${jobCap.toFixed(2)}` : ' — server cost cap applies'}...`
+      `☁️ Launching overnight server mission on the exhibits (plan → work the files → falsify)${jobCap ? ` — capped at $${jobCap.toFixed(2)}` : ' — server cost cap applies'}...`
     );
     try {
       const { id } = await launchAgentJob({
-        goal: missionGoal,
+        goal: missionGoal || 'Produce a plan from the attached exhibits.',
         mode: 'nexus',
         context: context || undefined,
         model: activeRosterSynthesizer?.model,
@@ -852,27 +864,33 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     let accumulatedRounds: CouncilRound[] = [...rounds];
     let accumulatedMetrics: ConsensusMetric[] = [...consensusMetrics];
 
-    // Format attached files for insertion into cycles
-    const attachmentContext =
-      attachedFiles.length > 0
-        ? `\n\n[Attached Reference & Codebase Files]:\n` +
-          attachedFiles
-            .map((f) => `--- File: ${f.name} ---\n${f.content}`)
-            .join('\n\n')
-        : '';
-
-    // Carry prior-mission consensus forward when this is a follow-up run.
-    const carriedContext = followUpContext
-      ? `\n\n[Prior Mission Consensus Memory]:\n${followUpContext}`
-      : '';
-
-    // ---- Execution plan ----
-    const textSources = attachedFiles
-      .filter((f) => (f.content || '').trim().length > 0)
-      .map((f) => ({ name: f.name, content: f.content }));
-    const chunkThreshold = pagesPerChunk * 3000;
-    const needsChunking =
-      deepDocumentMode && textSources.some((s) => s.content.length > chunkThreshold);
+    const overnight = buildOvernightPlan({
+      goal: missionGoal,
+      files: attachedFiles,
+      carriedContext: followUpContext || undefined,
+      passes:
+        executionMode === 'mini_deliberation'
+          ? 1
+          : nightShiftEnabled
+            ? Math.max(2, nightShiftCycles)
+            : maxIterations,
+      pagesPerChunk,
+      mode: executionMode === 'agent' ? 'autonomous' : executionMode,
+    });
+    if (!overnight.ok) {
+      addLog(`⛔ ${overnight.reason}`);
+      setIsRunning(false);
+      setMissionStatus('idle');
+      return;
+    }
+    overnight.messages.forEach((m) => addLog(m));
+    if (nightShiftEnabled && executionMode !== 'mini_deliberation') {
+      addLog(
+        `🌙 Night Shift armed: ${overnight.passes.length} pass(es)${
+          nightShiftPaceMinutes > 0 ? `, ${nightShiftPaceMinutes} min pacing` : ''
+        } + Morning Brief.`
+      );
+    }
 
     interface CyclePlan {
       label: string;
@@ -881,79 +899,12 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       isFinalSynthesis?: boolean;
       rotationFocus?: string;
     }
-    let plan: CyclePlan[] = [];
-    let docPlan: DocumentChunkPlan | null = null;
-    let docChunks: ReturnType<typeof chunkDocuments>['chunks'] = [];
+    let plan: CyclePlan[] = overnight.passes;
+    let docPlan: DocumentChunkPlan | null = overnight.docPlan;
+    let docChunks = overnight.docPlan?.chunks || [];
     let documentLedger = '';
-
-    // Night Shift widens the falsification ladder and (optionally) paces it out.
-    const effectiveIterations =
-      executionMode === 'mini_deliberation'
-        ? maxIterations
-        : nightShiftEnabled
-          ? Math.max(2, nightShiftCycles)
-          : maxIterations;
-    if (nightShiftEnabled && executionMode !== 'mini_deliberation') {
-      addLog(
-        `🌙 Night Shift armed: ${effectiveIterations} falsification passes${
-          nightShiftPaceMinutes > 0 ? `, ${nightShiftPaceMinutes} min pacing between passes` : ''
-        } + Morning Brief. Runs while this tab is open.`
-      );
-    }
-
-    if (needsChunking) {
-      docPlan = chunkDocuments(textSources, { pagesPerChunk });
-      docChunks = docPlan.chunks;
-      setDocumentPlan(docPlan);
-      addLog(`📚 Deep Document Mode: splitting ${textSources.length} file(s) into ${docChunks.length} review parts of ~${pagesPerChunk} pages.`);
-      docPlan.messages.forEach((m) => addLog(`   ↳ ${m}`));
-
-      plan = docChunks.map((c, i) => ({
-        label: `📄 Part ${i + 1}/${docChunks.length} · ${c.sourceName} (~${c.estimatedPages} pages)`,
-        iter: i + 1,
-        query: `[Deep Document Mode — Part ${i + 1} of ${docChunks.length}]\nDirective: ${missionGoal}${carriedContext}\n\n[Document: ${c.sourceName} — Section ${i + 1}/${docChunks.length}, ~${c.estimatedPages} pages]\n${c.content}\n\nReview this section against the directive. Report key facts, findings, risks, decisions, and open questions. Reference specific passages.`,
-      }));
-
-      // Final cross-document synthesis pass (ledger built during the loop).
-      plan.push({
-        label: '🧠 Final cross-document synthesis',
-        iter: plan.length + 1,
-        query: '',
-        isFinalSynthesis: true,
-      });
-    } else if (executionMode === 'mini_deliberation') {
-      addLog(`⚡ Initializing Nexus Mini Deliberation (Single Consensus Pass)...`);
-      plan = [
-        {
-          label: `⚖️ Mini Deliberation Consensus Pass`,
-          iter: 1,
-          query: `[Nexus Mini Deliberation Pass]:\nDirective: ${missionGoal}${attachmentContext}${carriedContext}\n\nProvide your authoritative analysis and distinct technical recommendations for consensus synthesis.`,
-        },
-      ];
-    } else if (executionMode === 'model_rotation') {
-      addLog(`🔄 Initializing Nexus Model Rotation across ${effectiveIterations} specialized cycles...`);
-      const rotationThemes = [
-        'Cycle 1: Strategic Foundations & Core Architecture',
-        'Cycle 2: Operational Implementation, Code & Vulnerability Audit',
-        'Cycle 3: Adversarial Stress-Test & Invariant Synthesis',
-        'Cycle 4: Optimization, Performance & Scalability',
-        'Cycle 5: Comprehensive Cross-Model Alignment & Verification',
-        'Cycle 6: Final Hardened Blueprint & Actionable Execution',
-      ];
-      plan = Array.from({ length: effectiveIterations }, (_, i) => ({
-        label: `🔄 ${rotationThemes[i % rotationThemes.length]}`,
-        iter: i + 1,
-        query: `[Nexus Model Rotation — ${rotationThemes[i % rotationThemes.length]}]:\nDirective: ${missionGoal}${attachmentContext}${carriedContext}\n\nLead Panelist Seat: ${activePersonas[i % activePersonas.length]?.name || 'Specialist'}.\nFocus deeply on the specific domain of this rotation cycle.`,
-        rotationFocus: rotationThemes[i % rotationThemes.length],
-      }));
-    } else {
-      addLog(`🚀 Initializing Nexus Lab Mission with ${effectiveIterations} autonomous cycles...`);
-      plan = Array.from({ length: effectiveIterations }, (_, i) => ({
-        label: `⚡ Cycle ${i + 1}/${effectiveIterations}`,
-        iter: i + 1,
-        query: `[Nexus Lab Cycle ${i + 1}/${effectiveIterations}]:\nDirective: ${missionGoal}${attachmentContext}${carriedContext}`,
-      }));
-    }
+    if (docPlan) setDocumentPlan(docPlan);
+    addLog(`🚀 Overnight plan: ${plan.length} pass(es) — every exhibit part is read.`);
 
     const totalPasses = plan.length;
 
@@ -1283,7 +1234,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setDocumentPlan(null);
     setShowDossier(false);
     setMorningBrief(null);
-    setNightShiftEnabled(false);
+    setNightShiftEnabled(true);
     if (serverJobId) void cancelAgentJob(serverJobId).catch(() => {});
     setServerJobId(null);
     setServerJob(null);
@@ -1330,7 +1281,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setMissionStatus('idle');
     setTerminalLogs([]);
     setMorningBrief(null);
-    setNightShiftEnabled(false);
+    setNightShiftEnabled(true);
     if (serverJobId) void cancelAgentJob(serverJobId).catch(() => {});
     setServerJobId(null);
     setServerJob(null);
@@ -1444,7 +1395,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              Autonomous multi-agent research mesh with dynamic tool execution & convergence invariants
+              Overnight multi-pass on artifacts — a tree, a CSV, a statement. Then a plan.
             </p>
           </div>
         </div>
@@ -1542,7 +1493,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               <textarea
                 value={missionGoal}
                 onChange={(e) => setMissionGoal(e.target.value)}
-                placeholder="e.g. Perform rigorous formal verification and attack simulation on a decentralized cross-chain bridge..."
+                placeholder="What should come out overnight? e.g. Turn this repo + the bank CSV into a Monday plan…"
                 rows={4}
                 disabled={isRunning}
                 className="w-full bg-slate-950 text-slate-100 text-xs sm:text-sm p-3.5 rounded-2xl border border-slate-800 focus:outline-none focus:border-emerald-500 transition-all resize-none shadow-inner leading-relaxed"
@@ -1578,11 +1529,11 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                     <div className="text-left">
                       <div className="text-xs font-bold text-slate-200">
                         {isProcessingFiles
-                          ? 'Extracting context...'
-                          : 'Attach Reference Files, PDFs, or Codebase ZIPs'}
+                          ? 'Extracting exhibits...'
+                          : 'Attach the artifacts (required)'}
                       </div>
                       <div className="text-[10px] text-slate-500">
-                        Drag &amp; drop or click to upload (.zip, .pdf, .ts, .py, .md, .json)
+                        App tree, CSV, statement, PDF — overnight work starts here
                       </div>
                     </div>
                   </div>
@@ -1675,12 +1626,12 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                     ? 'bg-sky-500 text-slate-950 shadow-md shadow-sky-500/20 border-sky-400'
                     : 'text-slate-300 bg-slate-950/80 border-slate-700 hover:border-sky-600'
                 }`}
-                title="Server-side agent: it assesses the question, drafts a plan, researches with live citations, deliberates, fact-checks, then answers — and keeps working if you close the tab"
+                title="Explicit: server-side web research. Not the default. Nexus’s job is the files you attach."
               >
                 <Cpu size={14} />
                 <span className="flex-1 text-left">⚡ Agent Mode</span>
                 <span className={`text-[10px] font-mono ${executionMode === 'agent' ? 'text-slate-900' : 'text-sky-400'}`}>
-                  plan → research → fact-check
+                  explicit · web research
                 </span>
               </button>
               <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-950/80 rounded-2xl border border-slate-800">
@@ -2021,7 +1972,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 <button
                   type="button"
                   onClick={handlePreLaunchCheck}
-                  disabled={!missionGoal.trim() && attachedFiles.length === 0}
+                  disabled={!canLaunchNexus({ files: attachedFiles, followUp: followUpContext }).ok}
                   className="flex-1 inline-flex items-center justify-center gap-2 py-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 disabled:opacity-50 text-slate-950 font-bold rounded-2xl text-xs shadow-lg shadow-emerald-900/30 transition-all cursor-pointer"
                 >
                   <Play size={13} className="fill-current" />

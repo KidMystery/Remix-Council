@@ -158,6 +158,15 @@ describe('AgentLoopRunner happy path (nexus)', () => {
     expect(result.job.usageUSD).toBeGreaterThan(0.02);
   });
 
+  it('skips research when maxResearchQueries is 0 (exhibits-only overnight)', async () => {
+    const { fetchFn, log } = makeFetchMock((i) => (i === 0 ? planCall : i < 3 ? passCall(70) : finalCall));
+    const runner = makeRunner(fetchFn);
+    const result = await runner.run(job({ maxResearchQueries: 0, maxDeliberationPasses: 2 }));
+    expect(result.succeeded).toBe(true);
+    expect(result.job.research).toEqual([]);
+    expect(log.every((c) => !c.body.tools)).toBe(true);
+  });
+
   it('skips research tools entirely under a strict free budget', async () => {
     const { fetchFn, log } = makeFetchMock((i) => (i === 0 ? planCall : finalCall));
     const runner = makeRunner(fetchFn);
