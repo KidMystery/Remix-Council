@@ -50,6 +50,7 @@ export class DollarCostGovernor {
 
   /**
    * Accumulates exact dollar spend from actual token usage reported by provider.
+   * 0 / non-finite = unlimited — must not trip when cap is 0 (matches Settings slider).
    */
   public recordUsage(promptTokens: number, completionTokens: number, pricing: { promptUSDPer1M: number; completionUSDPer1M: number }): number {
     const callCostUSD =
@@ -58,7 +59,7 @@ export class DollarCostGovernor {
 
     this.accruedSpendUSD += callCostUSD;
 
-    if (this.config.strictHardStop && this.accruedSpendUSD >= this.config.maxSpendPerMissionUSD) {
+    if (this.hasFiniteCap() && this.accruedSpendUSD >= this.config.maxSpendPerMissionUSD) {
       throw new Error(
         `[CostGovernor] Hard Dollar Ceiling Tripped: Accrued spend ${formatCost(this.accruedSpendUSD)} reached limit of $${this.config.maxSpendPerMissionUSD.toFixed(2)} USD. Halting further execution.`
       );
