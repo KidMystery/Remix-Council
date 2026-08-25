@@ -170,6 +170,7 @@ export interface StreamPersonaWithFallbackOptions {
   /** Server cost governor: round identity + per-round USD ceiling. */
   roundKey?: string;
   costCeilingUSD?: number;
+  plugins?: unknown[];
 }
 
 export interface StreamPersonaWithFallbackResult {
@@ -189,7 +190,7 @@ export interface StreamPersonaWithFallbackResult {
 export async function streamPersonaWithFallback(
   options: StreamPersonaWithFallbackOptions
 ): Promise<StreamPersonaWithFallbackResult> {
-  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding, disableFallback, roundKey, costCeilingUSD } = options;
+  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding, disableFallback, roundKey, costCeilingUSD, plugins } = options;
 
   const isFreeOnlyPreset = policy.budget === 'free';
   const originalModel = persona.model;
@@ -215,6 +216,8 @@ export async function streamPersonaWithFallback(
       onGrounding,
       roundKey,
       costCeilingUSD,
+      plugins,
+      sessionId,
     });
     return { ...strictRes, actualModel: strictRes.actualModel || originalModel, fallbackOccurred: false };
   }
@@ -295,6 +298,8 @@ export async function streamPersonaWithFallback(
         disableFallback,
         roundKey,
         costCeilingUSD,
+        plugins,
+        sessionId,
       };
 
       const streamResult = await streamOpenRouterCompletion(streamOptions);

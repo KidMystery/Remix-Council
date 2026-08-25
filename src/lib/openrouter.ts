@@ -130,6 +130,9 @@ export interface StreamOpenRouterCompletionOptions {
   /** Server cost governor: round identity + per-round USD ceiling. */
   roundKey?: string;
   costCeilingUSD?: number;
+  /** OpenRouter Auto plugin + sticky session. */
+  plugins?: unknown[];
+  sessionId?: string;
 }
 
 /** Thrown when the server-side cost governor refuses a call (ceiling reached). */
@@ -173,6 +176,8 @@ export async function streamOpenRouterCompletion(
     onGrounding,
     roundKey,
     costCeilingUSD,
+    plugins,
+    sessionId,
   } = options;
 
   if (!model || !model.trim()) {
@@ -189,6 +194,8 @@ export async function streamOpenRouterCompletion(
   if (budget) body.budget = budget;
   if (roundKey) body.roundKey = roundKey;
   if (costCeilingUSD) body.costCeilingUSD = costCeilingUSD;
+  if (plugins && plugins.length > 0) body.plugins = plugins;
+  if (sessionId) body.session_id = sessionId;
   if (webSearch) {
     body.tools = [
       {
@@ -241,6 +248,7 @@ export async function streamOpenRouterCompletion(
     let buffer = '';
     let finishReason: string | undefined;
     let usage: StreamCompletionResult['usage'];
+    let routedModel: string | undefined;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -264,6 +272,9 @@ export async function streamOpenRouterCompletion(
             if (onToken) onToken(delta);
           }
           if (choice?.finish_reason) finishReason = choice.finish_reason;
+          if (typeof json.model === 'string' && json.model && json.model !== model.trim()) {
+            routedModel = json.model;
+          }
           if (json.usage) {
             usage = {
               promptTokens: json.usage.prompt_tokens,
@@ -286,7 +297,7 @@ export async function streamOpenRouterCompletion(
 
     return {
       content: accumulated,
-      actualModel: model.trim(),
+      actualModel: routedModel || model.trim(),
       usage,
       grounding,
       finishReason,

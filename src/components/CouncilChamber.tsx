@@ -39,6 +39,13 @@ import { countRoundCost, formatCost, getModelRates, estimateTokens, splitRecentR
 import { DollarCostGovernor } from '../lib/dollarCostGovernor';
 import { allocateCouncilSeats } from '../lib/serverModelAllocator';
 import { pricingIsFree } from '../lib/modelScoring';
+import {
+  OPENROUTER_AUTO,
+  buildAutoRouterPlugin,
+  costTierForBudget,
+  preloadPersonaFilters,
+  shouldUseOpenRouterAuto,
+} from '../lib/autoRouter';
 import { useCouncilReducer } from '../hooks/useCouncilReducer';
 import { CouncilRoundView } from './CouncilRoundView';
 import { Composer } from './Composer';
@@ -475,7 +482,21 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     const roundKey = `${activeSessionId}:${roundToSynthesize.id}`;
 
     const activePersonas = personas.filter((p) => p.enabled !== false);
-    const synthesisModel = synthesizer.model || activePersonas[0]?.model || 'google/gemini-2.5-flash';
+    const useAuto = shouldUseOpenRouterAuto({ autoSelect: autoSelectModels, budget: policy.budget });
+    const synthesisModel = useAuto
+      ? OPENROUTER_AUTO
+      : synthesizer.model || activePersonas[0]?.model || 'google/gemini-2.5-flash';
+    const chairPlugins = useAuto
+      ? [
+          buildAutoRouterPlugin({
+            allowedModels: preloadPersonaFilters(
+              [{ id: 'synthesizer', model: synthesizer.model }],
+              rawModelsCatalog
+            ).synthesizer,
+            costTier: costTierForBudget(policy.budget),
+          }),
+        ]
+      : undefined;
 
     const s1Text = Object.entries(stage1Outputs || {})
       .map(([id, r]) => `Proposal (${id}):\n${(r as any)?.content || '[No proposal]'}`)
@@ -524,14 +545,15 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       let res: Awaited<ReturnType<typeof streamPersonaWithFallback>>;
       try {
         res = await streamPersonaWithFallback({
-          persona: chairPersona,
+          persona: { ...chairPersona, model: synthesisModel },
           messages: [
             { role: 'system', content: CHAIRMAN_PROMPT },
             { role: 'user', content: synthPrompt },
           ],
           policy,
           rawModels: rawModelsCatalog,
-          sessionId: activeSessionId ?? undefined,
+          sessionId: activeSessionId ? `${activeSessionId}:synthesizer` : undefined,
+          plugins: chairPlugins,
           signal: call.signal,
           maxTokens: synthesisMaxTokens,
           disableFallback,
@@ -725,14 +747,35 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     const stageTokenLimit = isQuickPanel ? (quickPanelMaxTokens || 350) : (maxTokens || 4000);
     const webEnabled = shouldEnableWebSearch(currentRoundState.userQuery, webMode, policy.budget).enabled;
 
-    // Task-domain detection + smart model recommendations (applied when enabled).
+    // Task-domain detection. Paid auto-select seats OpenRouter Auto.
+    // Free mode keeps the local catalog allocator (Auto routes to paid models).
     const domain = detectTaskDomain(
       currentRoundState.userQuery,
       (currentRoundState.attachedTextFiles || []) as any
     );
     setLastDomain(domain);
+    const useAuto = shouldUseOpenRouterAuto({ autoSelect: autoSelectModels, budget: policy.budget });
+    const personaFilters = useAuto
+      ? preloadPersonaFilters(
+          [...activePersonas, { id: synthesizer.id || 'synthesizer', model: synthesizer.model }],
+          rawModelsCatalog
+        )
+      : {};
+    const autoPluginsFor = (id: string) =>
+      useAuto
+        ? [
+            buildAutoRouterPlugin({
+              allowedModels: personaFilters[id],
+              costTier: costTierForBudget(policy.budget),
+            }),
+          ]
+        : undefined;
     const modelOverrides: Record<string, string> = {};
-    if (autoSelectModels) {
+    if (useAuto) {
+      activePersonas.forEach((p) => {
+        modelOverrides[p.id] = OPENROUTER_AUTO;
+      });
+    } else if (autoSelectModels) {
       try {
         const budgetTier = policy.budget === 'free' ? 'free' : policy.budget === 'quality' ? 'quality' : 'cheap';
         const plan = allocateCouncilSeats({
@@ -800,7 +843,8 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
             ],
             policy,
             rawModels: rawModelsCatalog,
-            sessionId: activeSessionId ?? undefined,
+            sessionId: activeSessionId ? `${activeSessionId}:${persona.id}` : undefined,
+            plugins: autoPluginsFor(persona.id),
             signal: call.signal,
             maxTokens: stageTokenLimit,
             webSearch: webEnabled,
@@ -1036,7 +1080,8 @@ If the question contains code, documents, or attached files, treat them as avail
             ],
             policy,
             rawModels: rawModelsCatalog,
-            sessionId: activeSessionId ?? undefined,
+            sessionId: activeSessionId ? `${activeSessionId}:${persona.id}` : undefined,
+            plugins: autoPluginsFor(persona.id),
             signal: call.signal,
             maxTokens: stageTokenLimit,
             disableFallback,

@@ -4,7 +4,8 @@ import { fileURLToPath } from 'url';
 import { z } from 'zod';
 import { GoogleGenAI, Modality } from '@google/genai';
 import { allocateCouncilSeats } from './src/lib/serverModelAllocator';
-import { pickBestFromCatalog, type ModelTier } from './src/lib/modelScoring';
+import { isOpenRouterRouterId, pickBestFromCatalog, type ModelTier } from './src/lib/modelScoring';
+import { extractRoutedModelFromSSE } from './src/lib/autoRouter';
 import { RoundCostLedger, modelRatesUSD, usageCostUSD, extractUsageFromSSEChunk } from './src/lib/costGovernor';
 import {
   AgentLoopRunner,
@@ -100,6 +101,9 @@ const CouncilRequestSchema = z.object({
   // per-round ceiling using REAL usage, independent of the client bundle.
   roundKey: z.string().max(160).optional(),
   costCeilingUSD: z.number().positive().max(1000).optional(),
+  /** OpenRouter Auto: family filters + cost band. Ignored for concrete models. */
+  plugins: z.array(z.any()).optional(),
+  session_id: z.string().max(200).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -429,7 +433,19 @@ export async function startServer(portOverride?: number) {
       });
     }
 
-    const { model: rawModel, messages, temperature, max_tokens, budget, stream, tools, roundKey, costCeilingUSD } = parseResult.data;
+    const {
+      model: rawModel,
+      messages,
+      temperature,
+      max_tokens,
+      budget,
+      stream,
+      tools,
+      roundKey,
+      costCeilingUSD,
+      plugins,
+      session_id,
+    } = parseResult.data;
 
     // Input caps: bound message count and total payload size to prevent runaway
     // prompt costs via the proxy.
@@ -458,7 +474,9 @@ export async function startServer(portOverride?: number) {
     // resolve the best live substitute instead of burning the request on a
     // guaranteed 404. Free mode may only be substituted with free models.
     let resolvedModel = rawModel;
-    if (cachedCatalog && cachedCatalog.length > 0) {
+    // Router slugs are not catalog endpoints. Substituting them would silently
+    // kill Auto and seat a random Flash. Never rewrite them.
+    if (cachedCatalog && cachedCatalog.length > 0 && !isOpenRouterRouterId(rawModel)) {
       const liveIds = new Set(cachedCatalog.map((m: any) => String(m?.id || '').toLowerCase()));
       if (!liveIds.has(rawModel.toLowerCase())) {
         const tier: ModelTier = budget === 'free' ? 'free' : budget === 'quality' ? 'quality' : 'cheap';
@@ -492,14 +510,16 @@ export async function startServer(portOverride?: number) {
     // or JSON response). Accepts raw snake_case (JSON path) or normalized
     // camelCase (SSE extractor). No-op when the client didn't send a roundKey.
     let usageRecorded = false;
-    const recordRoundUsage = (rawUsage: any) => {
+    let billedModel = resolvedModel;
+    const recordRoundUsage = (rawUsage: any, seatedModel?: string) => {
       if (usageRecorded || !roundKey || !rawUsage) return;
       usageRecorded = true;
+      if (seatedModel) billedModel = seatedModel;
       const usage = {
         promptTokens: Number(rawUsage.prompt_tokens ?? rawUsage.promptTokens) || 0,
         completionTokens: Number(rawUsage.completion_tokens ?? rawUsage.completionTokens) || 0,
       };
-      const rates = modelRatesUSD(cachedCatalog, resolvedModel);
+      const rates = modelRatesUSD(cachedCatalog, billedModel);
       const cost = usageCostUSD(usage, rates);
       if (cost > 0) roundCostLedger.add(roundKey, cost);
     };
@@ -527,6 +547,8 @@ export async function startServer(portOverride?: number) {
     };
     if (max_tokens) payload.max_tokens = max_tokens;
     if (tools && tools.length > 0) payload.tools = tools;
+    if (plugins && plugins.length > 0) payload.plugins = plugins;
+    if (session_id) payload.session_id = session_id;
     // Request per-token usage stats on the final stream chunk.
     payload.stream_options = { include_usage: true };
 
@@ -601,7 +623,10 @@ export async function startServer(portOverride?: number) {
             if (roundKey && !usageRecorded) {
               sseScanTail = (sseScanTail + new TextDecoder('utf-8').decode(value)).slice(-4096);
               const usage = extractUsageFromSSEChunk(sseScanTail);
-              if (usage) recordRoundUsage(usage);
+              if (usage) {
+                const seated = extractRoutedModelFromSSE(sseScanTail);
+                recordRoundUsage(usage, seated);
+              }
             }
           }
           // Tell the client immediately when the round has hit its ceiling so
