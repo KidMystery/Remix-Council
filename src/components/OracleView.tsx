@@ -91,6 +91,7 @@ import {
 import { addTombstone, AGENT_LOST_ON_REDEPLOY, DRIVE_UNREAD_MESSAGE, mergeTombstones } from '../lib/syncContract';
 import { copyToClipboard } from '../lib/clipboard';
 import { buildCaseBrief, parseChamberCommand, type ChamberHandoff } from '../lib/chamberHandoff';
+import { applyOracleRewrite, hydrateBible, renderBiblePrompt } from '../lib/bibleClaims';
 import { MessageMarkdown } from './MessageMarkdown';
 import type { RawOpenRouterModel } from '../types';
 
@@ -101,9 +102,9 @@ Never mention the Bibles or your internal reflection unless the user asks.`;
 
 const REFLECT_PROMPT = `You are The Oracle's fast internal planner. Given the Living Memory and the user's latest message, produce a short plan (2-4 bullet points) for your answer and note any Bible facts that will need updating. Keep it under 60 words.`;
 
-const BIBLE_SYSTEM_PROMPT = `You maintain a thread's Living Bible: a concise, current, self-contained summary of everything established in this conversation (facts, decisions, preferences, constraints, open questions). Merge new confirmed information, preserve user-stated facts verbatim, drop stale or contradicted details. Use compact sections. Return ONLY the updated Bible — no preamble, no code fences.`;
+const BIBLE_SYSTEM_PROMPT = `You maintain a thread's working notes (unsealed). Lines under LAW are sealed and must be copied forward verbatim — never reword, drop, or contradict them. Add only new working notes. Return ONLY the notes as short bullets — no preamble, no code fences.`;
 
-const GLOBAL_BIBLE_SYSTEM_PROMPT = `You maintain a shared Global Bible: durable, cross-conversation knowledge distilled from all threads. Merge the incoming digest, deduplicate, keep it concise and organized by topic. Return ONLY the updated Global Bible — no preamble, no code fences.`;
+const GLOBAL_BIBLE_SYSTEM_PROMPT = `You maintain unsealed working notes for a shared Global Bible. Lines under LAW are sealed: copy them forward verbatim. Never rewrite or omit LAW. Add only new durable notes (preferences, facts). Return ONLY short bullets — no preamble, no code fences.`;
 
 function stripFences(text: string): string {
   return (text || '').replace(/^```[a-zA-Z]*\s*\n?/gm, '').replace(/```$/gm, '').trim();
@@ -249,9 +250,10 @@ export const OracleView: React.FC<OracleViewProps> = ({
           }
           setActiveId((prev) => (merged.some((t: any) => t.id === prev) ? prev : merged[0]?.id || null));
           if (remote.globalBible) {
-            globalBibleRef.current = remote.globalBible;
-            setGlobalBible(remote.globalBible);
-            saveGlobalBible(remote.globalBible);
+            const gb = hydrateBible(remote.globalBible);
+            globalBibleRef.current = gb;
+            setGlobalBible(gb);
+            saveGlobalBible(gb);
           }
           setLastDriveSync(Date.now());
         }
@@ -553,8 +555,8 @@ export const OracleView: React.FC<OracleViewProps> = ({
       threadTitle: thread.title,
       question: questionOverride,
       messages: thread.messages,
-      threadBible: thread.bible?.content,
-      globalBible: globalBibleRef.current.content,
+      threadBible: renderBiblePrompt(thread.bible),
+      globalBible: renderBiblePrompt(globalBibleRef.current),
     });
     onHandoffToChamber(handoff);
   };
@@ -616,7 +618,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
     const filesBlock = files.length
       ? '\n\n[Attached Files]:\n' + files.map((f) => `--- ${f.name} ---\n${f.content}`).join('\n\n')
       : '';
-    const contextBlock = `[Your Living Memory (Thread Bible)]:\n${latest.bible?.content || '(empty)'}\n\n[Global Bible]:\n${globalBibleRef.current.content || '(empty)'}`;
+    const contextBlock = `[Your Living Memory (Thread Bible)]:\n${renderBiblePrompt(latest.bible) || '(empty)'}\n\n[Global Bible]:\n${renderBiblePrompt(globalBibleRef.current) || '(empty)'}`;
 
     const mode = latest.mode || 'direct';
 
@@ -875,7 +877,11 @@ export const OracleView: React.FC<OracleViewProps> = ({
         });
         const newBible = stripFences(bibleRes.content || '');
         if (newBible) {
-          latest = { ...latest, bible: { content: newBible, updatedAt: Date.now() }, updatedAt: Date.now() };
+          latest = {
+            ...latest,
+            bible: applyOracleRewrite(latest.bible, newBible),
+            updatedAt: Date.now(),
+          };
           commitThread(latest);
         }
       } catch (err) {
@@ -903,10 +909,14 @@ export const OracleView: React.FC<OracleViewProps> = ({
         });
         const newGlobal = stripFences(gbRes.content || '');
         if (newGlobal) {
-          const nextGb = { content: newGlobal, updatedAt: Date.now() };
+          const nextGb = applyOracleRewrite(globalBibleRef.current, newGlobal);
           globalBibleRef.current = nextGb;
           setGlobalBible(nextGb);
-          saveGlobalBible(nextGb);
+          try {
+            saveGlobalBible(nextGb);
+          } catch (err: any) {
+            setPersistError(err?.message || 'Could not save the Bible (storage full).');
+          }
         }
       } catch (err) {
         console.warn('[Oracle] Global Bible background update failed:', err);
@@ -967,9 +977,10 @@ export const OracleView: React.FC<OracleViewProps> = ({
         persistAll(merged);
         setActiveId(merged[0]?.id || null);
         if (result.globalBible) {
-          globalBibleRef.current = result.globalBible;
-          setGlobalBible(result.globalBible);
-          saveGlobalBible(result.globalBible);
+          const gb = hydrateBible(result.globalBible);
+          globalBibleRef.current = gb;
+          setGlobalBible(gb);
+          saveGlobalBible(gb);
         }
         // Restore the custom model pool and Direct palette from the export.
         if (result.extras?.customModels && result.extras.customModels.length > 0) {

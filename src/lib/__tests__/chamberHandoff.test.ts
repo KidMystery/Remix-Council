@@ -58,14 +58,18 @@ describe('extractInvariants + admit', () => {
     expect(inv).not.toContain('Call the lawyer');
   });
 
-  it('appends a dated admit block', () => {
-    const next = admitInvariantsToBible('Existing law.', '• Scope must be written', {
-      question: 'Fire the contractor?',
-      admittedAt: Date.parse('2026-08-25'),
-    });
-    expect(next).toContain('Existing law.');
-    expect(next).toContain('Admitted 2026-08-25');
-    expect(next).toContain('Scope must be written');
+  it('seals invariants without eating prior notes', () => {
+    const next = admitInvariantsToBible(
+      { content: 'Existing law.', updatedAt: 1 },
+      '• Scope must be written',
+      {
+        question: 'Fire the contractor?',
+        admittedAt: Date.parse('2026-08-25'),
+      }
+    );
+    const blob = (next.content || '') + (next.claims || []).map((c) => c.text).join(' ');
+    expect(blob).toMatch(/Existing law|Scope must be written/);
+    expect(next.claims?.some((c) => c.sealed && c.text.includes('Scope must be written'))).toBe(true);
   });
 });
 

@@ -64,7 +64,7 @@ export default function App() {
   const [synthesizer, setSynthesizer] = useState<Persona>(defaultSynthesizer);
   // Default is the working cheap tier — the free tier is opt-in (its models
   // rotate and are verified against the live catalog before use).
-  const [activePresetId, setActivePresetId] = useState<PresetId>('balanced_quality');
+  const [activePresetId, setActivePresetId] = useState<PresetId>('highest_quality');
   const [catalog, setCatalog] = useState<RawOpenRouterModel[]>([]);
   const { theme, setTheme } = useTheme();
 

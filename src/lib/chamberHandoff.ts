@@ -9,6 +9,7 @@
  */
 
 import { detectTaskDomain, type TaskDomain } from './smartModelSelector';
+import { admitInvariantLines, renderBiblePrompt, type OracleBible } from './bibleClaims';
 
 export const CHAMBER_COMMAND = '/chamber';
 
@@ -125,20 +126,15 @@ export function extractInvariants(synthesis: string | undefined): string {
 }
 
 export function admitInvariantsToBible(
-  current: string,
+  current: OracleBible | string | undefined,
   invariants: string,
-  meta: { question: string; admittedAt?: number }
-): string {
-  const body = (invariants || '').trim();
-  if (!body) return current || '';
-  const when = new Date(meta.admittedAt ?? Date.now()).toISOString().slice(0, 10);
-  const block = [
-    `## Admitted ${when}`,
-    `Question: ${clip(meta.question, 180)}`,
-    body,
-  ].join('\n');
-  const next = current?.trim() ? `${current.trim()}\n\n${block}` : block;
-  // Bible must stay a brief, not a corpus.
-  if (next.length <= 12000) return next;
-  return `${next.slice(next.length - 12000).trim()}`;
+  meta: { question: string; admittedAt?: number; threadId?: string }
+): OracleBible {
+  return admitInvariantLines(current ?? '', invariants, meta);
+}
+
+export function biblePromptText(bible: OracleBible | string | undefined): string {
+  if (!bible) return '';
+  if (typeof bible === 'string') return bible;
+  return renderBiblePrompt(bible);
 }

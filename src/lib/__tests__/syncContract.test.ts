@@ -7,12 +7,14 @@ import {
   mergeTombstones,
 } from '../syncContract';
 import {
+  mergeOracleDocs,
   mergeOracleThreads,
   mergeSessionDocs,
   mergeSessions,
   parseOracleDriveDoc,
   parseSessionDriveDoc,
 } from '../drivePersistence';
+import { admitInvariantLines, applyOracleRewrite } from '../bibleClaims';
 import { LEGACY_TRUNCATION_MARKERS } from '../evidence';
 
 function session(id: string, updatedAt: number, rounds: CouncilRound[] = []): Session {
@@ -136,6 +138,19 @@ describe('oracle merge + envelopes', () => {
     const doc = parseSessionDriveDoc([session('legacy', 1)]);
     expect(doc.sessions[0].id).toBe('legacy');
     expect(doc.deleted).toEqual([]);
+  });
+
+  it('keeps a sealed Admit when the other device rewrote the Bible', () => {
+    const phone = admitInvariantLines({}, 'Never pay a verbal change-order', { admittedAt: 50 });
+    const laptop = applyOracleRewrite({ content: 'folk music note', updatedAt: 80 }, 'She likes folk music', 80);
+    const doc = mergeOracleDocs(
+      { version: 2, updatedAt: 80, threads: [], globalBible: laptop, deleted: [] },
+      { version: 2, updatedAt: 50, threads: [], globalBible: phone, deleted: [] }
+    );
+    const texts = (doc.globalBible?.claims || []).map((c: any) => c.text).join(' ');
+    expect(texts).toContain('Never pay a verbal change-order');
+    expect(texts).toMatch(/folk music/i);
+    expect(doc.globalBible.claims.find((c: any) => c.text.includes('change-order'))?.sealed).toBe(true);
   });
 
   it('reads a v2 envelope', () => {

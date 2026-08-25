@@ -31,6 +31,7 @@ import {
   loadBriefingStore,
   updateBriefingSettings,
 } from '../../lib/briefingDetector';
+import { applyOracleRewrite, dropUnsealed, renderBiblePrompt } from '../../lib/bibleClaims';
 import type { BriefingSettings } from '../../lib/briefingDetector';
 import type { OracleCustomModel, OracleModelOption, OracleModelStatus } from '../../lib/oracleModelPool';
 import type { RawOpenRouterModel } from '../../types';
@@ -245,9 +246,9 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
   // Refresh thread & global bible draft on change
   useEffect(() => {
     if (targetType === 'thread') {
-      setBibleDraft(selectedThread?.bible?.content || '');
+      setBibleDraft(renderBiblePrompt(selectedThread?.bible) || '');
     } else {
-      setBibleDraft(globalBible.content || '');
+      setBibleDraft(renderBiblePrompt(globalBible) || '');
     }
   }, [targetType, selectedThreadId, selectedThread?.bible?.content, globalBible.content]);
 
@@ -267,14 +268,9 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
 
     if (targetType === 'thread') {
       if (!selectedThread) return;
+      const nextBible = applyOracleRewrite(selectedThread.bible, cleanContent, now);
       const updatedThreads = threads.map((t) =>
-        t.id === selectedThread.id
-          ? {
-              ...t,
-              bible: { content: cleanContent, updatedAt: now },
-              updatedAt: now,
-            }
-          : t
+        t.id === selectedThread.id ? { ...t, bible: nextBible, updatedAt: now } : t
       );
       setThreads(updatedThreads);
       try {
@@ -284,9 +280,15 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
         return;
       }
     } else {
-      const updatedGlobal: OracleBible = { content: cleanContent, updatedAt: now };
+      const updatedGlobal = applyOracleRewrite(globalBible, cleanContent, now);
       setGlobalBible(updatedGlobal);
-      saveGlobalBible(updatedGlobal);
+      setBibleDraft(renderBiblePrompt(updatedGlobal));
+      try {
+        saveGlobalBible(updatedGlobal);
+      } catch (err) {
+        console.warn('[Oracle Settings] Could not save Global Bible:', err);
+        return;
+      }
     }
 
     setIsSavedNotice(true);
@@ -316,21 +318,16 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
   };
 
   const handleClear = () => {
-    if (!window.confirm('Are you sure you want to clear this Bible memory?')) return;
-    setBibleDraft('');
+    if (!window.confirm('Clear unsealed working notes? Sealed LAW (Admit) stays.')) return;
     const now = Date.now();
     if (targetType === 'thread') {
       if (!selectedThread) return;
+      const nextBible = dropUnsealed(selectedThread.bible, now);
       const updatedThreads = threads.map((t) =>
-        t.id === selectedThread.id
-          ? {
-              ...t,
-              bible: { content: '', updatedAt: now },
-              updatedAt: now,
-            }
-          : t
+        t.id === selectedThread.id ? { ...t, bible: nextBible, updatedAt: now } : t
       );
       setThreads(updatedThreads);
+      setBibleDraft(renderBiblePrompt(nextBible));
       try {
         saveOracleThreads(updatedThreads);
       } catch (err) {
@@ -338,9 +335,15 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
         return;
       }
     } else {
-      const updatedGlobal: OracleBible = { content: '', updatedAt: now };
+      const updatedGlobal = dropUnsealed(globalBible, now);
       setGlobalBible(updatedGlobal);
-      saveGlobalBible(updatedGlobal);
+      setBibleDraft(renderBiblePrompt(updatedGlobal));
+      try {
+        saveGlobalBible(updatedGlobal);
+      } catch (err) {
+        console.warn('[Oracle Settings] Could not clear Global Bible:', err);
+        return;
+      }
     }
   };
 
@@ -359,7 +362,7 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
           </h3>
         </div>
         <p className="text-xs text-slate-500 dark:text-slate-400">
-          The Oracle autonomously maintains a living summary of established facts, user preferences, decisions, and context in the background. You can inspect or refine the memories below.
+          The Bible is claims, not a diary. Lines under LAW are sealed (Admit to Bible) — Oracle rewrite, Drive sync, Save, and Clear cannot eat them. Working notes below LAW may change.
         </p>
       </div>
 

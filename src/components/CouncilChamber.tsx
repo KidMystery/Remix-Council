@@ -317,8 +317,17 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     }
     const question = activeSession?.handoff?.question || round.userQuery || '';
     const now = Date.now();
-    const next = admitInvariantsToBible(loadGlobalBible().content, invariants, { question, admittedAt: now });
-    saveGlobalBible({ content: next, updatedAt: now });
+    const next = admitInvariantsToBible(loadGlobalBible(), invariants, {
+      question,
+      admittedAt: now,
+      threadId: activeSession?.handoff?.threadId,
+    });
+    try {
+      saveGlobalBible(next);
+    } catch (err: any) {
+      showToast?.(err?.message || 'Could not save sealed claims (storage full).', 'error');
+      return;
+    }
     if (activeSessionId && onPatchSession) {
       onPatchSession(activeSessionId, {
         handoff: activeSession?.handoff

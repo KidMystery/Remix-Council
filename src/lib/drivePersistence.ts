@@ -8,6 +8,7 @@ import {
   mergeTombstones,
   type Tombstone,
 } from './syncContract';
+import { mergeBibles } from './bibleClaims';
 
 export type { Tombstone };
 
@@ -679,10 +680,7 @@ export function mergeOracleThreads(
         ...incoming,
         title: incomingTitle ? incoming.title : existingTitle ? existing.title : incoming.title || existing.title,
         messages: mergedMessages,
-        bible:
-          (incoming.bible?.updatedAt || 0) >= (existing.bible?.updatedAt || 0)
-            ? incoming.bible || existing.bible
-            : existing.bible,
+        bible: mergeBibles(existing.bible, incoming.bible),
         updatedAt: Math.max(existing.updatedAt || 0, incoming.updatedAt || 0),
       };
 
@@ -701,13 +699,11 @@ export function mergeOracleThreads(
 
 export function mergeOracleDocs(local: OracleDrivePayload, remote: OracleDrivePayload): OracleDrivePayload {
   const result = mergeOracleThreads(local.threads || [], remote.threads || [], local.deleted, remote.deleted);
-  const localBibleAt = local.globalBible?.updatedAt || 0;
-  const remoteBibleAt = remote.globalBible?.updatedAt || 0;
   return {
     version: 2,
     updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0),
     threads: result.merged,
-    globalBible: remoteBibleAt > localBibleAt ? remote.globalBible : local.globalBible || remote.globalBible,
+    globalBible: mergeBibles(local.globalBible, remote.globalBible),
     deleted: result.deleted,
   };
 }

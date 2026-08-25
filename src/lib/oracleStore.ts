@@ -7,6 +7,9 @@
  */
 
 import type { OracleCustomModel } from './oracleModelPool';
+import { hydrateBible, type OracleBible } from './bibleClaims';
+export type { BibleClaim } from './bibleClaims';
+export type { OracleBible };
 
 export interface OracleImage {
   name: string;
@@ -32,11 +35,6 @@ export interface OracleMessage {
   voice?: { id: string; name: string; avatar: string };
   /** Small metadata note (e.g. "auto-expanded tokens ×2"). */
   note?: string;
-}
-
-export interface OracleBible {
-  content: string;
-  updatedAt: number;
 }
 
 export interface OracleThread {
@@ -153,7 +151,11 @@ export function loadOracleThreads(): OracleThread[] {
     const raw = localStorage.getItem(THREADS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((t) => ({
+      ...t,
+      bible: hydrateBible(t?.bible),
+    }));
   } catch (err) {
     console.warn('[OracleStore] Failed to load threads:', err);
     return [];
@@ -198,22 +200,22 @@ export function saveOracleTombstones(stones: { id: string; deletedAt: number }[]
 export function loadGlobalBible(): OracleBible {
   try {
     const raw = localStorage.getItem(GLOBAL_BIBLE_KEY);
-    if (!raw) return { content: '', updatedAt: Date.now() };
-    const parsed = JSON.parse(raw);
-    return typeof parsed?.content === 'string'
-      ? { content: parsed.content, updatedAt: parsed.updatedAt || Date.now() }
-      : { content: '', updatedAt: Date.now() };
+    if (!raw) return hydrateBible({ content: '', updatedAt: Date.now() });
+    return hydrateBible(JSON.parse(raw));
   } catch (err) {
     console.warn('[OracleStore] Failed to load global Bible:', err);
-    return { content: '', updatedAt: Date.now() };
+    return hydrateBible({ content: '', updatedAt: Date.now() });
   }
 }
 
 export function saveGlobalBible(bible: OracleBible): void {
+  const normalized = hydrateBible(bible);
   try {
-    localStorage.setItem(GLOBAL_BIBLE_KEY, JSON.stringify(bible));
+    localStorage.setItem(GLOBAL_BIBLE_KEY, JSON.stringify(normalized));
   } catch (err) {
-    console.warn('[OracleStore] Failed to save global Bible:', err);
+    throw err instanceof Error
+      ? err
+      : new Error('Could not save the Bible locally (storage full). Sealed claims were not dropped.');
   }
 }
 
