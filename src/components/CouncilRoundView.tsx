@@ -41,6 +41,8 @@ export interface CouncilRoundViewProps {
   onDeleteRound?: (roundId: string) => void;
   isDeliberating?: boolean;
   showConsensusVisualizer?: boolean;
+  /** Whether this round is the newest in the stack (kept open; older rounds collapse). */
+  isLatestRound?: boolean;
   /** Confidence Ledger (opt-in): whether outcome tracking is enabled. */
   outcomeTrackingEnabled?: boolean;
   trackedOutcome?: TrackedOutcome | null;
@@ -217,6 +219,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
   onRegeneratePersona,
   onForkBranch,
   onDeleteRound,
+  isLatestRound = true,
   outcomeTrackingEnabled = false,
   trackedOutcome = null,
   onTrackRound,
@@ -235,6 +238,31 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
   const [forkBranchName, setForkBranchName] = useState('');
   const [stage1Expanded, setStage1Expanded] = useState(true);
   const [stage2Expanded, setStage2Expanded] = useState(true);
+
+  // Whole-round collapse: the newest round is open; older rounds stack as a
+  // compact header + one-line summary (Resume/Re-run stay reachable).
+  const [roundCollapsed, setRoundCollapsed] = useState(!isLatestRound);
+
+  const roundIsStreaming = (() => {
+    const anyStreaming = (record: Record<string, any>): boolean =>
+      Object.values(record || {}).some((r) => r?.status === 'streaming');
+    return (
+      anyStreaming(stage1) ||
+      anyStreaming(stage2) ||
+      stage3?.status === 'streaming'
+    );
+  })();
+
+  // A round that starts streaming (resume/re-run) always opens; a round that
+  // is no longer the newest folds into the stack. Manual expand/collapse is
+  // respected until one of those two things changes.
+  useEffect(() => {
+    if (roundIsStreaming) {
+      setRoundCollapsed(false);
+    } else if (!isLatestRound) {
+      setRoundCollapsed(true);
+    }
+  }, [roundIsStreaming, isLatestRound]);
 
   // Per-card collapse state (Stage 1 & Stage 2).
   const [expandedPersonas, setExpandedPersonas] = useState<Set<string>>(new Set());
@@ -512,10 +540,19 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
               )}
             </>
           )}
+          <button
+            type="button"
+            onClick={() => setRoundCollapsed((v) => !v)}
+            className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-xs text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors cursor-pointer"
+            title={roundCollapsed ? 'Expand this round' : 'Collapse this round into the stack'}
+            aria-expanded={!roundCollapsed}
+          >
+            {roundCollapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+          </button>
         </div>
       </header>
 
-      {/* Sub-Council Fork Prompt Popup */}
+      {/* Sub-Council Fork Prompt Popup (stays reachable while collapsed) */}
       {isForking && (
         <form onSubmit={handleCreateFork} className="mb-4 p-3 bg-purple-950/40 border border-purple-700/60 rounded-xl flex items-center gap-2">
           <input
@@ -543,8 +580,37 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
         </form>
       )}
 
+      {/* Collapsed stacked view: compact one-line summary of the round. */}
+      {roundCollapsed ? (
+        <button
+          type="button"
+          onClick={() => setRoundCollapsed(false)}
+          className="w-full mb-1 flex items-center gap-2 px-4 py-2.5 bg-slate-950/40 border border-slate-800/70 rounded-xl text-left text-[11px] text-slate-400 hover:bg-slate-950/70 hover:border-slate-700 transition-colors cursor-pointer"
+          title="Expand this round"
+        >
+          {incompleteStage?.isIncomplete ? (
+            <AlertTriangle size={12} className="text-amber-400 shrink-0" />
+          ) : (
+            <Check size={12} className="text-emerald-400 shrink-0" />
+          )}
+          <span className="truncate">
+            {(() => {
+              if (stage3?.content) {
+                return stage3.content.replace(/^#+\s*/gm, '').replace(/[*_`>[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 200) || 'Round complete';
+              }
+              if (incompleteStage?.isIncomplete) {
+                return `Incomplete — ${incompleteStage.description}. Resume from the header above.`;
+              }
+              return `Deliberating: Stage 1 (${stage1Completed}/${activePersonas.length}) · Stage 2 (${stage2Completed}/${activePersonas.length})`;
+            })()}
+          </span>
+        </button>
+      ) : (
+        <></>
+      )}
+
       {/* Consensus View (Basic Mode) */}
-      {basicMode ? (
+      {!roundCollapsed && (basicMode ? (
         <div className="space-y-4">
           {stage3?.content ? (
             <section className="p-5 bg-slate-950/80 border border-cyan-500/40 rounded-xl shadow-inner">
@@ -626,7 +692,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
             />
           )}
         </div>
-      )}
+      ))}
     </article>
   );
 };

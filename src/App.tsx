@@ -4,6 +4,10 @@ import { useModelRecommendations } from './hooks/useModelRecommendations';
 import { useTheme } from './hooks/useTheme';
 import { fetchCouncilModels } from './lib/openrouter';
 import { applyPreset, MODEL_PRESETS, type PresetId } from './lib/presets';
+import {
+  shouldAutoCreateInitialSession,
+  reconcileFreePresetWithModels,
+} from './lib/chamberGuards';
 import { INITIAL_PERSONAS, defaultSynthesizer } from './data';
 import type {
   Persona,
@@ -143,6 +147,7 @@ export default function App() {
     saveDestination,
     autoSaveState,
     flushNow,
+    isLoading,
   } = useSessionManager();
 
   // Load the model catalog on mount.
@@ -152,16 +157,25 @@ export default function App() {
       .catch((err) => console.warn('[App] Catalog load notice:', err.message));
   }, []);
 
-  // Create an initial session if none exists.
+  // Create an initial session if none exists — but only AFTER the session
+  // manager has finished loading local/Drive storage. Creating one while the
+  // load is in flight produced a blank "New Deliberation" that merged into
+  // the synced thread set on every unsigned visit.
   const createdRef = useRef(false);
   useEffect(() => {
     if (createdRef.current) return;
-    if (sessions.length === 0 && !activeSessionId) {
+    if (
+      shouldAutoCreateInitialSession({
+        isLoading,
+        sessionCount: sessions.length,
+        hasActiveSessionId: Boolean(activeSessionId),
+      })
+    ) {
       createdRef.current = true;
       createSession('New Deliberation', personas, synthesizer, activePresetId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions.length, activeSessionId]);
+  }, [isLoading, sessions.length, activeSessionId]);
 
   const showToast = useCallback((message: string, type: ToastMessage['type'] = 'info', details?: string) => {
     const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -174,6 +188,54 @@ export default function App() {
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  // Manual model picks win: a free-tier preset whose roster contains a
+  // hand-picked paid model leaves free mode EXPLICITLY (with a toast) instead
+  // of erroring mid-deliberation and forcing the owner to re-apply a preset
+  // that wipes their choices. The "free never upgrades to paid silently"
+  // invariant is untouched: this is a visible preset change, never an
+  // in-mode upgrade.
+  const presetJustAppliedRef = useRef(0);
+  const reconcilePresetWithModels = useCallback(
+    (nextPersonas: Persona[], nextSynthesizer: Persona) => {
+      const result = reconcileFreePresetWithModels({
+        activePresetId,
+        personaModels: nextPersonas.filter((p) => p.enabled !== false).map((p) => p.model),
+        synthesizerModel: nextSynthesizer?.model,
+        catalog,
+        presetJustAppliedUntil: presetJustAppliedRef.current,
+      });
+      if (result.switchToPresetId && result.reason) {
+        setActivePresetId(result.switchToPresetId);
+        showToast(result.reason, 'warning');
+      }
+    },
+    [activePresetId, catalog, showToast]
+  );
+
+  const handleSetPersonas = useCallback(
+    (next: Persona[]) => {
+      setPersonas(next);
+      reconcilePresetWithModels(next, synthesizer);
+    },
+    [reconcilePresetWithModels, synthesizer]
+  );
+
+  const handleSetSynthesizer = useCallback(
+    (next: Persona) => {
+      setSynthesizer(next);
+      reconcilePresetWithModels(personas, next);
+    },
+    [reconcilePresetWithModels, personas]
+  );
+
+  // Reconcile once when the live catalog arrives (covers sessions restored
+  // with paid picks sitting under a free preset from a previous visit).
+  useEffect(() => {
+    if (!catalog || catalog.length === 0) return;
+    reconcilePresetWithModels(personas, synthesizer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalog.length]);
 
   const handleSignIn = useCallback(async () => {
     try {
@@ -190,6 +252,7 @@ export default function App() {
   }, [signOut, showToast]);
 
   const handleApplyPreset = useCallback((presetId: PresetId) => {
+    presetJustAppliedRef.current = Date.now() + 3000;
     setActivePresetId(presetId);
     const { updatedPersonas, updatedSynthesizer } = applyPreset(presetId, personas, synthesizer, catalog);
     setPersonas(updatedPersonas);
@@ -357,9 +420,9 @@ export default function App() {
         onClose={() => setIsSettingsOpen(false)}
         initialTab={settingsInitialTab}
         personas={personas}
-        setPersonas={setPersonas}
+        setPersonas={handleSetPersonas}
         synthesizer={synthesizer}
-        setSynthesizer={setSynthesizer}
+        setSynthesizer={handleSetSynthesizer}
         theme={theme}
         setTheme={setTheme}
         maxTokens={maxTokens}

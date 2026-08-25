@@ -1540,12 +1540,15 @@ If the question contains code, documents, or attached files, treat them as avail
         </div>
       </div>
 
-      {/* Rounds Stack */}
+      {/* Rounds Stack — earlier rounds are stacked and collapsed; only the
+          newest round stays open. Incomplete rounds stay reachable via their
+          always-visible header (Resume control) even when collapsed. */}
       <div className="space-y-4">
-        {(localRounds.length > 0 ? localRounds : rounds).map((round) => (
+        {(localRounds.length > 0 ? localRounds : rounds).map((round, idx, arr) => (
           <CouncilRoundView
             key={round.id}
             round={round}
+            isLatestRound={idx === arr.length - 1}
             personas={personas}
             synthesizer={synthesizer}
             basicMode={basicMode}
