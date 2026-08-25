@@ -233,6 +233,17 @@ export interface CouncilRound {
   createdAt?: number;
 }
 
+export interface SessionHandoff {
+  source: 'oracle';
+  threadId: string;
+  threadTitle: string;
+  question: string;
+  brief: string;
+  domain?: string;
+  createdAt: number;
+  bibleAdmittedAt?: number;
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -241,6 +252,8 @@ export interface Session {
   synthesizer?: Persona;
   activePresetId?: string;
   contextSummary?: string;
+  /** Oracle Case brief. Never a transcript dump. */
+  handoff?: SessionHandoff;
   createdAt: number;
   updatedAt: number;
 }

@@ -25,6 +25,8 @@ import { CouncilSidebar } from './components/council/CouncilSidebar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { StorageSyncModal } from './components/StorageSyncModal';
 import { UnifiedToast } from './components/UnifiedToast';
+import type { ChamberHandoff } from './lib/chamberHandoff';
+import { summarizeTitle } from './lib/titleUtils';
 
 const SETTINGS_KEYS = {
   enableChunking: 'council_enable_chunking',
@@ -129,6 +131,7 @@ export default function App() {
     activeSession,
     activeSessionId,
     createSession,
+    patchSession,
     selectSession,
     renameSession,
     deleteSession,
@@ -272,6 +275,16 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [exportSessionsJSON]);
 
+  const handleOracleHandoff = useCallback(
+    (handoff: ChamberHandoff) => {
+      const title = `Case — ${summarizeTitle(handoff.question) || handoff.threadTitle || 'Oracle'}`;
+      createSession(title, personas, synthesizer, activePresetId, { handoff });
+      setView('chamber');
+      showToast('Case brief opened in the Chamber. Review it, then Deliberate. Nothing is written to the Bible yet.', 'info');
+    },
+    [createSession, personas, synthesizer, activePresetId, showToast]
+  );
+
   const handleImportSessions = useCallback((file: File, mode: 'merge' | 'replace' = 'merge') => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -393,6 +406,7 @@ export default function App() {
               saveDestination={saveDestination}
               onOpenSettings={() => setIsSettingsOpen(true)}
               showToast={showToast}
+              onPatchSession={patchSession}
             />
           ) : view === 'nexus' ? (
             <NexusLabView

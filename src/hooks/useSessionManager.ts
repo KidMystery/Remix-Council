@@ -240,7 +240,8 @@ export function useSessionManager() {
     title: string = 'New Deliberation',
     personas: Persona[] = [],
     synthesizer?: Persona,
-    activePresetId?: string
+    activePresetId?: string,
+    extras?: { handoff?: Session['handoff'] }
   ): Session => {
     const newSession: Session = {
       id: `session_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -249,6 +250,7 @@ export function useSessionManager() {
       personas,
       synthesizer,
       activePresetId,
+      handoff: extras?.handoff,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -264,6 +266,15 @@ export function useSessionManager() {
   const selectSession = useCallback((sessionId: string) => {
     setActiveSessionId(sessionId);
   }, []);
+
+  const patchSession = useCallback((sessionId: string, patch: Partial<Session>) => {
+    const next = sessionsRef.current.map((s) =>
+      s.id === sessionId ? { ...s, ...patch, id: s.id, updatedAt: Date.now() } : s
+    );
+    setSessions(next);
+    writeLocalThrottled(next);
+    writeDriveThrottled(next);
+  }, [writeLocalThrottled, writeDriveThrottled]);
 
   const renameSession = useCallback((sessionId: string, title: string) => {
     const clean = (title || '').trim();
@@ -516,6 +527,7 @@ export function useSessionManager() {
     activeSession,
     activeSessionId,
     createSession,
+    patchSession,
     selectSession,
     renameSession,
     deleteSession,

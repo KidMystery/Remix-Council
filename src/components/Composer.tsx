@@ -24,6 +24,8 @@ export interface ComposerProps {
   onStop?: () => void;
   estimatedCost?: number;
   estimatedTokens?: number;
+  /** Prefill from an Oracle Case brief. Operator still presses Deliberate. */
+  initialQuery?: string;
 }
 
 export const Composer: React.FC<ComposerProps> = ({
@@ -32,8 +34,12 @@ export const Composer: React.FC<ComposerProps> = ({
   onStop,
   estimatedCost = 0,
   estimatedTokens = 0,
+  initialQuery,
 }) => {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(initialQuery || '');
+  useEffect(() => {
+    if (initialQuery) setQuery(initialQuery);
+  }, [initialQuery]);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [evidence, setEvidence] = useState<EvidenceRecord[]>([]);
   const [isExtracting, setIsExtracting] = useState(false);

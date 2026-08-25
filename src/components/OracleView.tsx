@@ -90,6 +90,7 @@ import {
 } from '../lib/drivePersistence';
 import { addTombstone, AGENT_LOST_ON_REDEPLOY, DRIVE_UNREAD_MESSAGE, mergeTombstones } from '../lib/syncContract';
 import { copyToClipboard } from '../lib/clipboard';
+import { buildCaseBrief, parseChamberCommand, type ChamberHandoff } from '../lib/chamberHandoff';
 import { MessageMarkdown } from './MessageMarkdown';
 import type { RawOpenRouterModel } from '../types';
 
@@ -121,6 +122,7 @@ export interface OracleViewProps {
   catalog?: RawOpenRouterModel[];
   availableModels?: { id: string; name: string }[];
   onOpenSettings?: (tab?: 'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account') => void;
+  onHandoffToChamber?: (handoff: ChamberHandoff) => void;
 }
 
 export const OracleView: React.FC<OracleViewProps> = ({
@@ -128,6 +130,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
   catalog = [],
   availableModels = [],
   onOpenSettings,
+  onHandoffToChamber,
 }) => {
   const [threads, setThreads] = useState<OracleThread[]>(() => loadOracleThreads());
   const [activeId, setActiveId] = useState<string | null>(() => {
@@ -541,6 +544,21 @@ export const OracleView: React.FC<OracleViewProps> = ({
     );
   };
 
+  const handoffToChamber = (questionOverride?: string) => {
+    if (!onHandoffToChamber) return;
+    const thread = threadsRef.current.find((t) => t.id === activeId) || threadsRef.current[0];
+    if (!thread) return;
+    const handoff = buildCaseBrief({
+      threadId: thread.id,
+      threadTitle: thread.title,
+      question: questionOverride,
+      messages: thread.messages,
+      threadBible: thread.bible?.content,
+      globalBible: globalBibleRef.current.content,
+    });
+    onHandoffToChamber(handoff);
+  };
+
   const handleSend = async (
     text: string,
     images: OracleImage[],
@@ -549,6 +567,11 @@ export const OracleView: React.FC<OracleViewProps> = ({
     isRetry = false,
     threadIdOverride?: string
   ) => {
+    const cmd = parseChamberCommand(text);
+    if (cmd.isCommand && onHandoffToChamber) {
+      handoffToChamber(cmd.question);
+      return;
+    }
     if (!text.trim() && images.length === 0 && files.length === 0) return;
     const targetThreadId = threadIdOverride || activeId;
     if (!targetThreadId || isBusy) return;
@@ -1030,6 +1053,18 @@ export const OracleView: React.FC<OracleViewProps> = ({
                 <span className="text-slate-500">credits —</span>
               )}
             </button>
+            {onHandoffToChamber && (
+              <button
+                type="button"
+                onClick={() => handoffToChamber()}
+                disabled={isBusy}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-950 border border-amber-300 cursor-pointer shadow-sm disabled:opacity-50"
+                title="Send a one-page Case brief to the Chamber. Does not copy the thread. Does not write the Bible."
+              >
+                <Users size={13} />
+                <span>Send to Chamber</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={handleNewThread}
@@ -1491,7 +1526,12 @@ export const OracleView: React.FC<OracleViewProps> = ({
           </div>
 
           {/* Composer */}
-          <OracleComposer onSend={handleSend} isBusy={isBusy} onStop={handleStop} />
+          <OracleComposer
+            onSend={handleSend}
+            isBusy={isBusy}
+            onStop={handleStop}
+            onHandoffToChamber={onHandoffToChamber ? () => handoffToChamber() : undefined}
+          />
         </div>
       </div>
     </div>
@@ -1693,10 +1733,12 @@ function OracleComposer({
   onSend,
   isBusy,
   onStop,
+  onHandoffToChamber,
 }: {
   onSend: (text: string, images: OracleImage[], files: OracleTextFile[]) => void;
   isBusy: boolean;
   onStop: () => void;
+  onHandoffToChamber?: () => void;
 }) {
   const [text, setText] = useState('');
   const [images, setImages] = useState<OracleImage[]>([]);
@@ -1890,6 +1932,18 @@ function OracleComposer({
         </div>
 
         <div className="flex items-center gap-2">
+          {onHandoffToChamber && (
+            <button
+              type="button"
+              onClick={onHandoffToChamber}
+              disabled={isBusy}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-950 border border-amber-300 cursor-pointer disabled:opacity-50"
+              title="Type /chamber or tap here. Sends a Case brief, not the transcript."
+            >
+              <Users size={13} />
+              Chamber
+            </button>
+          )}
           {isBusy && (
             <button
               type="button"

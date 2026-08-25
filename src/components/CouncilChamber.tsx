@@ -14,6 +14,7 @@ import {
   ChevronDown,
   FileDown,
   Target,
+  BookOpen,
 } from 'lucide-react';
 import type {
   Persona,
@@ -60,6 +61,8 @@ import {
   stampFromBlockers,
 } from '../lib/evidence';
 import { hydrateAttachedBodies } from '../lib/evidenceIngest';
+import { admitInvariantsToBible, extractInvariants } from '../lib/chamberHandoff';
+import { loadGlobalBible, saveGlobalBible } from '../lib/oracleStore';
 
 export interface CouncilSettings {
   enableChunking: boolean;
@@ -112,6 +115,7 @@ export interface CouncilChamberProps {
   saveDestination?: 'cloud' | 'local' | null;
   onOpenSettings?: () => void;
   showToast?: (message: string, type?: 'info' | 'success' | 'error' | 'warning') => void;
+  onPatchSession?: (sessionId: string, patch: Partial<Session>) => void;
 }
 
 /** Deep-clones a round so in-flight streaming never mutates props/session state. */
@@ -247,6 +251,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   saveDestination,
   onOpenSettings,
   showToast,
+  onPatchSession,
   activeSession,
   sessions = [],
   onSelectSession,
@@ -290,6 +295,31 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 
   const handleSetRoundOutcome = (roundId: string, outcome: LedgerOutcome) => {
     setOutcomeLedger(setTrackedOutcome(roundId, outcome));
+  };
+
+  const handleAdmitToBible = (round: CouncilRound) => {
+    if (round.stamp !== 'completed') {
+      showToast?.('The docket is not stamped. Unstamped text cannot become Bible.', 'warning');
+      return;
+    }
+    const synthesis = round.synthesis?.content || round.deliberation?.stage3?.content || '';
+    const invariants = extractInvariants(synthesis);
+    if (!invariants) {
+      showToast?.('No invariants to admit — the Chair did not produce a usable synthesis.', 'warning');
+      return;
+    }
+    const question = activeSession?.handoff?.question || round.userQuery || '';
+    const now = Date.now();
+    const next = admitInvariantsToBible(loadGlobalBible().content, invariants, { question, admittedAt: now });
+    saveGlobalBible({ content: next, updatedAt: now });
+    if (activeSessionId && onPatchSession) {
+      onPatchSession(activeSessionId, {
+        handoff: activeSession?.handoff
+          ? { ...activeSession.handoff, bibleAdmittedAt: now }
+          : undefined,
+      });
+    }
+    showToast?.('Invariants admitted to the Global Bible. The essay was not.', 'success');
   };
 
   const ledgerStats = outcomeTrackingEnabled
@@ -1175,9 +1205,16 @@ If the question contains code, documents, or attached files, treat them as avail
       const resolvedMode = useSingleModelForSimple
         ? 'quick_panel'
         : resolveExecutionMode(executionMode, query, attachedFiles);
+      const isFirstHandoffRound =
+        Boolean(activeSession?.handoff?.brief) &&
+        (localRounds.length || rounds.length) === 0 &&
+        !query.includes('CASE BRIEF');
+      const userQuery = isFirstHandoffRound
+        ? `${activeSession!.handoff!.brief}\n\n[Operator restates the Question]:\n${query}`
+        : query;
       const newRound: CouncilRound = {
         id: `round_${Date.now()}`,
-        userQuery: query,
+        userQuery,
         timestamp: Date.now(),
         attachedTextFiles: attachedFiles,
         evidence,
@@ -1642,6 +1679,34 @@ If the question contains code, documents, or attached files, treat them as avail
         )}
       </div>
 
+      {activeSession?.handoff && (
+        <section className="p-4 bg-amber-50 border border-amber-300 rounded-2xl text-amber-950 shadow-sm space-y-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <BookOpen size={15} className="text-amber-800" />
+              Case brief from Oracle
+              {activeSession.handoff.domain && (
+                <span className="text-[10px] font-mono uppercase tracking-wider bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded">
+                  {activeSession.handoff.domain}
+                </span>
+              )}
+            </div>
+            {activeSession.handoff.bibleAdmittedAt && (
+              <span className="text-[11px] font-mono text-amber-800">
+                Invariants admitted {new Date(activeSession.handoff.bibleAdmittedAt).toLocaleString()}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-amber-900/90 leading-relaxed">
+            This is a one-page brief, not the conversation. Review it. Press Deliberate when you want
+            the panel. Nothing is written to the Bible until you admit a <em>stamped</em> verdict.
+          </p>
+          <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed bg-white/80 border border-amber-200 rounded-xl p-3 max-h-56 overflow-y-auto text-amber-950">
+            {activeSession.handoff.brief}
+          </pre>
+        </section>
+      )}
+
       {/* Council Formation & Metric Summary Bar */}
       <CouncilSummaryBar
         presetId={activePresetId}
@@ -1714,12 +1779,23 @@ If the question contains code, documents, or attached files, treat them as avail
             trackedOutcome={outcomeLedger.find((e) => e.id === round.id) || null}
             onTrackRound={() => handleTrackRound(round)}
             onSetOutcome={(o) => handleSetRoundOutcome(round.id, o)}
+            onAdmitToBible={() => handleAdmitToBible(round)}
+            bibleAdmitted={Boolean(activeSession?.handoff?.bibleAdmittedAt)}
           />
         ))}
       </div>
 
       {/* Input Composer */}
-      <Composer onSend={handleDeliberate} isDeliberating={isDeliberating} onStop={handleStop} />
+      <Composer
+        onSend={handleDeliberate}
+        isDeliberating={isDeliberating}
+        onStop={handleStop}
+        initialQuery={
+          activeSession?.handoff && (localRounds.length || rounds.length) === 0
+            ? activeSession.handoff.question
+            : undefined
+        }
+      />
     </div>
   );
 };

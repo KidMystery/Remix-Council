@@ -602,6 +602,7 @@ export function mergeSessions(
         personas: incoming.personas?.length ? incoming.personas : existing.personas,
         synthesizer: incoming.synthesizer || existing.synthesizer,
         activePresetId: incoming.activePresetId || existing.activePresetId,
+        handoff: incoming.handoff || existing.handoff,
         updatedAt: Math.max(existing.updatedAt || 0, incoming.updatedAt || 0),
       };
 

@@ -16,6 +16,7 @@ import {
   Trash2,
   Loader2,
   Target,
+  BookOpen,
 } from 'lucide-react';
 import type { CouncilRound, Persona } from '../types';
 import { EvidenceDocket } from './EvidenceDocket';
@@ -49,6 +50,8 @@ export interface CouncilRoundViewProps {
   trackedOutcome?: TrackedOutcome | null;
   onTrackRound?: () => void;
   onSetOutcome?: (outcome: LedgerOutcome) => void;
+  onAdmitToBible?: () => void;
+  bibleAdmitted?: boolean;
 }
 
 interface CardHeaderProps {
@@ -225,6 +228,8 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
   trackedOutcome = null,
   onTrackRound,
   onSetOutcome,
+  onAdmitToBible,
+  bibleAdmitted = false,
   isDeliberating = false,
   showConsensusVisualizer = false,
 }) => {
@@ -461,6 +466,18 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
             </button>
           ) : (
             <>
+              {onAdmitToBible && round.stamp === 'completed' && (
+                <ConfirmButton
+                  onConfirm={onAdmitToBible}
+                  disabled={isDeliberating || bibleAdmitted}
+                  confirmPrompt="Admit invariants only?"
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-amber-950 bg-amber-50 hover:bg-amber-100 px-2.5 py-1.5 rounded-lg border border-amber-300 transition-colors disabled:opacity-50 cursor-pointer"
+                  title="Admit only the stamped invariants to the Global Bible. The essay stays here."
+                >
+                  <BookOpen size={12} />
+                  <span>{bibleAdmitted ? 'Admitted' : 'Admit to Bible'}</span>
+                </ConfirmButton>
+              )}
               {outcomeTrackingEnabled && round.stamp === 'completed' && (
                 <div
                   className="flex items-center gap-0.5 p-0.5 rounded-lg border border-slate-700 bg-slate-950/70"
