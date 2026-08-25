@@ -684,6 +684,19 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   const runRoundExecution = async (roundToRun: CouncilRound, preparedQuery?: string) => {
     if (!activeSessionId) return;
 
+    // Per-round dollar governor reset — 0 = unlimited must not carry spend from prior round.
+    // Without this, second deliberation would trip on first round's accrued spend.
+    try {
+      dollarGovernor.current.reset();
+    } catch {
+      // If reset fails, re-instantiate with current ceiling (fail-safe for unlimited)
+      dollarGovernor.current = new DollarCostGovernor({
+        maxSpendPerMissionUSD: resolveCostCeilingUSD(maxRoundCostCeiling) ?? 0,
+        requireApprovalAboveUSD: 0.25,
+        strictHardStop: true,
+      });
+    }
+
     const controller = new AbortController();
     abortRef.current = controller;
 

@@ -24,6 +24,10 @@ export class DollarCostGovernor {
     return this.accruedSpendUSD;
   }
 
+  public reset(): void {
+    this.accruedSpendUSD = 0;
+  }
+
   public getRemainingBudget(): number {
     const cap = this.config.maxSpendPerMissionUSD;
     if (!(cap > 0) || !Number.isFinite(cap)) return Number.POSITIVE_INFINITY;
