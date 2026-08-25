@@ -225,12 +225,17 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
 
   const handleSaveModelConfig = () => {
     if (!selectedThread) return;
-    patchOracleThread(selectedThread.id, {
-      mode: modelDraft.mode,
-      model: modelDraft.model,
-      miniDeliberationModels: modelDraft.miniRoster,
-      rotationModels: modelDraft.rotationRoster,
-    });
+    try {
+      patchOracleThread(selectedThread.id, {
+        mode: modelDraft.mode,
+        model: modelDraft.model,
+        miniDeliberationModels: modelDraft.miniRoster,
+        rotationModels: modelDraft.rotationRoster,
+      });
+    } catch (err) {
+      console.warn('[Oracle Settings] Could not save model config:', err);
+      return;
+    }
     const loaded = loadOracleThreads();
     setThreads(loaded);
     setIsModelSavedNotice(true);
@@ -272,7 +277,12 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
           : t
       );
       setThreads(updatedThreads);
-      saveOracleThreads(updatedThreads);
+      try {
+        saveOracleThreads(updatedThreads);
+      } catch (err) {
+        console.warn('[Oracle Settings] Could not save thread Bible:', err);
+        return;
+      }
     } else {
       const updatedGlobal: OracleBible = { content: cleanContent, updatedAt: now };
       setGlobalBible(updatedGlobal);
@@ -321,7 +331,12 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
           : t
       );
       setThreads(updatedThreads);
-      saveOracleThreads(updatedThreads);
+      try {
+        saveOracleThreads(updatedThreads);
+      } catch (err) {
+        console.warn('[Oracle Settings] Could not clear thread Bible:', err);
+        return;
+      }
     } else {
       const updatedGlobal: OracleBible = { content: '', updatedAt: now };
       setGlobalBible(updatedGlobal);

@@ -544,7 +544,13 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     const tick = async () => {
       try {
         const job = await getAgentJob(serverJobId);
-        if (stopped || !job) return;
+        if (stopped) return;
+        if (!job) {
+          setIsRunning(false);
+          setMissionStatus('error');
+          addLog('Mission lost on redeploy (this server has no persistent volume).');
+          return;
+        }
         setServerJob(job);
         if (isAgentJobTerminal(job.status)) {
           if (job.status === 'done' || job.status === 'stopped_budget') {

@@ -1,6 +1,15 @@
 import type { Session, CouncilRound } from '../types';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { preferIncomingRound, stripSessionsBodies } from './evidence';
+import {
+  addTombstone,
+  applyTombstones,
+  DRIVE_UNREAD_MESSAGE,
+  mergeTombstones,
+  type Tombstone,
+} from './syncContract';
+
+export type { Tombstone };
 
 /**
  * Google Drive persistence layer using the Drive REST API with tokens from
@@ -169,8 +178,13 @@ function requireToken(): string {
   return accessToken as string;
 }
 
-async function findSessionsFile(token: string, fileName: string = SESSION_FILE_NAME): Promise<string | null> {
-  const url = `${DRIVE_API_BASE}/files?spaces=appDataFolder&fields=files(id,name)&q=${encodeURIComponent(`name='${fileName}'`)}`;
+interface DriveFileRef {
+  id: string;
+  etag?: string;
+}
+
+async function findDriveFile(token: string, fileName: string = SESSION_FILE_NAME): Promise<DriveFileRef | null> {
+  const url = `${DRIVE_API_BASE}/files?spaces=appDataFolder&fields=files(id,name,etag)&q=${encodeURIComponent(`name='${fileName}'`)}`;
   const resp = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -179,18 +193,35 @@ async function findSessionsFile(token: string, fileName: string = SESSION_FILE_N
     throw new AuthError('Token expired');
   }
   if (!resp.ok) {
-    throw new Error(`Failed to search Drive appDataFolder: HTTP ${resp.status}`);
+    throw new DriveUnreadError(`Failed to search Drive appDataFolder: HTTP ${resp.status}`);
   }
 
   const data = await resp.json();
-  const files: Array<{ id: string; name: string }> = data.files || [];
-  return files.find((f) => f.name === fileName)?.id || null;
+  const files: Array<{ id: string; name: string; etag?: string }> = data.files || [];
+  const match = files.find((f) => f.name === fileName);
+  return match ? { id: match.id, etag: match.etag } : null;
 }
+
+
 
 class AuthError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'AuthError';
+  }
+}
+
+export class DriveUnreadError extends Error {
+  constructor(message: string = DRIVE_UNREAD_MESSAGE) {
+    super(message);
+    this.name = 'DriveUnreadError';
+  }
+}
+
+class PreconditionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PreconditionError';
   }
 }
 
@@ -203,7 +234,8 @@ async function uploadSessionsMultipart(
   token: string,
   sessions: any,
   fileId?: string,
-  fileName: string = SESSION_FILE_NAME
+  fileName: string = SESSION_FILE_NAME,
+  etag?: string
 ): Promise<void> {
   const metadata: Record<string, any> = {
     name: fileName,
@@ -231,14 +263,21 @@ async function uploadSessionsMultipart(
     ? `${DRIVE_UPLOAD_BASE}/files/${fileId}?uploadType=multipart`
     : `${DRIVE_UPLOAD_BASE}/files?uploadType=multipart`;
 
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': `multipart/related; boundary=${boundary}`,
+  };
+  if (fileId && etag) headers['If-Match'] = etag;
+
   const resp = await fetch(url, {
     method: fileId ? 'PATCH' : 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': `multipart/related; boundary=${boundary}`,
-    },
+    headers,
     body: bodyParts.join('\r\n'),
   });
+
+  if (resp.status === 412) {
+    throw new PreconditionError(`Drive file ${fileName} changed under us`);
+  }
 
   if (!resp.ok) {
     let errorDetail = '';
@@ -252,64 +291,127 @@ async function uploadSessionsMultipart(
   }
 }
 
-/**
- * Persists session JSON to Drive appDataFolder. File bodies are stripped
- * (IndexedDB on this device holds the blobs). In-memory sessions are not mutated.
- */
-export async function saveSessionsToDrive(sessions: Session[]): Promise<void> {
-  const token = requireToken();
-  const sanitized = sanitizeForDrive(sessions);
+export interface SessionDriveDoc {
+  version: 2;
+  sessions: Session[];
+  deleted: Tombstone[];
+}
 
+export function parseSessionDriveDoc(raw: unknown): SessionDriveDoc {
+  if (Array.isArray(raw)) {
+    return { version: 2, sessions: raw as Session[], deleted: [] };
+  }
+  if (raw && typeof raw === 'object' && Array.isArray((raw as any).sessions)) {
+    const deleted = Array.isArray((raw as any).deleted) ? (raw as any).deleted : [];
+    return { version: 2, sessions: (raw as any).sessions, deleted };
+  }
+  return { version: 2, sessions: [], deleted: [] };
+}
+
+async function readDriveJson(
+  token: string,
+  fileName: string
+): Promise<{ missing: true } | { missing: false; file: DriveFileRef; raw: unknown }> {
+  const file = await findDriveFile(token, fileName);
+  if (!file) return { missing: true };
+
+  const resp = await fetch(`${DRIVE_API_BASE}/files/${file.id}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (resp.status === 401) throw new AuthError('Token expired');
+  if (resp.status === 404) return { missing: true };
+  if (!resp.ok) {
+    throw new DriveUnreadError(`Failed to read Drive file (${fileName}): HTTP ${resp.status}`);
+  }
   try {
-    const fileId = await findSessionsFile(token);
-    await uploadSessionsMultipart(token, sanitized, fileId || undefined);
+    const text = await resp.text();
+    return { missing: false, file, raw: text ? JSON.parse(text) : null };
+  } catch {
+    throw new DriveUnreadError(`Drive file (${fileName}) was not readable JSON.`);
+  }
+}
+
+async function withAuthRetry<T>(op: (token: string) => Promise<T>): Promise<T> {
+  try {
+    return await op(requireToken());
   } catch (err: any) {
     if (err instanceof AuthError) {
-      // Token expired — re-authenticate once and retry.
       await signInWithGoogle();
-      const freshToken = requireToken();
-      const fileId = await findSessionsFile(freshToken);
-      await uploadSessionsMultipart(freshToken, sanitized, fileId || undefined);
-      return;
+      return op(requireToken());
     }
     throw err;
   }
 }
 
-/**
- * Loads sessions from the Drive appDataFolder. Returns [] when the file is
- * missing or any error occurs.
- */
-export async function loadSessionsFromDrive(): Promise<Session[]> {
-  if (!isGoogleSignedIn()) return [];
-
-  try {
-    const token = requireToken();
-    const fileId = await findSessionsFile(token);
-    if (!fileId) return [];
-
-    const resp = await fetch(`${DRIVE_API_BASE}/files/${fileId}?alt=media`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!resp.ok) return [];
-
-    const text = await resp.text();
-    const parsed = JSON.parse(text);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    console.warn('[DrivePersistence] Failed to load sessions from Drive:', err);
-    return [];
-  }
+export async function loadSessionDriveDoc(): Promise<SessionDriveDoc> {
+  if (!isGoogleSignedIn()) return { version: 2, sessions: [], deleted: [] };
+  const read = await withAuthRetry((token) => readDriveJson(token, SESSION_FILE_NAME));
+  if (read.missing) return { version: 2, sessions: [], deleted: [] };
+  return parseSessionDriveDoc(read.raw);
 }
 
 /**
- * Removes a session from Drive by loading, filtering, and saving back.
+ * Loads sessions from Drive. Distinguishes unread from empty: throws
+ * DriveUnreadError so callers must not treat a failed GET as "Drive is empty."
+ */
+export async function loadSessionsFromDrive(): Promise<Session[]> {
+  const doc = await loadSessionDriveDoc();
+  return applyTombstones(doc.sessions, doc.deleted);
+}
+
+/**
+ * Merge-before-put. If Drive cannot be read, does not write.
+ * Concurrent PUTs retry on etag 412 (max 3).
+ */
+export async function saveSessionsToDrive(
+  sessions: Session[],
+  deleted: Tombstone[] = []
+): Promise<SessionDriveDoc> {
+  const local: SessionDriveDoc = {
+    version: 2,
+    sessions: sanitizeForDrive(sessions),
+    deleted: mergeTombstones(deleted),
+  };
+
+  return withAuthRetry(async (token) => {
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const read = await readDriveJson(token, SESSION_FILE_NAME);
+      const remote = read.missing ? { version: 2 as const, sessions: [] as Session[], deleted: [] as Tombstone[] } : parseSessionDriveDoc(read.raw);
+      const merged = mergeSessionDocs(local, remote);
+      const envelope: SessionDriveDoc = {
+        version: 2,
+        sessions: sanitizeForDrive(merged.sessions),
+        deleted: merged.deleted,
+      };
+      try {
+        await uploadSessionsMultipart(
+          token,
+          envelope,
+          read.missing ? undefined : read.file.id,
+          SESSION_FILE_NAME,
+          read.missing ? undefined : read.file.etag
+        );
+        return envelope;
+      } catch (err: any) {
+        if (err instanceof PreconditionError) {
+          lastErr = err;
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr || new DriveUnreadError('Drive changed on another device and could not be merged after 3 tries.');
+  });
+}
+
+/**
+ * Tombstone + merge-before-put. Never filters a remote list and writes it back
+ * without unioning the other device's new threads.
  */
 export async function deleteSessionFromDrive(sessionId: string): Promise<void> {
   if (!isGoogleSignedIn()) return;
-  const sessions = await loadSessionsFromDrive();
-  const remaining = sessions.filter((s) => s.id !== sessionId);
-  await saveSessionsToDrive(remaining);
+  await saveSessionsToDrive([], addTombstone([], sessionId));
 }
 
 // ---------------------------------------------------------------------------
@@ -323,53 +425,87 @@ export interface OracleDrivePayload {
   updatedAt: number;
   threads: any[];
   globalBible: any;
+  deleted?: Tombstone[];
 }
 
-export async function saveOracleToDrive(threads: any[], globalBible: any): Promise<void> {
-  const token = requireToken();
-  const payload: OracleDrivePayload = {
-    version: 1,
+export function parseOracleDriveDoc(raw: unknown): OracleDrivePayload {
+  if (!raw || typeof raw !== 'object' || !Array.isArray((raw as any).threads)) {
+    return { version: 2, updatedAt: 0, threads: [], globalBible: null, deleted: [] };
+  }
+  const doc = raw as any;
+  return {
+    version: 2,
+    updatedAt: typeof doc.updatedAt === 'number' ? doc.updatedAt : 0,
+    threads: doc.threads,
+    globalBible: doc.globalBible || null,
+    deleted: Array.isArray(doc.deleted) ? doc.deleted : [],
+  };
+}
+
+export async function loadOracleDriveDoc(): Promise<OracleDrivePayload | null> {
+  if (!isGoogleSignedIn()) return null;
+  const read = await withAuthRetry((token) => readDriveJson(token, ORACLE_FILE_NAME));
+  if (read.missing) return { version: 2, updatedAt: 0, threads: [], globalBible: null, deleted: [] };
+  return parseOracleDriveDoc(read.raw);
+}
+
+export async function loadOracleFromDrive(): Promise<{ threads: any[]; globalBible: any; deleted: Tombstone[] } | null> {
+  const doc = await loadOracleDriveDoc();
+  if (!doc) return null;
+  return {
+    threads: applyTombstones(doc.threads || [], doc.deleted),
+    globalBible: doc.globalBible || null,
+    deleted: doc.deleted || [],
+  };
+}
+
+export async function saveOracleToDrive(
+  threads: any[],
+  globalBible: any,
+  deleted: Tombstone[] = []
+): Promise<OracleDrivePayload> {
+  const local: OracleDrivePayload = {
+    version: 2,
     updatedAt: Date.now(),
     threads,
     globalBible,
+    deleted: mergeTombstones(deleted),
   };
 
-  try {
-    const fileId = await findSessionsFile(token, ORACLE_FILE_NAME);
-    await uploadSessionsMultipart(token, payload as any, fileId || undefined, ORACLE_FILE_NAME);
-  } catch (err: any) {
-    if (err instanceof AuthError) {
-      await signInWithGoogle();
-      const freshToken = requireToken();
-      const fileId = await findSessionsFile(freshToken, ORACLE_FILE_NAME);
-      await uploadSessionsMultipart(freshToken, payload as any, fileId || undefined, ORACLE_FILE_NAME);
-      return;
+  return withAuthRetry(async (token) => {
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const read = await readDriveJson(token, ORACLE_FILE_NAME);
+      const remote = read.missing
+        ? { version: 2, updatedAt: 0, threads: [], globalBible: null, deleted: [] as Tombstone[] }
+        : parseOracleDriveDoc(read.raw);
+      const merged = mergeOracleDocs(local, remote);
+      const envelope: OracleDrivePayload = {
+        version: 2,
+        updatedAt: Date.now(),
+        threads: merged.threads,
+        globalBible: merged.globalBible,
+        deleted: merged.deleted,
+      };
+      try {
+        await uploadSessionsMultipart(
+          token,
+          envelope,
+          read.missing ? undefined : read.file.id,
+          ORACLE_FILE_NAME,
+          read.missing ? undefined : read.file.etag
+        );
+        return envelope;
+      } catch (err: any) {
+        if (err instanceof PreconditionError) {
+          lastErr = err;
+          continue;
+        }
+        throw err;
+      }
     }
-    throw err;
-  }
-}
-
-export async function loadOracleFromDrive(): Promise<{ threads: any[]; globalBible: any } | null> {
-  if (!isGoogleSignedIn()) return null;
-
-  try {
-    const token = requireToken();
-    const fileId = await findSessionsFile(token, ORACLE_FILE_NAME);
-    if (!fileId) return null;
-
-    const resp = await fetch(`${DRIVE_API_BASE}/files/${fileId}?alt=media`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!resp.ok) return null;
-
-    const text = await resp.text();
-    const parsed = JSON.parse(text);
-    if (!parsed || !Array.isArray(parsed.threads)) return null;
-    return { threads: parsed.threads, globalBible: parsed.globalBible || null };
-  } catch (err) {
-    console.warn('[DrivePersistence] Failed to load Oracle data from Drive:', err);
-    return null;
-  }
+    throw lastErr || new DriveUnreadError('Oracle Drive file changed and could not be merged after 3 tries.');
+  });
 }
 
 /**
@@ -400,19 +536,22 @@ export interface MergeResult<T> {
   merged: T[];
   addedCount: number;
   updatedCount: number;
+  deleted: Tombstone[];
 }
 
 /**
- * Intelligently merges base sessions with incoming sessions.
- * Preserves existing sessions, updates existing matching sessions with newer rounds,
- * and adds new sessions without deleting or overwriting anything.
+ * Union of sessions by id. Rounds merge by exhibit identity (preferIncomingRound),
+ * never by synthesis string length. Tombstones drop an id unless a later edit undeletes it.
  */
 export function mergeSessions(
   baseSessions: Session[],
-  incomingSessions: Session[]
+  incomingSessions: Session[],
+  baseDeleted: Tombstone[] = [],
+  incomingDeleted: Tombstone[] = []
 ): MergeResult<Session> {
   let addedCount = 0;
   let updatedCount = 0;
+  const deleted = mergeTombstones(baseDeleted, incomingDeleted);
 
   const sessionMap = new Map<string, Session>();
   baseSessions.forEach((s) => {
@@ -427,7 +566,6 @@ export function mergeSessions(
       sessionMap.set(incoming.id, incoming);
       addedCount++;
     } else {
-      // Merge rounds by round ID
       const roundMap = new Map<string, CouncilRound>();
       (existing.rounds || []).forEach((r) => {
         if (r && r.id) roundMap.set(r.id, r);
@@ -438,20 +576,8 @@ export function mergeSessions(
         const existingRound = roundMap.get(r.id);
         if (!existingRound) {
           roundMap.set(r.id, r);
-        } else {
-          // If incoming round has more synthesis or deliberation content, prefer incoming
-          const incomingContentLen =
-            (r.synthesis?.content || '').length +
-            Object.keys(r.deliberation?.stage1 || {}).length +
-            Object.keys(r.deliberation?.stage2 || {}).length;
-          const existingContentLen =
-            (existingRound.synthesis?.content || '').length +
-            Object.keys(existingRound.deliberation?.stage1 || {}).length +
-            Object.keys(existingRound.deliberation?.stage2 || {}).length;
-
-          if (incomingContentLen >= existingContentLen) {
-            roundMap.set(r.id, r);
-          }
+        } else if (preferIncomingRound(existingRound, r)) {
+          roundMap.set(r.id, r);
         }
       }
 
@@ -476,7 +602,7 @@ export function mergeSessions(
         personas: incoming.personas?.length ? incoming.personas : existing.personas,
         synthesizer: incoming.synthesizer || existing.synthesizer,
         activePresetId: incoming.activePresetId || existing.activePresetId,
-        updatedAt: Math.max(existing.updatedAt || 0, incoming.updatedAt || 0, Date.now()),
+        updatedAt: Math.max(existing.updatedAt || 0, incoming.updatedAt || 0),
       };
 
       sessionMap.set(incoming.id, mergedSession);
@@ -484,23 +610,32 @@ export function mergeSessions(
     }
   }
 
-  // Sort sessions by latest updatedAt first
-  const merged = Array.from(sessionMap.values()).sort(
-    (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)
+  const merged = applyTombstones(
+    Array.from(sessionMap.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)),
+    deleted
   );
 
-  return { merged, addedCount, updatedCount };
+  return { merged, addedCount, updatedCount, deleted };
+}
+
+export function mergeSessionDocs(local: SessionDriveDoc, remote: SessionDriveDoc): SessionDriveDoc {
+  const result = mergeSessions(local.sessions || [], remote.sessions || [], local.deleted, remote.deleted);
+  return { version: 2, sessions: result.merged, deleted: result.deleted };
 }
 
 /**
- * Intelligently merges base Oracle threads with incoming threads.
+ * Union of Oracle threads by id. Messages union by id (keep both devices'
+ * turns). Tombstones drop a thread unless a later edit undeletes it.
  */
 export function mergeOracleThreads(
   baseThreads: any[],
-  incomingThreads: any[]
+  incomingThreads: any[],
+  baseDeleted: Tombstone[] = [],
+  incomingDeleted: Tombstone[] = []
 ): MergeResult<any> {
   let addedCount = 0;
   let updatedCount = 0;
+  const deleted = mergeTombstones(baseDeleted, incomingDeleted);
 
   const threadMap = new Map<string, any>();
   baseThreads.forEach((t) => {
@@ -514,7 +649,6 @@ export function mergeOracleThreads(
       threadMap.set(incoming.id, incoming);
       addedCount++;
     } else {
-      // Merge messages by ID
       const msgMap = new Map<string, any>();
       (existing.messages || []).forEach((m: any) => {
         if (m && m.id) msgMap.set(m.id, m);
@@ -536,15 +670,19 @@ export function mergeOracleThreads(
         (a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0)
       );
 
+      const incomingTitle = incoming.title && incoming.title !== 'New Consultation' && incoming.title !== 'New Conversation';
+      const existingTitle = existing.title && existing.title !== 'New Consultation' && existing.title !== 'New Conversation';
+
       const mergedThread = {
         ...existing,
         ...incoming,
-        title:
-          incoming.title && incoming.title !== 'New Consultation'
-            ? incoming.title
-            : existing.title,
+        title: incomingTitle ? incoming.title : existingTitle ? existing.title : incoming.title || existing.title,
         messages: mergedMessages,
-        updatedAt: Math.max(existing.updatedAt || 0, incoming.updatedAt || 0, Date.now()),
+        bible:
+          (incoming.bible?.updatedAt || 0) >= (existing.bible?.updatedAt || 0)
+            ? incoming.bible || existing.bible
+            : existing.bible,
+        updatedAt: Math.max(existing.updatedAt || 0, incoming.updatedAt || 0),
       };
 
       threadMap.set(incoming.id, mergedThread);
@@ -552,9 +690,23 @@ export function mergeOracleThreads(
     }
   }
 
-  const merged = Array.from(threadMap.values()).sort(
-    (a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0)
+  const merged = applyTombstones(
+    Array.from(threadMap.values()).sort((a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0)),
+    deleted
   );
 
-  return { merged, addedCount, updatedCount };
+  return { merged, addedCount, updatedCount, deleted };
+}
+
+export function mergeOracleDocs(local: OracleDrivePayload, remote: OracleDrivePayload): OracleDrivePayload {
+  const result = mergeOracleThreads(local.threads || [], remote.threads || [], local.deleted, remote.deleted);
+  const localBibleAt = local.globalBible?.updatedAt || 0;
+  const remoteBibleAt = remote.globalBible?.updatedAt || 0;
+  return {
+    version: 2,
+    updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0),
+    threads: result.merged,
+    globalBible: remoteBibleAt > localBibleAt ? remote.globalBible : local.globalBible || remote.globalBible,
+    deleted: result.deleted,
+  };
 }

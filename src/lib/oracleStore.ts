@@ -61,6 +61,7 @@ export interface OracleThread {
 
 const THREADS_KEY = 'council-oracle-threads-v1';
 const GLOBAL_BIBLE_KEY = 'council-oracle-global-bible-v1';
+const TOMBSTONE_KEY = 'council-oracle-tombstones-v1';
 const MAX_MESSAGES = 200;
 
 export const ORACLE_DEFAULT_MODEL = 'google/gemini-2.5-flash';
@@ -169,6 +170,28 @@ export function saveOracleThreads(threads: OracleThread[]): void {
     localStorage.setItem(THREADS_KEY, JSON.stringify(sanitized));
   } catch (err) {
     console.warn('[OracleStore] Failed to save threads (quota?):', err);
+    throw err instanceof Error
+      ? err
+      : new Error('Could not save this turn locally (storage full). Last good copy is still on this device.');
+  }
+}
+
+export function loadOracleTombstones(): { id: string; deletedAt: number }[] {
+  try {
+    const raw = localStorage.getItem(TOMBSTONE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveOracleTombstones(stones: { id: string; deletedAt: number }[]): void {
+  try {
+    localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(stones));
+  } catch (err) {
+    console.warn('[OracleStore] Could not persist delete marks:', err);
   }
 }
 

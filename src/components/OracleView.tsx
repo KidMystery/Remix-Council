@@ -40,6 +40,8 @@ import {
   newOracleThread,
   loadOracleThreads,
   saveOracleThreads,
+  loadOracleTombstones,
+  saveOracleTombstones,
   loadGlobalBible,
   saveGlobalBible,
   exportOracleThreads,
@@ -84,7 +86,9 @@ import {
   saveOracleToDrive,
   loadOracleFromDrive,
   mergeOracleThreads,
+  DriveUnreadError,
 } from '../lib/drivePersistence';
+import { addTombstone, AGENT_LOST_ON_REDEPLOY, DRIVE_UNREAD_MESSAGE, mergeTombstones } from '../lib/syncContract';
 import { copyToClipboard } from '../lib/clipboard';
 import { MessageMarkdown } from './MessageMarkdown';
 import type { RawOpenRouterModel } from '../types';
@@ -136,6 +140,8 @@ export const OracleView: React.FC<OracleViewProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [driveSyncState, setDriveSyncState] = useState<'idle' | 'syncing' | 'saved' | 'error'>('idle');
   const [lastDriveSync, setLastDriveSync] = useState<number | null>(null);
+  const [persistError, setPersistError] = useState<string | null>(null);
+  const deletedRef = useRef(loadOracleTombstones());
   const [customModels, setCustomModels] = useState<OracleCustomModel[]>(() => loadCustomOracleModels());
   const [briefingStoreVersion, setBriefingStoreVersion] = useState(0);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
@@ -222,11 +228,22 @@ export const OracleView: React.FC<OracleViewProps> = ({
       setDriveSyncState('syncing');
       try {
         const remote = await loadOracleFromDrive();
-        if (!cancelled && remote && remote.threads.length > 0) {
-          const { merged } = mergeOracleThreads(threadsRef.current, remote.threads);
+        if (!cancelled && remote) {
+          const { merged, deleted } = mergeOracleThreads(
+            threadsRef.current,
+            remote.threads,
+            deletedRef.current,
+            remote.deleted
+          );
+          deletedRef.current = deleted;
+          saveOracleTombstones(deleted);
           threadsRef.current = merged;
           setThreads(merged);
-          saveOracleThreads(merged);
+          try {
+            saveOracleThreads(merged);
+          } catch (err: any) {
+            setPersistError(err?.message || 'Could not save locally.');
+          }
           setActiveId((prev) => (merged.some((t: any) => t.id === prev) ? prev : merged[0]?.id || null));
           if (remote.globalBible) {
             globalBibleRef.current = remote.globalBible;
@@ -239,6 +256,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
       } catch (err) {
         console.warn('[Oracle] Drive load failed:', err);
         setDriveSyncState('error');
+        if (err instanceof DriveUnreadError) {
+          setPersistError(DRIVE_UNREAD_MESSAGE);
+        }
       }
     })();
     return () => {
@@ -253,14 +273,21 @@ export const OracleView: React.FC<OracleViewProps> = ({
     if (driveSaveTimer.current) clearTimeout(driveSaveTimer.current);
     driveSaveTimer.current = setTimeout(() => {
       setDriveSyncState('syncing');
-      saveOracleToDrive(threadsRef.current, globalBibleRef.current)
-        .then(() => {
+      saveOracleToDrive(threadsRef.current, globalBibleRef.current, deletedRef.current)
+        .then((doc) => {
+          deletedRef.current = mergeTombstones(deletedRef.current, doc.deleted);
+          saveOracleTombstones(deletedRef.current);
+          threadsRef.current = doc.threads;
+          setThreads(doc.threads);
           setDriveSyncState('saved');
           setLastDriveSync(Date.now());
         })
         .catch((err) => {
           console.warn('[Oracle] Drive save failed:', err);
           setDriveSyncState('error');
+          if (err instanceof DriveUnreadError) {
+            setPersistError(DRIVE_UNREAD_MESSAGE);
+          }
         });
     }, 4000);
     return () => {
@@ -268,12 +295,22 @@ export const OracleView: React.FC<OracleViewProps> = ({
     };
   }, [threads, globalBible, isSignedIn]);
 
-  const commitThread = useCallback((updated: OracleThread) => {
-    const next = threadsRef.current.map((t) => (t.id === updated.id ? updated : t));
+  const persistAll = useCallback((next: OracleThread[]) => {
     threadsRef.current = next;
     setThreads(next);
-    saveOracleThreads(next);
+    try {
+      saveOracleThreads(next);
+      setPersistError(null);
+    } catch (err: any) {
+      setPersistError(
+        err?.message || 'Could not save this turn locally (storage full). Last good copy is still on this device.'
+      );
+    }
   }, []);
+
+  const commitThread = useCallback((updated: OracleThread) => {
+    persistAll(threadsRef.current.map((t) => (t.id === updated.id ? updated : t)));
+  }, [persistAll]);
 
   const handleNewThread = () => {
     const t = newOracleThread(activeThread?.model);
@@ -297,18 +334,16 @@ export const OracleView: React.FC<OracleViewProps> = ({
       t.rotateVoiceModels = activeThread.rotateVoiceModels;
     }
     const next = [t, ...threadsRef.current];
-    threadsRef.current = next;
-    setThreads(next);
+    persistAll(next);
     setActiveId(t.id);
-    saveOracleThreads(next);
   };
 
   const handleDeleteThread = (id: string) => {
     const next = threadsRef.current.filter((t) => t.id !== id);
-    threadsRef.current = next;
-    setThreads(next);
+    deletedRef.current = addTombstone(deletedRef.current, id);
+    saveOracleTombstones(deletedRef.current);
+    persistAll(next);
     if (activeId === id) setActiveId(next[0]?.id || null);
-    saveOracleThreads(next);
   };
 
   const patchThread = (id: string, patch: Partial<OracleThread>) => {
@@ -331,11 +366,8 @@ export const OracleView: React.FC<OracleViewProps> = ({
     t.webEnabled = activeThread?.webEnabled ?? true;
     t.reflectEnabled = activeThread?.reflectEnabled ?? true;
     t.rotateVoices = false;
-    const next = [t, ...threadsRef.current];
-    threadsRef.current = next;
-    setThreads(next);
+    persistAll([t, ...threadsRef.current]);
     setActiveId(t.id);
-    saveOracleThreads(next);
     recordBriefingConvened(candidate.key);
     const text = `Please convene a full mini-council on this recurring question: ${candidate.label}\n\nMy latest framing:\n${candidate.sample}`;
     void handleSend(text, [], [], undefined, false, t.id);
@@ -387,7 +419,12 @@ export const OracleView: React.FC<OracleViewProps> = ({
         if (!jobId) return;
         try {
           const job = await getAgentJob(jobId);
-          if (!job) return;
+          if (!job) {
+            serverBriefingIdRef.current = null;
+            setServerBriefingJob(null);
+            setPersistError(AGENT_LOST_ON_REDEPLOY);
+            return;
+          }
           setServerBriefingJob(job);
           if (!isAgentJobTerminal(job.status)) {
             window.setTimeout(tick, 4000);
@@ -428,11 +465,8 @@ export const OracleView: React.FC<OracleViewProps> = ({
             },
           ];
           t.updatedAt = Date.now();
-          const next = [t, ...threadsRef.current];
-          threadsRef.current = next;
-          setThreads(next);
+          persistAll([t, ...threadsRef.current]);
           setActiveId(t.id);
-          saveOracleThreads(next);
           setServerBriefingJob(null);
         } catch (err) {
           console.warn('[Oracle] Server briefing poll failed:', err);
@@ -907,10 +941,8 @@ export const OracleView: React.FC<OracleViewProps> = ({
       const result = importOracleThreads(String(reader.result || ''));
       if (result.success && result.threads) {
         const { merged } = mergeOracleThreads(threadsRef.current, result.threads);
-        threadsRef.current = merged;
-        setThreads(merged);
+        persistAll(merged);
         setActiveId(merged[0]?.id || null);
-        saveOracleThreads(merged);
         if (result.globalBible) {
           globalBibleRef.current = result.globalBible;
           setGlobalBible(result.globalBible);
@@ -1048,6 +1080,24 @@ export const OracleView: React.FC<OracleViewProps> = ({
             )}
           </div>
         </header>
+
+        {persistError && (
+          <div className="flex items-start gap-3 p-3.5 bg-amber-50 border border-amber-300 rounded-2xl text-amber-950">
+            <AlertCircle size={16} className="text-amber-700 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0 text-sm leading-relaxed">
+              <div className="font-semibold">Could not save this turn</div>
+              <p className="text-amber-900/90 mt-0.5">{persistError}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPersistError(null)}
+              className="text-amber-800 hover:text-amber-950 p-1 cursor-pointer"
+              title="Dismiss"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
         {/* Unasked Verdict — a topic the owner keeps circling across threads */}
         {briefingCandidate && (
