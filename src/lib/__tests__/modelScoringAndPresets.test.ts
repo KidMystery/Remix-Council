@@ -119,14 +119,16 @@ describe('dynamic preset resolution', () => {
     Object.assign(preset, before);
   });
 
-  it('keeps live curated models untouched', () => {
+  it('reseats budget presets onto unique live labs', () => {
     const preset = MODEL_PRESETS.find((p) => p.id === 'balanced_quality')!;
     const before = JSON.parse(JSON.stringify(preset.assignments));
-    // Every balanced assignment is in the live catalog (or re-resolved to one).
     updatePresetsFromFetchedModels(LIVE_CATALOG);
-    Object.values(preset.assignments).forEach((a) => {
-      expect(LIVE_CATALOG.some((m) => m.id === a.model)).toBe(true);
+    const models = Object.values(preset.assignments).map((a) => a.model);
+    models.forEach((id) => {
+      expect(LIVE_CATALOG.some((m) => m.id === id)).toBe(true);
     });
+    const labs = models.map((id) => id.split('/')[0]);
+    expect(new Set(labs).size).toBe(labs.length);
     preset.assignments = before;
   });
 

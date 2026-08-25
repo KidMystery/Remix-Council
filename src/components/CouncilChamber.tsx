@@ -34,18 +34,18 @@ import { resolveExecutionMode } from '../lib/modeClassifier';
 import { compressSessionContext } from '../lib/contextCompressor';
 import { preprocessLargeAttachment } from '../lib/chunkProcessor';
 import { shouldEnableWebSearch } from '../lib/webGrounding';
-import { detectTaskDomain, applySmartModelSelection } from '../lib/smartModelSelector';
+import { detectTaskDomain } from '../lib/smartModelSelector';
 import { countRoundCost, formatCost, getModelRates, estimateTokens, splitRecentRounds } from '../lib/archivist';
 import { DollarCostGovernor } from '../lib/dollarCostGovernor';
-import { allocateCouncilSeats } from '../lib/serverModelAllocator';
 import { pricingIsFree } from '../lib/modelScoring';
 import {
   OPENROUTER_AUTO,
   buildAutoRouterPlugin,
   costTierForBudget,
-  preloadPersonaFilters,
   shouldUseOpenRouterAuto,
 } from '../lib/autoRouter';
+import { allocateChamberLabs, autoFiltersFromPlan, type ChamberLabPlan } from '../lib/chamberLabs';
+import { presetTierFor } from '../lib/presets';
 import { useCouncilReducer } from '../hooks/useCouncilReducer';
 import { CouncilRoundView } from './CouncilRoundView';
 import { Composer } from './Composer';
@@ -436,6 +436,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 
   // Round being executed (single-flight under the deliberation lock).
   const activeRoundRef = useRef<CouncilRound | null>(null);
+  const labPlanRef = useRef<ChamberLabPlan | null>(null);
 
   /**
    * Builds the full query for a round, optionally preprocessing oversized
@@ -492,17 +493,20 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 
     const activePersonas = personas.filter((p) => p.enabled !== false);
     const useAuto = shouldUseOpenRouterAuto({ autoSelect: autoSelectModels, budget: policy.budget });
+    const chairId = synthesizer.id || 'synthesizer';
+    const chairFilters = labPlanRef.current ? autoFiltersFromPlan(labPlanRef.current) : {};
+    const chairFilter = chairFilters[chairId] || chairFilters.synthesizer;
     const synthesisModel = useAuto
       ? OPENROUTER_AUTO
-      : synthesizer.model || activePersonas[0]?.model || 'google/gemini-2.5-flash';
+      : labPlanRef.current?.seats[chairId]?.representativeModel ||
+        synthesizer.model ||
+        activePersonas[0]?.model ||
+        'google/gemini-2.5-flash';
     const chairPlugins = useAuto
       ? [
           buildAutoRouterPlugin({
-            allowedModels: preloadPersonaFilters(
-              [{ id: 'synthesizer', model: synthesizer.model }],
-              rawModelsCatalog
-            ).synthesizer,
-            costTier: costTierForBudget(policy.budget),
+            allowedModels: chairFilter,
+            costTier: costTierForBudget(presetTierFor(activePresetId)),
           }),
         ]
       : undefined;
@@ -764,18 +768,35 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     );
     setLastDomain(domain);
     const useAuto = shouldUseOpenRouterAuto({ autoSelect: autoSelectModels, budget: policy.budget });
-    const personaFilters = useAuto
-      ? preloadPersonaFilters(
-          [...activePersonas, { id: synthesizer.id || 'synthesizer', model: synthesizer.model }],
-          rawModelsCatalog
-        )
-      : {};
+    const labPlan = allocateChamberLabs({
+      seats: [
+        ...activePersonas,
+        {
+          id: synthesizer.id || 'synthesizer',
+          name: synthesizer.name,
+          role: synthesizer.role,
+          systemPrompt: synthesizer.systemPrompt,
+          model: synthesizer.model,
+        },
+      ],
+      catalog: rawModelsCatalog || [],
+      budget: presetTierFor(activePresetId),
+      chairId: synthesizer.id || 'synthesizer',
+    });
+    labPlanRef.current = labPlan;
+    console.info('[ChamberLabs]', labPlan.uniqueness, Object.fromEntries(
+      Object.values(labPlan.seats).map((seat) => [seat.personaId, `${seat.lab} → ${seat.representativeModel}`])
+    ));
+    if (autoSelectModels && labPlan.toast) {
+      showToast?.(labPlan.toast, 'warning');
+    }
+    const personaFilters = useAuto ? autoFiltersFromPlan(labPlan) : {};
     const autoPluginsFor = (id: string) =>
       useAuto
         ? [
             buildAutoRouterPlugin({
               allowedModels: personaFilters[id],
-              costTier: costTierForBudget(policy.budget),
+              costTier: costTierForBudget(presetTierFor(activePresetId)),
             }),
           ]
         : undefined;
@@ -785,31 +806,9 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
         modelOverrides[p.id] = OPENROUTER_AUTO;
       });
     } else if (autoSelectModels) {
-      try {
-        const budgetTier = policy.budget === 'free' ? 'free' : policy.budget === 'quality' ? 'quality' : 'cheap';
-        const plan = allocateCouncilSeats({
-          domain: (domain as any) || 'general',
-          budgetTier,
-          personas: activePersonas,
-          synthesizer,
-          catalog: rawModelsCatalog || [],
-        });
-        Object.entries(plan.seats).forEach(([id, seat]) => {
-          modelOverrides[id] = seat.assignedModel;
-        });
-      } catch {
-        try {
-          const selection = applySmartModelSelection(domain, activePersonas, synthesizer, {
-            rawModelsCatalog: rawModelsCatalog || [],
-            autoSelectModels: true,
-          });
-          selection.updatedPersonas.forEach((p) => {
-            modelOverrides[p.id] = p.model;
-          });
-        } catch {
-          // fall back to each persona's configured model
-        }
-      }
+      Object.values(labPlan.seats).forEach((seat) => {
+        if (seat.representativeModel) modelOverrides[seat.personaId] = seat.representativeModel;
+      });
     }
     const modelFor = (id: string) =>
       modelOverrides[id] || activePersonas.find((p) => p.id === id)?.model || '';
@@ -1379,9 +1378,37 @@ If the question contains code, documents, or attached files, treat them as avail
       });
 
       const call = makeCallController((panelTimeoutSeconds || 120) * 1000);
+      const regenUseAuto = shouldUseOpenRouterAuto({ autoSelect: autoSelectModels, budget: policy.budget });
+      const regenPlan = allocateChamberLabs({
+        seats: [
+          ...personas.filter((p) => p.enabled !== false),
+          {
+            id: synthesizer.id || 'synthesizer',
+            name: synthesizer.name,
+            role: synthesizer.role,
+            systemPrompt: synthesizer.systemPrompt,
+            model: synthesizer.model,
+          },
+        ],
+        catalog: rawModelsCatalog || [],
+        budget: presetTierFor(activePresetId),
+        chairId: synthesizer.id || 'synthesizer',
+      });
+      labPlanRef.current = regenPlan;
+      const regenPersona = regenUseAuto
+        ? { ...persona, model: OPENROUTER_AUTO }
+        : { ...persona, model: regenPlan.seats[persona.id]?.representativeModel || persona.model };
+      const regenPlugins = regenUseAuto
+        ? [
+            buildAutoRouterPlugin({
+              allowedModels: autoFiltersFromPlan(regenPlan)[persona.id],
+              costTier: costTierForBudget(presetTierFor(activePresetId)),
+            }),
+          ]
+        : undefined;
       try {
         const res = await streamPersonaWithFallback({
-          persona,
+          persona: regenPersona,
           messages: [
             { role: 'system', content: persona.systemPrompt },
             { role: 'user', content: fullQuery },
@@ -1389,6 +1416,7 @@ If the question contains code, documents, or attached files, treat them as avail
           policy,
           rawModels: rawModelsCatalog,
           sessionId: activeSessionId ?? undefined,
+          plugins: regenPlugins,
           signal: call.signal,
           maxTokens: maxTokens || 4000,
           webSearch: webEnabled,

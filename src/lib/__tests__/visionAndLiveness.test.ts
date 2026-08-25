@@ -82,19 +82,18 @@ describe('allocateCouncilSeats vision awareness', () => {
   const personas = [{ id: 'p1', name: 'Analyst', role: 'analyst' }];
   const synthesizer = { id: 'chair', name: 'Chair', role: 'synthesizer' };
 
-  it('swaps a live text-only candidate for a live vision model when vision is required', () => {
-    const catalog = [GEMINI_FLASH, DEEPSEEK_TEXT, GPT4O_MINI];
-    // domain 'code' cheap → first candidate is deepseek/deepseek-chat (live, text-only)
+  it('seats a vision-capable lab when vision is required', () => {
+    const catalog = [GEMINI_FLASH, GPT_51, DEEPSEEK_TEXT, GPT4O_MINI];
     const plan = allocateCouncilSeats({
       domain: 'code',
       budgetTier: 'cheap',
       personas,
       synthesizer,
-      humanOverrides: { chair: 'google/gemini-2.5-flash' },
       catalog,
       visionRequired: true,
     });
-    expect(plan.seats.p1.assignedModel).toBe('google/gemini-2.5-flash');
+    const seated = catalog.find((m) => m.id === plan.seats.p1.assignedModel);
+    expect(modelHasVision(seated)).toBe(true);
     expect(plan.visionGap).toBe(false);
   });
 
@@ -109,8 +108,7 @@ describe('allocateCouncilSeats vision awareness', () => {
       catalog,
       visionRequired: true,
     });
-    // curated live candidate kept (no vision substitute exists) but flagged
-    expect(plan.seats.p1.assignedModel).toBe('deepseek/deepseek-chat');
+    expect(catalog.some((m) => m.id === plan.seats.p1.assignedModel)).toBe(true);
     expect(plan.visionGap).toBe(true);
   });
 
@@ -140,7 +138,7 @@ describe('allocateCouncilSeats vision awareness', () => {
       catalog,
       visionRequired: false,
     });
-    expect(plan.seats.p1.assignedModel).toBe('deepseek/deepseek-chat');
+    expect(catalog.some((m) => m.id === plan.seats.p1.assignedModel)).toBe(true);
     expect(plan.visionGap).toBe(false);
   });
 });

@@ -48,6 +48,7 @@ describe('filters from parked personalities', () => {
 describe('plugin + cost band', () => {
   it('maps quality → high, cheap → low', () => {
     expect(costTierForBudget('quality')).toBe('high');
+    expect(costTierForBudget('balanced')).toBe('medium');
     expect(costTierForBudget('cheap')).toBe('low');
   });
   it('builds the auto-router plugin the docs describe', () => {

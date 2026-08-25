@@ -3,7 +3,8 @@ import { useSessionManager } from './hooks/useSessionManager';
 import { useModelRecommendations } from './hooks/useModelRecommendations';
 import { useTheme } from './hooks/useTheme';
 import { fetchCouncilModels } from './lib/openrouter';
-import { applyPreset, MODEL_PRESETS, type PresetId } from './lib/presets';
+import { applyPreset, MODEL_PRESETS, presetTierFor, type PresetId } from './lib/presets';
+import { seatCouncilRoster } from './lib/chamberLabs';
 import {
   shouldAutoCreateInitialSession,
   reconcileFreePresetWithModels,
@@ -257,10 +258,35 @@ export default function App() {
   const handleApplyPreset = useCallback((presetId: PresetId) => {
     presetJustAppliedRef.current = Date.now() + 3000;
     setActivePresetId(presetId);
-    const { updatedPersonas, updatedSynthesizer } = applyPreset(presetId, personas, synthesizer, catalog);
+    const { updatedPersonas, updatedSynthesizer } = applyPreset(
+      presetId,
+      personas,
+      synthesizer,
+      catalog,
+      { autoSelect: autoSelectModels }
+    );
     setPersonas(updatedPersonas);
     setSynthesizer(updatedSynthesizer);
-  }, [personas, synthesizer, catalog]);
+  }, [personas, synthesizer, catalog, autoSelectModels]);
+
+  // $0 preload: Auto on + catalog/roster change reseats unique live labs. No completions.
+  const lastSeatKeyRef = useRef('');
+  useEffect(() => {
+    if (!autoSelectModels || !catalog || catalog.length === 0) return;
+    const rosterKey = `${activePresetId}|${catalog.map((m) => m.id).join(',')}|${personas.map((p) => p.id).join(',')}|${synthesizer.id}`;
+    if (lastSeatKeyRef.current === rosterKey) return;
+    lastSeatKeyRef.current = rosterKey;
+    const seated = seatCouncilRoster({
+      personas,
+      synthesizer,
+      catalog,
+      budget: presetTierFor(activePresetId),
+    });
+    setPersonas(seated.updatedPersonas);
+    setSynthesizer(seated.updatedSynthesizer);
+    if (seated.plan.toast) showToast(seated.plan.toast, 'warning');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSelectModels, catalog, activePresetId, personas.map((p) => p.id).join(','), synthesizer.id]);
 
   const handleExportSessions = useCallback(() => {
     const json = exportSessionsJSON();

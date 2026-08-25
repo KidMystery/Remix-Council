@@ -37,9 +37,10 @@ export function shouldUseOpenRouterAuto(opts: {
   return opts.budget !== 'free';
 }
 
-/** Map Chamber budget → Auto cost band. Unset Auto defaults to `low`. */
+/** Map Chamber budget / preset tier → Auto cost band. Unset Auto defaults to `low`. */
 export function costTierForBudget(budget?: string): AutoCostTier {
   if (budget === 'quality') return 'high';
+  if (budget === 'balanced') return 'medium';
   if (budget === 'cheap') return 'low';
   return 'low';
 }
