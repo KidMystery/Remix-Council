@@ -1,5 +1,6 @@
 import type { Session, CouncilRound } from '../types';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { preferIncomingRound, stripSessionsBodies } from './evidence';
 
 /**
  * Google Drive persistence layer using the Drive REST API with tokens from
@@ -193,27 +194,9 @@ class AuthError extends Error {
   }
 }
 
+/** Exhibit metadata only — never slice a body to fit Drive. */
 function sanitizeForDrive(sessions: Session[]): Session[] {
-  const MAX_CONTENT_CHARS = 5000;
-  return sessions.map((s) => ({
-    ...s,
-    rounds: (s.rounds || []).map((r) => {
-      if (!r.attachedTextFiles || r.attachedTextFiles.length === 0) {
-        return { ...r, attachedTextFiles: [] };
-      }
-      return {
-        ...r,
-        attachedTextFiles: r.attachedTextFiles.map((f) => {
-          if (!f.content || f.content.length <= MAX_CONTENT_CHARS) return { ...f };
-          const originalLength = f.content.length;
-          return {
-            ...f,
-            content: `${f.content.slice(0, MAX_CONTENT_CHARS)}\n[Truncated for storage: ${originalLength} chars]`,
-          };
-        }),
-      };
-    }),
-  }));
+  return stripSessionsBodies(sessions);
 }
 
 async function uploadSessionsMultipart(
@@ -270,8 +253,8 @@ async function uploadSessionsMultipart(
 }
 
 /**
- * Persists all sessions to the Drive appDataFolder, truncating attached file
- * contents to 5000 chars for storage. The in-memory sessions are never mutated.
+ * Persists session JSON to Drive appDataFolder. File bodies are stripped
+ * (IndexedDB on this device holds the blobs). In-memory sessions are not mutated.
  */
 export async function saveSessionsToDrive(sessions: Session[]): Promise<void> {
   const token = requireToken();

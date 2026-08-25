@@ -10,26 +10,15 @@ import {
   signOutGoogle,
   mergeSessions,
 } from '../lib/drivePersistence';
+import { stripSessionsBodies } from '../lib/evidence';
 
 const LOCAL_STORAGE_KEY = 'council-sessions-v3';
 const LOCAL_WRITE_THROTTLE_MS = 750;
 const DRIVE_WRITE_THROTTLE_MS = 5000;
-const LOCAL_CONTENT_MAX_CHARS = 2000;
 
-/** Strips attached file contents to the given char cap for storage safety. */
-function sanitizeForStorage(sessions: Session[], maxContentChars: number): Session[] {
-  return sessions.map((s) => ({
-    ...s,
-    rounds: (s.rounds || []).map((r) => ({
-      ...r,
-      attachedTextFiles: (r.attachedTextFiles || []).map((f) => ({
-        ...f,
-        content: f.content && f.content.length > maxContentChars
-          ? f.content.slice(0, maxContentChars)
-          : f.content || '',
-      })),
-    })),
-  }));
+/** Persist exhibit metadata only. Never slice a body to fit. */
+function sanitizeForStorage(sessions: Session[]): Session[] {
+  return stripSessionsBodies(sessions);
 }
 
 function loadFromLocalStorage(): Session[] {
@@ -46,10 +35,11 @@ function loadFromLocalStorage(): Session[] {
 
 function persistToLocalStorage(sessions: Session[]): void {
   try {
-    const sanitized = sanitizeForStorage(sessions, LOCAL_CONTENT_MAX_CHARS);
+    const sanitized = sanitizeForStorage(sessions);
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(sanitized));
   } catch (err) {
-    console.warn('[SessionManager] Local storage write failed (quota?):', err);
+    console.warn('[SessionManager] Local storage write failed (quota?). Evidence blobs were not truncated.', err);
+    throw err;
   }
 }
 

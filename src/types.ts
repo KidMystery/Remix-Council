@@ -60,12 +60,56 @@ export interface PersonaArchetype {
   recommendedModel: string;
 }
 
+export type ExtractorKind = 'pdf-text' | 'zip-code' | 'utf8' | 'image' | 'none' | 'failed';
+
+/** How much of the original artifact the extractor actually read. */
+export interface EvidenceCoverage {
+  extractedChars: number;
+  byteSize: number;
+  pagesTotal?: number;
+  pagesWithText?: number;
+  filesInArchive?: number;
+  filesExtracted?: number;
+}
+
+/**
+ * Immutable exhibit metadata. The extracted body lives in IndexedDB (keyed by
+ * `id`), never in session JSON. Drive sync sends this record, not the blob.
+ */
+export interface EvidenceRecord {
+  id: string;
+  name: string;
+  mime: string;
+  byteSize: number;
+  sha256: string;
+  extractor: ExtractorKind;
+  extractorVersion: string;
+  coverage: EvidenceCoverage;
+  createdAt: number;
+  /** First ~240 chars for the docket. Never a substitute for the blob. */
+  preview: string;
+  failDetail?: string;
+}
+
+export type RunStamp = 'pending' | 'running' | 'blocked' | 'completed' | 'failed' | 'stopped';
+
+export type RunBlocker =
+  | { type: 'extraction_failed'; evidenceId: string; detail: string }
+  | { type: 'coverage_thin'; evidenceId: string; ratio: number; threshold: number; detail: string }
+  | { type: 'partial_panel'; completed: number; required: number; detail: string }
+  | { type: 'cost_unknown'; detail: string }
+  | { type: 'legacy_truncated_inline'; detail: string }
+  | { type: 'blob_missing'; evidenceId: string; detail: string }
+  | { type: 'skipped_stages'; reason: string; detail: string };
+
 export interface AttachedTextFile {
   name: string;
+  /** In-memory body for the live run. Persisted JSON always stores ''. */
   content: string;
   size?: number;
   type?: string;
   summary?: string;
+  evidenceId?: string;
 }
 
 /** Backward-compatible alias used by legacy components (Composer etc.). */
@@ -173,6 +217,10 @@ export interface CouncilRound {
   synthesis: Stage3Synthesis;
   rating?: RoundRating;
   attachedTextFiles?: AttachedTextFile[];
+  /** Exhibit metadata. Bodies live in IndexedDB, never here. */
+  evidence?: EvidenceRecord[];
+  stamp?: RunStamp;
+  blockers?: RunBlocker[];
   resolvedMode?: ResolvedExecutionMode;
   mode?: 'full' | 'quick_panel' | 'autonomous' | 'nexus_lab';
   isQuickPanel?: boolean;

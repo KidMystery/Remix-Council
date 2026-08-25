@@ -18,6 +18,7 @@ import {
   Target,
 } from 'lucide-react';
 import type { CouncilRound, Persona } from '../types';
+import { EvidenceDocket } from './EvidenceDocket';
 import { OUTCOME_LABELS } from '../lib/outcomeLedger';
 import type { TrackedOutcome, LedgerOutcome } from '../lib/outcomeLedger';
 import { useSpeech } from '../hooks/useSpeech';
@@ -460,7 +461,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
             </button>
           ) : (
             <>
-              {outcomeTrackingEnabled && round.synthesis?.status === 'completed' && (
+              {outcomeTrackingEnabled && round.stamp === 'completed' && (
                 <div
                   className="flex items-center gap-0.5 p-0.5 rounded-lg border border-slate-700 bg-slate-950/70"
                   title="Confidence Ledger — only rounds you explicitly track are recorded"
@@ -551,6 +552,16 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
           </button>
         </div>
       </header>
+
+      {!roundCollapsed && (round.evidence?.length || round.blockers?.length || round.stamp) ? (
+        <div className="mb-4">
+          <EvidenceDocket
+            evidence={round.evidence || []}
+            blockers={round.blockers || []}
+            stamp={round.stamp}
+          />
+        </div>
+      ) : null}
 
       {/* Sub-Council Fork Prompt Popup (stays reachable while collapsed) */}
       {isForking && (

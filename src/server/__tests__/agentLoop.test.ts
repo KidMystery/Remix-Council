@@ -209,6 +209,19 @@ describe('AgentLoopRunner guardrails', () => {
     expect(result.job.status).toBe('cancelled');
   });
 
+  it('does not stamp a verdict when every research query fails', async () => {
+    const { fetchFn } = makeFetchMock((i) => {
+      if (i === 0) return planCall;
+      return new Error('search down');
+    });
+    const runner = makeRunner(fetchFn);
+    const result = await runner.run(job({ maxDeliberationPasses: 1, maxResearchQueries: 2 }));
+    expect(result.succeeded).toBe(false);
+    expect(result.job.status).toBe('failed');
+    expect(result.job.error).toMatch(/every query failed/i);
+    expect(result.job.verdict).toBe('');
+  });
+
   it('records honest failure when upstream errors', async () => {
     const { fetchFn } = makeFetchMock(() => new Error('upstream exploded'));
     const runner = makeRunner(fetchFn);

@@ -50,7 +50,9 @@ export const SynthesisCard: React.FC<SynthesisCardProps> = ({
           <h3 className="text-base font-bold text-amber-900 dark:text-amber-300 flex items-center gap-2 whitespace-normal break-words">
             <span className="text-lg shrink-0">⚖️</span>
             <span>
-              {round.resolvedMode === 'quick_panel'
+              {round.stamp && round.stamp !== 'completed'
+                ? 'Unstamped draft — docket incomplete'
+                : round.resolvedMode === 'quick_panel'
                 ? 'Quick Panel Synthesis'
                 : Object.keys(round.deliberation?.stage1 || {}).length === 1
                 ? 'Council Member Response'

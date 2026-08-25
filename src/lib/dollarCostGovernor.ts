@@ -12,7 +12,9 @@ export class DollarCostGovernor {
 
   constructor(config: Partial<CostGovernorConfig> = {}) {
     this.config = {
-      maxSpendPerMissionUSD: config.maxSpendPerMissionUSD ?? 2.00,
+      // 0 / non-finite = unlimited. Do not invent a $2 default — that
+      // disagreed with the Settings slider ("Unlimited" = 0).
+      maxSpendPerMissionUSD: config.maxSpendPerMissionUSD ?? 0,
       requireApprovalAboveUSD: config.requireApprovalAboveUSD ?? 0.25,
       strictHardStop: config.strictHardStop ?? true,
     };
@@ -23,15 +25,23 @@ export class DollarCostGovernor {
   }
 
   public getRemainingBudget(): number {
-    return Math.max(0, this.config.maxSpendPerMissionUSD - this.accruedSpendUSD);
+    const cap = this.config.maxSpendPerMissionUSD;
+    if (!(cap > 0) || !Number.isFinite(cap)) return Number.POSITIVE_INFINITY;
+    return Math.max(0, cap - this.accruedSpendUSD);
+  }
+
+  private hasFiniteCap(): boolean {
+    const cap = this.config.maxSpendPerMissionUSD;
+    return this.config.strictHardStop && typeof cap === 'number' && Number.isFinite(cap) && cap > 0;
   }
 
   /**
    * Pre-flight assertion before initiating an LLM call.
    */
   public assertPreFlightBudget(estimatedPromptTokens: number, promptUSDPer1M: number): void {
+    if (!this.hasFiniteCap()) return;
     const estimatedCostUSD = (estimatedPromptTokens / 1_000_000) * promptUSDPer1M;
-    if (this.config.strictHardStop && this.accruedSpendUSD + estimatedCostUSD > this.config.maxSpendPerMissionUSD) {
+    if (this.accruedSpendUSD + estimatedCostUSD > this.config.maxSpendPerMissionUSD) {
       throw new Error(
         `[CostGovernor] Budget Exceeded: Call estimated at ${formatCost(estimatedCostUSD)} would breach maximum mission ceiling of $${this.config.maxSpendPerMissionUSD.toFixed(2)} (Spent: ${formatCost(this.accruedSpendUSD)}).`
       );

@@ -69,7 +69,7 @@ OpenRouter API  +  Google Drive API (appDataFolder)
 
 - **Sessions** → localStorage (`council-sessions-v3`) and Drive `appDataFolder/council-sessions.json` when signed in.
 - **Oracle threads/Bibles** → localStorage (`council-oracle-threads-v1`, `council-oracle-global-bible-v1`) and Drive `appDataFolder/council-oracle.json` when signed in.
-- **Attachments are truncated on write** (local ~8 KB, Drive ~20 KB per file) to protect quota — surfaced with a UI warning.
+- **Attachments are not stored inline.** Exhibit metadata is in session JSON; extracted bodies live in IndexedDB on the device (`council-evidence-v1`). Drive sync is metadata-only so a 2G link is not asked to carry PDFs.
 - No Firebase/Firestore collections are used.
 
 ---

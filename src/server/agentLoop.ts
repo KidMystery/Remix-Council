@@ -425,6 +425,20 @@ export class AgentLoopRunner {
       }
     }
 
+    if (
+      queries.length > 0 &&
+      job.research.length > 0 &&
+      job.research.every((r) => (r.findings || '').startsWith('[Research failed'))
+    ) {
+      job.status = 'failed';
+      job.error = 'Research was requested but every query failed. No verdict was stamped.';
+      job.updatedAt = Date.now();
+      job.finishedAt = Date.now();
+      job.progress = { phase: 'failed', detail: job.error };
+      this.persist();
+      return { job, succeeded: false };
+    }
+
     // ---- 3. Deliberate ----
     this.setPhase(job, 'deliberating', `Deliberating across ${maxPasses} pass${maxPasses === 1 ? '' : 'es'}...`);
     const researchBlock =
@@ -585,7 +599,7 @@ export function sanitizeAgentSpec(raw: any): AgentJobSpec | { error: string } {
     mode,
     context,
     budget,
-    maxResearchQueries: clampInt(raw.maxResearchQueries, 4, 1, MAX_RESEARCH_QUERIES),
+    maxResearchQueries: clampInt(raw.maxResearchQueries, 4, 0, MAX_RESEARCH_QUERIES),
     maxDeliberationPasses: clampInt(raw.maxDeliberationPasses, 3, 1, MAX_DELIBERATION_PASSES),
     pacedMinutes: clampInt(raw.pacedMinutes, 0, 0, 180),
     maxJobCostUSD:

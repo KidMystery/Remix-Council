@@ -23,6 +23,8 @@ import type {
   PersonaId,
   AutoSaveState,
   Session,
+  EvidenceRecord,
+  RunBlocker,
 } from '../types';
 import { ConfirmButton } from './ConfirmButton';
 import { policyForPreset } from '../lib/executionPolicy';
@@ -51,6 +53,13 @@ import {
   MIN_RESOLVED_FOR_RATIO,
 } from '../lib/outcomeLedger';
 import type { TrackedOutcome, LedgerOutcome } from '../lib/outcomeLedger';
+import {
+  applyStamp,
+  collectRunBlockers,
+  resolveCostCeilingUSD,
+  stampFromBlockers,
+} from '../lib/evidence';
+import { hydrateAttachedBodies } from '../lib/evidenceIngest';
 
 export interface CouncilSettings {
   enableChunking: boolean;
@@ -138,6 +147,23 @@ export function getRoundIncompleteStage(
   round: CouncilRound,
   personas: Persona[]
 ): { isIncomplete: boolean; description: string } {
+  if (round.stamp === 'completed') {
+    return { isIncomplete: false, description: 'Complete' };
+  }
+  if (round.stamp === 'blocked' || (round.blockers && round.blockers.length > 0)) {
+    const first = round.blockers?.[0];
+    return {
+      isIncomplete: true,
+      description: first?.detail ? `Docket blocked — ${first.detail}` : 'Docket blocked',
+    };
+  }
+  if (round.stamp === 'failed') {
+    return { isIncomplete: true, description: 'Failed' };
+  }
+  if (round.stamp === 'stopped') {
+    return { isIncomplete: true, description: 'Stopped' };
+  }
+
   const active = personas.filter((p) => p.enabled !== false);
   const stage1 = round.deliberation?.stage1 || {};
   const stage2 = round.deliberation?.stage2 || {};
@@ -345,19 +371,18 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 
   const policy = policyForPreset(activePresetId);
 
-  // Dollar-Denominated Cost Governor
+  // Dollar-Denominated Cost Governor. 0 = unlimited (matches the Settings slider).
   const dollarGovernor = useRef<DollarCostGovernor>(
     new DollarCostGovernor({
-      maxSpendPerMissionUSD: maxRoundCostCeiling > 0 ? maxRoundCostCeiling : 2.0,
+      maxSpendPerMissionUSD: resolveCostCeilingUSD(maxRoundCostCeiling) ?? 0,
       requireApprovalAboveUSD: 0.25,
       strictHardStop: true,
     })
   );
 
-  // Keep governor limit synchronized with maxRoundCostCeiling prop
   useEffect(() => {
     dollarGovernor.current = new DollarCostGovernor({
-      maxSpendPerMissionUSD: maxRoundCostCeiling > 0 ? maxRoundCostCeiling : 2.0,
+      maxSpendPerMissionUSD: resolveCostCeilingUSD(maxRoundCostCeiling) ?? 0,
       requireApprovalAboveUSD: 0.25,
       strictHardStop: true,
     });
@@ -416,7 +441,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     if (!roundToSynthesize || !activeSessionId) return;
 
     // Server cost governor (same round identity as the run loop).
-    const costCeilingUSD = maxRoundCostCeiling > 0 ? maxRoundCostCeiling : undefined;
+    const costCeilingUSD = resolveCostCeilingUSD(maxRoundCostCeiling);
     const roundKey = `${activeSessionId}:${roundToSynthesize.id}`;
 
     const activePersonas = personas.filter((p) => p.enabled !== false);
@@ -603,8 +628,17 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     // Server-side cost governor: the server accumulates REAL per-token spend
     // for this round and refuses further calls once the ceiling is reached —
     // the money backstop behind the client-side ceiling check.
-    const costCeilingUSD = maxRoundCostCeiling > 0 ? maxRoundCostCeiling : undefined;
+    const costCeilingUSD = resolveCostCeilingUSD(maxRoundCostCeiling);
     const roundKey = activeSessionId ? `${activeSessionId}:${currentRoundState.id}` : undefined;
+
+    const hydrated = await hydrateAttachedBodies(
+      currentRoundState.attachedTextFiles || [],
+      currentRoundState.evidence || []
+    );
+    currentRoundState.attachedTextFiles = hydrated.files;
+    const missingBlobIds = hydrated.missingBlobIds;
+    currentRoundState.stamp = 'running';
+    currentRoundState.blockers = [];
 
     // Ensure the live render list has this round and persist it immediately so
     // an interrupted run can be resumed after a reload.
@@ -636,7 +670,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       contextSummary = memoryParts.join('\n\n');
     }
 
-    let fullQuery = preparedQuery || (await prepareQuery(roundToRun));
+    let fullQuery = preparedQuery || (await prepareQuery(currentRoundState));
     if (contextSummary) {
       fullQuery = `[Prior Council Consensus Memory]:\n${contextSummary}\n\n[Active Topic Query]:\n${fullQuery}`;
     }
@@ -808,35 +842,113 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       onUpdateRound(activeSessionId, { ...currentRoundState });
     }
 
-    if (isRunAborted()) return;
+    if (isRunAborted()) {
+      const blockers = collectRunBlockers({
+        evidence: currentRoundState.evidence,
+        attached: currentRoundState.attachedTextFiles,
+        personas,
+        stage1: currentRoundState.deliberation.stage1,
+        stage2: currentRoundState.deliberation.stage2,
+        isQuickPanel,
+        costCeilingUSD,
+        missingBlobIds,
+        stage1Attempted: true,
+      });
+      const stamped = applyStamp(currentRoundState, stampFromBlockers(blockers, { aborted: true }), blockers);
+      Object.assign(currentRoundState, stamped);
+      onUpdateRound(activeSessionId, { ...currentRoundState });
+      return;
+    }
+
+    const panelBlockers = collectRunBlockers({
+      evidence: currentRoundState.evidence,
+      attached: currentRoundState.attachedTextFiles,
+      personas,
+      stage1: currentRoundState.deliberation.stage1,
+      stage2: currentRoundState.deliberation.stage2,
+      isQuickPanel,
+      costCeilingUSD,
+      missingBlobIds,
+      stage1Attempted: true,
+    });
+    const fatalPanel = panelBlockers.some(
+      (b) =>
+        b.type === 'partial_panel' ||
+        b.type === 'blob_missing' ||
+        b.type === 'extraction_failed' ||
+        b.type === 'legacy_truncated_inline'
+    );
+    if (fatalPanel) {
+      const stamped = applyStamp(currentRoundState, 'blocked', panelBlockers);
+      Object.assign(currentRoundState, stamped);
+      dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
+      onUpdateRound(activeSessionId, { ...currentRoundState });
+      flushNow();
+      showToast?.('Docket blocked — the Chair will not stamp a verdict from a partial panel or unread exhibit.', 'warning');
+      return;
+    }
 
     // Cost ceiling enforcement: skip further stages once the round's estimated
-    // spend exceeds the user's per-round cap.
+    // spend exceeds the user's per-round cap. This is NOT a completed verdict.
     const overCeiling =
-      maxRoundCostCeiling > 0 &&
-      countRoundCost(currentRoundState).totalCost > maxRoundCostCeiling;
+      Boolean(costCeilingUSD) &&
+      countRoundCost(currentRoundState).totalCost > (costCeilingUSD as number);
     const skipRemaining = stopAfterStage1 || overCeiling;
 
-    // Quick panel: synthesize from Stage 1 outputs only.
+    // Quick panel: synthesize from Stage 1 outputs only, then stamp the docket.
     if (isQuickPanel) {
       if (existingSynthesis?.status !== 'completed') {
         await runSynthesisPhase(currentRoundState.deliberation.stage1, {});
       }
+      const qpBlockers = collectRunBlockers({
+        evidence: currentRoundState.evidence,
+        attached: currentRoundState.attachedTextFiles,
+        personas,
+        stage1: currentRoundState.deliberation.stage1,
+        isQuickPanel: true,
+        costCeilingUSD,
+        missingBlobIds,
+        stage1Attempted: true,
+      });
+      const stamped = applyStamp(
+        currentRoundState,
+        stampFromBlockers(qpBlockers, { aborted: isRunAborted() }),
+        qpBlockers
+      );
+      Object.assign(currentRoundState, stamped);
+      if (stamped.stamp === 'completed' && currentRoundState.synthesis) {
+        currentRoundState.synthesis = { ...currentRoundState.synthesis, status: 'completed' };
+        currentRoundState.stamp = 'completed';
+      }
+      dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
+      onUpdateRound(activeSessionId, { ...currentRoundState });
       return;
     }
 
     // Optional early exit: Stop After Stage 1 or cost ceiling reached.
+    // These are blockers, not a stamped verdict.
     if (skipRemaining) {
       const reason = overCeiling
-        ? `Stage 2 & Synthesis skipped (estimated round cost ${formatCost(countRoundCost(currentRoundState).totalCost)} exceeded the $${maxRoundCostCeiling.toFixed(2)} ceiling).`
-        : 'Stage 2 & Synthesis skipped (Stop After Stage 1 is enabled).';
-      currentRoundState.synthesis = { model: synthesizer.model, content: reason, status: 'completed' };
-      currentRoundState.deliberation.stage3 = { model: synthesizer.model, content: reason, status: 'completed' };
-      dispatch({
-        type: 'FINISH_SYNTHESIS',
-        payload: { roundId: currentRoundState.id, content: reason, model: synthesizer.model },
+        ? `Stage 2 & Synthesis were not run (estimated round cost ${formatCost(countRoundCost(currentRoundState).totalCost)} reached the $${(costCeilingUSD as number).toFixed(2)} ceiling).`
+        : 'Stage 2 & Synthesis were not run (Stop After Stage 1 is enabled).';
+      currentRoundState.synthesis = { model: synthesizer.model, content: reason, status: 'idle' };
+      currentRoundState.deliberation.stage3 = { model: synthesizer.model, content: reason, status: 'idle' };
+      const skipBlockers = collectRunBlockers({
+        evidence: currentRoundState.evidence,
+        attached: currentRoundState.attachedTextFiles,
+        personas,
+        stage1: currentRoundState.deliberation.stage1,
+        isQuickPanel,
+        stopAfterStage1,
+        overCeiling,
+        costCeilingUSD,
+        missingBlobIds,
+        stage1Attempted: true,
       });
-      onCompleteRound(activeSessionId, { ...currentRoundState });
+      const stamped = applyStamp(currentRoundState, 'blocked', skipBlockers);
+      Object.assign(currentRoundState, stamped);
+      dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
+      onUpdateRound(activeSessionId, { ...currentRoundState });
       flushNow();
       return;
     }
@@ -971,6 +1083,30 @@ If the question contains code, documents, or attached files, treat them as avail
     if (existingSynthesis?.status !== 'completed') {
       await runSynthesisPhase(currentRoundState.deliberation.stage1, currentRoundState.deliberation.stage2);
     }
+
+    const finalBlockers = collectRunBlockers({
+      evidence: currentRoundState.evidence,
+      attached: currentRoundState.attachedTextFiles,
+      personas,
+      stage1: currentRoundState.deliberation.stage1,
+      stage2: currentRoundState.deliberation.stage2,
+      isQuickPanel,
+      costCeilingUSD,
+      missingBlobIds,
+      stage1Attempted: true,
+    });
+    const stamped = applyStamp(
+      currentRoundState,
+      stampFromBlockers(finalBlockers, { aborted: isRunAborted() }),
+      finalBlockers
+    );
+    Object.assign(currentRoundState, stamped);
+    if (stamped.stamp === 'completed' && currentRoundState.synthesis) {
+      currentRoundState.synthesis = { ...currentRoundState.synthesis, status: 'completed' };
+      currentRoundState.stamp = 'completed';
+    }
+    dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
+    onUpdateRound(activeSessionId, { ...currentRoundState });
   };
 
   /** Builds a full Markdown dossier of the active session (query, proposals, critiques, synthesis, sources). */
@@ -1025,7 +1161,12 @@ If the question contains code, documents, or attached files, treat them as avail
     }
   };
 
-  const handleDeliberate = async (query: string, attachedFiles: AttachedTextFile[], isFollowUp: boolean) => {
+  const handleDeliberate = async (
+    query: string,
+    attachedFiles: AttachedTextFile[],
+    isFollowUp: boolean,
+    evidence: EvidenceRecord[] = []
+  ) => {
     if (!acquireDeliberationLock()) return;
 
     try {
@@ -1039,6 +1180,9 @@ If the question contains code, documents, or attached files, treat them as avail
         userQuery: query,
         timestamp: Date.now(),
         attachedTextFiles: attachedFiles,
+        evidence,
+        stamp: 'pending',
+        blockers: [],
         mode: resolvedMode === 'quick_panel' ? 'quick_panel' : 'full',
         resolvedMode,
         isQuickPanel: resolvedMode === 'quick_panel',
@@ -1087,8 +1231,7 @@ If the question contains code, documents, or attached files, treat them as avail
     try {
       const round = rounds.find((r) => r.id === roundId);
       if (round) {
-        const fullQuery = await prepareQuery(round);
-        await runRoundExecution({ ...round }, fullQuery);
+        await runRoundExecution({ ...round });
       }
     } finally {
       releaseDeliberationLock();
@@ -1101,14 +1244,15 @@ If the question contains code, documents, or attached files, treat them as avail
     try {
       const round = rounds.find((r) => r.id === roundId);
       if (round) {
-        const fullQuery = await prepareQuery(round);
         const freshRound: CouncilRound = {
           ...round,
           timestamp: Date.now(),
+          stamp: 'pending',
+          blockers: [],
           deliberation: { stage1: {}, stage2: {} },
           synthesis: { content: '', status: 'idle' },
         };
-        await runRoundExecution(freshRound, fullQuery);
+        await runRoundExecution(freshRound);
       }
     } finally {
       releaseDeliberationLock();
@@ -1131,9 +1275,11 @@ If the question contains code, documents, or attached files, treat them as avail
       abortRef.current = new AbortController();
       activeRoundRef.current = currentRoundState;
       // Server cost governor (counts against the same round budget).
-      const costCeilingUSD = maxRoundCostCeiling > 0 ? maxRoundCostCeiling : undefined;
+      const costCeilingUSD = resolveCostCeilingUSD(maxRoundCostCeiling);
       const roundKey = `${activeSessionId}:${currentRoundState.id}`;
-      const fullQuery = await prepareQuery(round);
+      const hydrated = await hydrateAttachedBodies(round.attachedTextFiles || [], round.evidence || []);
+      currentRoundState.attachedTextFiles = hydrated.files;
+      const fullQuery = await prepareQuery(currentRoundState);
       const webEnabled = shouldEnableWebSearch(currentRoundState.userQuery, webMode, policy.budget).enabled;
 
       dispatch({

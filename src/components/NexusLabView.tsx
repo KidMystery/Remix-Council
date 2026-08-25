@@ -39,8 +39,9 @@ import type {
 import { policyForPreset, type ExecutionPolicy } from '../lib/executionPolicy';
 import { pickBestFromCatalog, pricingIsFree } from '../lib/modelScoring';
 import { streamPersonaWithFallback } from '../lib/fallbackManager';
-import { extractCodeFromArchive } from '../lib/zipReader';
-import { extractTextFromPDF } from '../lib/pdfUtils';
+import { ingestFile } from '../lib/evidenceIngest';
+import { stripRoundBodies } from '../lib/evidence';
+import type { EvidenceRecord } from '../types';
 import { summarizeTitle } from '../lib/titleUtils';
 import { chunkDocuments, type DocumentChunkPlan } from '../lib/documentChunker';
 import { ZipFilesModal } from './ZipFilesModal';
@@ -293,7 +294,7 @@ function sourceHost(url: string): string {
 
 const MISSIONS_STORAGE_KEY = 'nexus-missions-v1';
 const ARCHIVE_STORAGE_KEY = 'nexus-missions-archive-v1';
-const MAX_STORED_CONTENT_CHARS = 5000;
+
 
 interface PersistedMission {
   id: string;
@@ -307,6 +308,7 @@ interface PersistedMission {
   consensusMetrics: ConsensusMetric[];
   estimatedCost: number;
   attachedFiles?: AttachedTextFile[];
+  evidence?: EvidenceRecord[];
   updatedAt: number;
   /** Night Shift morning-brief changelog (what changed overnight). */
   morningBrief?: string | null;
@@ -341,23 +343,8 @@ function pushArchive(mission: PersistedMission): void {
 function sanitizeMissionForStorage(mission: PersistedMission): PersistedMission {
   return {
     ...mission,
-    attachedFiles: (mission.attachedFiles || []).map((f) => ({
-      ...f,
-      content:
-        f.content && f.content.length > MAX_STORED_CONTENT_CHARS
-          ? f.content.slice(0, MAX_STORED_CONTENT_CHARS)
-          : f.content || '',
-    })),
-    rounds: mission.rounds.map((r) => ({
-      ...r,
-      attachedTextFiles: (r.attachedTextFiles || []).map((f) => ({
-        ...f,
-        content:
-          f.content && f.content.length > MAX_STORED_CONTENT_CHARS
-            ? f.content.slice(0, MAX_STORED_CONTENT_CHARS)
-            : f.content || '',
-      })),
-    })),
+    attachedFiles: (mission.attachedFiles || []).map((f) => ({ ...f, content: '' })),
+    rounds: mission.rounds.map((r) => stripRoundBodies(r)),
   };
 }
 
@@ -476,6 +463,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [documentPlan, setDocumentPlan] = useState<DocumentChunkPlan | null>(null);
 
   const [attachedFiles, setAttachedFiles] = useState<AttachedTextFile[]>([]);
+  const [evidence, setEvidence] = useState<EvidenceRecord[]>([]);
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [activeZipResult, setActiveZipResult] = useState<ZipArchiveResult | null>(null);
@@ -538,6 +526,12 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       }
       if (persisted.attachedFiles && Array.isArray(persisted.attachedFiles)) {
         setAttachedFiles(persisted.attachedFiles);
+        if (persisted.evidence) setEvidence(persisted.evidence);
+        void import('../lib/evidenceIngest').then(({ hydrateAttachedBodies }) =>
+          hydrateAttachedBodies(persisted.attachedFiles || [], persisted.evidence || []).then((h) => {
+            setAttachedFiles(h.files);
+          })
+        );
       }
     }
   }, []);
@@ -591,51 +585,28 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
     setIsProcessingFiles(true);
     const newAttachments: AttachedTextFile[] = [];
+    const newEvidence: EvidenceRecord[] = [];
     const filesArray = Array.from(filesList);
 
     for (let i = 0; i < filesArray.length; i++) {
       const file = filesArray[i];
-      const name = file.name;
-      const lower = name.toLowerCase();
-
       try {
-        if (lower.endsWith('.zip') || lower.endsWith('.rar') || lower.endsWith('.tar') || lower.endsWith('.gz')) {
-          addLog(`📦 Extracting archive: ${name}...`);
-          const result = await extractCodeFromArchive(file);
-          setActiveZipResult(result);
-          newAttachments.push({
-            name,
-            content: result.formattedContext,
-            size: file.size,
-            type: result.archiveType,
-          });
-          addLog(`✓ Archive ${name} processed: ${result.extractedCodeFilesCount} code files loaded.`);
-        } else if (lower.endsWith('.pdf')) {
-          addLog(`📄 Extracting text from PDF: ${name}...`);
-          const text = await extractTextFromPDF(file);
-          newAttachments.push({
-            name,
-            content: text,
-            size: file.size,
-            type: 'pdf',
-          });
-          addLog(`✓ PDF ${name} text extracted.`);
-        } else {
-          const text = await file.text();
-          newAttachments.push({
-            name,
-            content: text,
-            size: file.size,
-            type: file.type || 'text/plain',
-          });
-          addLog(`✓ Attached file: ${name}`);
-        }
+        addLog(`📎 Ingesting exhibit: ${file.name}...`);
+        const ingested = await ingestFile(file);
+        newAttachments.push(ingested.attached);
+        newEvidence.push(ingested.evidence);
+        addLog(
+          ingested.evidence.extractor === 'failed'
+            ? `❌ ${file.name}: ${ingested.evidence.failDetail || 'extractor failed'}`
+            : `✓ ${file.name} — ${ingested.evidence.coverage.extractedChars.toLocaleString()} chars on docket (blob on this device).`
+        );
       } catch (err: any) {
-        addLog(`❌ Error loading file ${name}: ${err.message}`);
+        addLog(`❌ Error loading file ${file.name}: ${err.message}`);
       }
     }
 
     setAttachedFiles((prev) => [...prev, ...newAttachments]);
+    setEvidence((prev) => [...prev, ...newEvidence]);
     setIsProcessingFiles(false);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -1298,6 +1269,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setConsensusMetrics([]);
     setTerminalLogs([]);
     setAttachedFiles([]);
+    setEvidence([]);
     setMissionStatus('idle');
     setMissionTitle('Nexus Mission');
     setFollowUpContext(null);
