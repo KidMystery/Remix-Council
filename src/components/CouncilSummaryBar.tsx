@@ -2,7 +2,7 @@ import React from 'react';
 import { ShieldCheck, Coins, Zap, Clock, Sparkles, SlidersHorizontal } from 'lucide-react';
 import { Persona, AutoSaveState } from '../types';
 import { RawOpenRouterModel, PresetId, cleanModelName, MODEL_PRESETS } from '../lib/presets';
-import { getAuthorOrganization, estimatedCost } from '../lib/modelMapper';
+import { getAuthorOrganization, canonicalLab, estimatedCost } from '../lib/modelMapper';
 import { formatUpdateTime } from '../lib/modelCache';
 import { AutoSaveIndicator } from './AutoSaveIndicator';
 
@@ -54,11 +54,13 @@ export function CouncilSummaryBar({
     .replace(/_/g, ' ')
     .replace(/\b\w/g, (l) => l.toUpperCase());
 
-  // 2. Organizations Represented
+  // 2. Organizations Represented — distinct count uses canonicalLab (deepseek-ai → deepseek, meta-llama → meta, xai → x-ai)
+  // Chips still show raw first segment; count must not say "4 distinct" when two chips are same company.
   const orgSet = new Set<string>();
   allActive.forEach((p) => {
     if (p.model) {
-      orgSet.add(getAuthorOrganization(p.model));
+      const raw = getAuthorOrganization(p.model);
+      orgSet.add(canonicalLab(raw));
     }
   });
   const orgCount = orgSet.size;
@@ -69,11 +71,17 @@ export function CouncilSummaryBar({
         anthropic: 'Anthropic',
         openai: 'OpenAI',
         deepseek: 'DeepSeek',
+        'deepseek-ai': 'DeepSeek',
+        meta: 'Meta',
         'meta-llama': 'Meta',
         nvidia: 'NVIDIA',
         qwen: 'Qwen',
+        'x-ai': 'xAI',
+        xai: 'xAI',
         poolside: 'Poolside',
         inclusionai: 'InclusionAI',
+        mistral: 'Mistral',
+        mistralai: 'Mistral',
       };
       return map[org.toLowerCase()] || org.charAt(0).toUpperCase() + org.slice(1);
     })

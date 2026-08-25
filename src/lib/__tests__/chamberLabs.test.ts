@@ -8,6 +8,7 @@ import {
 } from '../chamberLabs';
 import { applyPreset, updatePresetsFromFetchedModels, MODEL_PRESETS } from '../presets';
 import { BUILTIN_COUNCIL_PRESETS } from '../councilPresets';
+import { canonicalLab } from '../modelMapper';
 import type { Persona, RawOpenRouterModel } from '../../types';
 
 function model(
@@ -189,6 +190,61 @@ describe('allocateChamberLabs', () => {
     Object.values(filters).forEach((f) => {
       expect(f[0]).toMatch(/\/\*$/);
     });
+  });
+
+  it('does not seat two DeepSeek variants (deepseek + deepseek-ai are one lab)', () => {
+    // For quality tier higher price = higher score, so give DeepSeek variants the top prices
+    // but they share canonical lab 'deepseek', so only one should seat.
+    const catalog: RawOpenRouterModel[] = [
+      model('deepseek/deepseek-chat', { prompt: '0.00001', ctx: 1000000 }),
+      model('deepseek-ai/deepseek-v3.2-exp', { prompt: '0.000009', ctx: 1000000 }),
+      model('anthropic/claude-sonnet-4.5', { prompt: '0.000008', ctx: 1000000 }),
+      model('openai/gpt-5.1', { prompt: '0.000007', ctx: 1000000 }),
+      model('google/gemini-2.5-pro', { prompt: '0.000006', ctx: 1000000 }),
+      model('qwen/qwen3-max', { prompt: '0.000005', ctx: 1000000 }),
+      model('meta-llama/llama-4-maverick', { prompt: '0.000004', ctx: 1000000 }),
+    ];
+    const plan = allocateChamberLabs({
+      seats: FOUR_SEATS,
+      catalog,
+      budget: 'quality',
+      chairId: 'synthesizer',
+    });
+    const deepseekSeats = Object.values(plan.seats).filter(
+      (s) => canonicalLab(s.lab) === 'deepseek'
+    );
+    expect(deepseekSeats).toHaveLength(1);
+    expect(plan.uniqueness).toBe('lab');
+    // Family/degrade must not reuse a seated lab while unused labs remain — check all canonical labs unique
+    const canonicals = Object.values(plan.seats).map((s) => canonicalLab(s.lab));
+    expect(new Set(canonicals).size).toBe(4);
+    // Auto glob stays raw org (meta-llama/* not meta/*)
+    const metaSeat = Object.values(plan.seats).find((s) => canonicalLab(s.lab) === 'meta');
+    if (metaSeat) {
+      expect(metaSeat.familyFilter).toMatch(/^meta-llama\/\*$/);
+    }
+  });
+
+  it('family/degrade skips used labs while unused labs remain', () => {
+    // Thin family case: many models from same canonical but different families, plus one unused lab
+    const catalog: RawOpenRouterModel[] = [
+      model('qwen/qwen3-max', { prompt: '0.000001', ctx: 200000 }),
+      model('qwen/qwen3-plus', { prompt: '0.000002', ctx: 200000 }),
+      model('qwen/qwen2.5-72b', { prompt: '0.000003', ctx: 200000 }),
+      model('anthropic/claude-sonnet-4.5', { prompt: '0.000004', ctx: 200000 }),
+      model('openai/gpt-5.1', { prompt: '0.000005', ctx: 200000 }),
+    ];
+    const plan = allocateChamberLabs({
+      seats: FOUR_SEATS,
+      catalog,
+      budget: 'quality',
+      chairId: 'synthesizer',
+    });
+    // Should have at least 3 distinct canonical labs if possible, not reuse qwen twice while anthropic/openai unused
+    const canonicals = Object.values(plan.seats).map((s) => canonicalLab(s.lab));
+    const distinct = new Set(canonicals).size;
+    // With 5 models across 3 canonical labs, we should get at least 3 distinct
+    expect(distinct).toBeGreaterThanOrEqual(3);
   });
 });
 

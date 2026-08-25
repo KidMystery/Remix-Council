@@ -7,6 +7,7 @@ import {
   mergeTombstones,
 } from '../syncContract';
 import {
+  driveAppDataListUrl,
   mergeOracleDocs,
   mergeOracleThreads,
   mergeSessionDocs,
@@ -162,5 +163,21 @@ describe('oracle merge + envelopes', () => {
     });
     expect(doc.threads).toHaveLength(1);
     expect(doc.deleted).toHaveLength(1);
+  });
+});
+
+describe('drive list URL (v3)', () => {
+  it('does not request etag in fields — v3 File has no etag, and If-Match must come from GET header', () => {
+    const url = driveAppDataListUrl('council-sessions.json');
+    expect(url).toContain('fields=files(id,name)');
+    expect(url).not.toContain('etag');
+    expect(url).not.toContain('files(id,name,etag)');
+    expect(url).toContain('appDataFolder');
+  });
+
+  it('builds a valid search URL for oracle file too', () => {
+    const url = driveAppDataListUrl('council-oracle.json');
+    expect(url).toContain('council-oracle.json');
+    expect(url).not.toContain('etag');
   });
 });

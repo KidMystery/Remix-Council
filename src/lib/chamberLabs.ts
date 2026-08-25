@@ -5,10 +5,16 @@
  * seating, rewritten from whoever is actually good and live this week.
  * Personality only decides who picks first among leftover labs.
  * Chair is last. Fail closed to unique families, then run + one toast.
+ *
+ * L1 fix: uniqueness uses canonicalLab (deepseek-ai → deepseek, meta-llama → meta, xai → x-ai)
+ * so two DeepSeek Flash variants (latest + 0731) cannot both seat.
+ * Family/degrade skip usedLabs while unused labs remain.
+ * Repair pass steals leftover labs.
+ * Auto glob stays raw org (meta-llama/* not meta/*).
  */
 
 import type { Persona, RawOpenRouterModel } from '../types';
-import { getAuthorOrganization, getFamily } from './modelMapper';
+import { getAuthorOrganization, getFamily, canonicalLab } from './modelMapper';
 import {
   isUsableCatalogModel,
   modelHasVision,
@@ -31,7 +37,7 @@ export interface ChamberSeatInput {
 
 export interface ChamberLabSeat {
   personaId: string;
-  lab: string;
+  lab: string; // raw org for display + Auto glob (meta-llama/* stays raw)
   familyFilter: string | null;
   representativeModel: string;
   uniqueness: UniquenessLevel;
@@ -44,7 +50,8 @@ export interface ChamberLabPlan {
 }
 
 interface LabCandidate {
-  lab: string;
+  canonicalLab: string;
+  rawLab: string;
   model: RawOpenRouterModel;
   score: number;
 }
@@ -52,8 +59,12 @@ interface LabCandidate {
 const THIN_TOAST =
   'Catalog is thin — seats could not each get a different lab. The run still went.';
 
-function labOf(modelId: string | undefined): string {
+function rawLabOf(modelId: string | undefined): string {
   return getAuthorOrganization(String(modelId || ''));
+}
+
+function canonicalLabOf(modelId: string | undefined): string {
+  return canonicalLab(rawLabOf(modelId));
 }
 
 /** Security-ish first, then coach/creative, then numbers, everyone else, Chair last. */
@@ -104,16 +115,18 @@ function tierPool(
 }
 
 function labsFromPool(pool: RawOpenRouterModel[], tier: ModelTier): LabCandidate[] {
-  const byLab = new Map<string, RawOpenRouterModel[]>();
+  const byCanonical = new Map<string, RawOpenRouterModel[]>();
   for (const m of pool) {
-    const lab = labOf(m.id);
-    if (!lab || lab === 'unknown' || lab === 'openrouter') continue;
-    const list = byLab.get(lab) || [];
+    const raw = rawLabOf(m.id);
+    if (!raw || raw === 'unknown' || raw === 'openrouter') continue;
+    const canon = canonicalLab(raw);
+    if (!canon || canon === 'unknown' || canon === 'openrouter') continue;
+    const list = byCanonical.get(canon) || [];
     list.push(m);
-    byLab.set(lab, list);
+    byCanonical.set(canon, list);
   }
   const out: LabCandidate[] = [];
-  for (const [lab, models] of byLab) {
+  for (const [canon, models] of byCanonical) {
     let best = models[0];
     let bestScore = -Infinity;
     for (const m of models) {
@@ -123,9 +136,10 @@ function labsFromPool(pool: RawOpenRouterModel[], tier: ModelTier): LabCandidate
         best = m;
       }
     }
-    out.push({ lab, model: best, score: bestScore });
+    const raw = rawLabOf(best.id);
+    out.push({ canonicalLab: canon, rawLab: raw, model: best, score: bestScore });
   }
-  out.sort((a, b) => b.score - a.score || a.lab.localeCompare(b.lab));
+  out.sort((a, b) => b.score - a.score || a.canonicalLab.localeCompare(b.canonicalLab));
   return out;
 }
 
@@ -134,7 +148,9 @@ function bestUnusedModel(
   tier: ModelTier,
   usedIds: Set<string>,
   usedFamilies: Set<string>,
-  requireUnusedFamily: boolean
+  usedCanonicalLabs: Set<string>,
+  requireUnusedFamily: boolean,
+  requireUnusedLab: boolean
 ): RawOpenRouterModel | undefined {
   let best: RawOpenRouterModel | undefined;
   let bestScore = -Infinity;
@@ -143,6 +159,10 @@ function bestUnusedModel(
     if (usedIds.has(id)) continue;
     const family = getFamily(m.id);
     if (requireUnusedFamily && family && usedFamilies.has(family)) continue;
+    if (requireUnusedLab) {
+      const canon = canonicalLabOf(m.id);
+      if (canon && usedCanonicalLabs.has(canon)) continue;
+    }
     const s = scoreCandidateForTier(m, tier);
     if (s > bestScore) {
       bestScore = s;
@@ -164,9 +184,9 @@ function orderSeats(seats: ChamberSeatInput[], chairId: string): ChamberSeatInpu
 }
 
 function filterForAllowed(id: string, uniqueness: UniquenessLevel): string | null {
-  const lab = labOf(id);
-  if (!lab || lab === 'unknown' || lab === 'openrouter') return null;
-  if (uniqueness === 'lab') return `${lab}/*`;
+  const raw = rawLabOf(id);
+  if (!raw || raw === 'unknown' || raw === 'openrouter') return null;
+  if (uniqueness === 'lab') return `${raw}/*`;
   if (uniqueness === 'family') return getFamily(id) || id;
   return null;
 }
@@ -174,6 +194,7 @@ function filterForAllowed(id: string, uniqueness: UniquenessLevel): string | nul
 /**
  * Greedy unique-lab seating. Chair last. No hardcoded model ids.
  * Offline (empty catalog): keep whatever is already parked.
+ * L1: uniqueness uses canonicalLab, family/degrade skip usedLabs, repair pass steals leftover labs.
  */
 export function allocateChamberLabs(params: {
   seats: ChamberSeatInput[];
@@ -198,7 +219,7 @@ export function allocateChamberLabs(params: {
       const model = locked || s.model || '';
       plan.seats[s.id] = {
         personaId: s.id,
-        lab: labOf(model),
+        lab: rawLabOf(model),
         familyFilter: filterForAllowed(model, 'lab'),
         representativeModel: model,
         uniqueness: 'lab',
@@ -219,7 +240,7 @@ export function allocateChamberLabs(params: {
   const overflowPool =
     primaryTier === 'free' ? tierPool(catalog, 'cheap', visionRequired) : primaryPool;
 
-  const usedLabs = new Set<string>();
+  const usedCanonicalLabs = new Set<string>();
   const usedFamilies = new Set<string>();
   const usedIds = new Set<string>();
   let worst: UniquenessLevel = 'lab';
@@ -230,15 +251,16 @@ export function allocateChamberLabs(params: {
   };
 
   const place = (seatId: string, modelId: string, uniqueness: UniquenessLevel) => {
-    const lab = labOf(modelId);
-    if (lab && lab !== 'unknown') usedLabs.add(lab);
+    const raw = rawLabOf(modelId);
+    const canon = canonicalLab(raw);
+    if (canon && canon !== 'unknown') usedCanonicalLabs.add(canon);
     const family = getFamily(modelId);
     if (family) usedFamilies.add(family);
     if (modelId) usedIds.add(modelId.toLowerCase());
     mark(uniqueness);
     plan.seats[seatId] = {
       personaId: seatId,
-      lab,
+      lab: raw,
       familyFilter: filterForAllowed(modelId, uniqueness),
       representativeModel: modelId,
       uniqueness,
@@ -256,31 +278,105 @@ export function allocateChamberLabs(params: {
   );
 
   for (const s of remaining) {
-    const labs = labsFromPool(primaryPool, primaryTier).filter((l) => !usedLabs.has(l.lab));
+    const labs = labsFromPool(primaryPool, primaryTier).filter(
+      (l) => !usedCanonicalLabs.has(l.canonicalLab)
+    );
     if (labs.length > 0) {
       place(s.id, labs[0].model.id, 'lab');
       continue;
     }
 
     if (primaryTier === 'free' && overflowPool.length > 0) {
-      const paidLabs = labsFromPool(overflowPool, 'cheap').filter((l) => !usedLabs.has(l.lab));
+      const paidLabs = labsFromPool(overflowPool, 'cheap').filter(
+        (l) => !usedCanonicalLabs.has(l.canonicalLab)
+      );
       if (paidLabs.length > 0) {
         place(s.id, paidLabs[0].model.id, 'lab');
         continue;
       }
     }
 
+    // Family/degrade: first try to keep lab uniqueness while unused labs remain
+    const familyPickUnusedLab =
+      bestUnusedModel(primaryPool, primaryTier, usedIds, usedFamilies, usedCanonicalLabs, true, true) ||
+      bestUnusedModel(
+        overflowPool,
+        primaryTier === 'free' ? 'cheap' : primaryTier,
+        usedIds,
+        usedFamilies,
+        usedCanonicalLabs,
+        true,
+        true
+      );
+
+    if (familyPickUnusedLab) {
+      place(s.id, familyPickUnusedLab.id, 'family');
+      continue;
+    }
+
+    // If no unused lab left with unused family, try unused lab allowing family reuse
+    const familyPickUnusedLabAllowFamily =
+      bestUnusedModel(primaryPool, primaryTier, usedIds, usedFamilies, usedCanonicalLabs, false, true) ||
+      bestUnusedModel(
+        overflowPool,
+        primaryTier === 'free' ? 'cheap' : primaryTier,
+        usedIds,
+        usedFamilies,
+        usedCanonicalLabs,
+        false,
+        true
+      );
+
+    if (familyPickUnusedLabAllowFamily) {
+      place(s.id, familyPickUnusedLabAllowFamily.id, 'family');
+      continue;
+    }
+
+    // No unused labs left at all — fall back to family uniqueness even if lab repeats
     const familyPick =
-      bestUnusedModel(primaryPool, primaryTier, usedIds, usedFamilies, true) ||
-      bestUnusedModel(overflowPool, primaryTier === 'free' ? 'cheap' : primaryTier, usedIds, usedFamilies, true);
+      bestUnusedModel(primaryPool, primaryTier, usedIds, usedFamilies, usedCanonicalLabs, true, false) ||
+      bestUnusedModel(
+        overflowPool,
+        primaryTier === 'free' ? 'cheap' : primaryTier,
+        usedIds,
+        usedFamilies,
+        usedCanonicalLabs,
+        true,
+        false
+      );
     if (familyPick) {
       place(s.id, familyPick.id, 'family');
       continue;
     }
 
+    const anyPickUnusedLab =
+      bestUnusedModel(primaryPool, primaryTier, usedIds, usedFamilies, usedCanonicalLabs, false, true) ||
+      bestUnusedModel(
+        overflowPool,
+        primaryTier === 'free' ? 'cheap' : primaryTier,
+        usedIds,
+        usedFamilies,
+        usedCanonicalLabs,
+        false,
+        true
+      );
+
+    if (anyPickUnusedLab) {
+      place(s.id, anyPickUnusedLab.id, 'degraded');
+      continue;
+    }
+
     const anyPick =
-      bestUnusedModel(primaryPool, primaryTier, usedIds, usedFamilies, false) ||
-      bestUnusedModel(overflowPool, primaryTier === 'free' ? 'cheap' : primaryTier, usedIds, usedFamilies, false) ||
+      bestUnusedModel(primaryPool, primaryTier, usedIds, usedFamilies, usedCanonicalLabs, false, false) ||
+      bestUnusedModel(
+        overflowPool,
+        primaryTier === 'free' ? 'cheap' : primaryTier,
+        usedIds,
+        usedFamilies,
+        usedCanonicalLabs,
+        false,
+        false
+      ) ||
       pickBestFromCatalog(catalog, primaryTier === 'free' ? 'cheap' : primaryTier);
     if (anyPick) {
       place(s.id, anyPick.id, 'degraded');
@@ -288,6 +384,58 @@ export function allocateChamberLabs(params: {
     }
 
     place(s.id, s.model || '', 'degraded');
+  }
+
+  // Repair pass: steal leftover labs if duplicates slipped through (e.g., lockedIds or thin family fallback)
+  try {
+    const canonicalToSeats = new Map<string, string[]>();
+    for (const [seatId, seat] of Object.entries(plan.seats)) {
+      const canon = canonicalLab(seat.lab);
+      const list = canonicalToSeats.get(canon) || [];
+      list.push(seatId);
+      canonicalToSeats.set(canon, list);
+    }
+
+    const hasDuplicates = Array.from(canonicalToSeats.values()).some((arr) => arr.length > 1);
+    if (hasDuplicates) {
+      const allLabCandidates = labsFromPool([...primaryPool, ...overflowPool, ...catalog], primaryTier);
+      const unusedCandidates = allLabCandidates.filter((c) => !usedCanonicalLabs.has(c.canonicalLab));
+
+      if (unusedCandidates.length > 0) {
+        for (const [, seatIds] of canonicalToSeats) {
+          if (seatIds.length <= 1) continue;
+          // Keep first seat (already placed), replace the rest with unused labs
+          for (let i = 1; i < seatIds.length; i++) {
+            if (unusedCandidates.length === 0) break;
+            const replacement = unusedCandidates.shift()!;
+            const seatId = seatIds[i];
+            // Update tracking
+            usedCanonicalLabs.add(replacement.canonicalLab);
+            const family = getFamily(replacement.model.id);
+            if (family) usedFamilies.add(family);
+            if (replacement.model.id) usedIds.add(replacement.model.id.toLowerCase());
+            plan.seats[seatId] = {
+              personaId: seatId,
+              lab: replacement.rawLab,
+              familyFilter: filterForAllowed(replacement.model.id, 'lab'),
+              representativeModel: replacement.model.id,
+              uniqueness: 'lab',
+            };
+          }
+        }
+        // Re-evaluate worst after repair
+        const uniqLevels = Object.values(plan.seats).map((s) => s.uniqueness);
+        if (uniqLevels.every((u) => u === 'lab')) {
+          worst = 'lab';
+        } else if (uniqLevels.includes('degraded')) {
+          worst = 'degraded';
+        } else {
+          worst = 'family';
+        }
+      }
+    }
+  } catch {
+    // Repair is best-effort; don't break seating on error
   }
 
   plan.uniqueness = worst;
@@ -344,6 +492,8 @@ export function seatCouncilRoster(opts: {
 }
 
 export function labsAreUnique(models: Array<string | undefined>): boolean {
-  const labs = models.map((m) => labOf(m)).filter((l) => l && l !== 'unknown');
+  const labs = models
+    .map((m) => canonicalLabOf(m))
+    .filter((l) => l && l !== 'unknown' && l !== 'openrouter');
   return labs.length > 0 && new Set(labs).size === labs.length;
 }
