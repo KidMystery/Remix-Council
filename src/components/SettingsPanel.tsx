@@ -2,8 +2,9 @@ import { X, Cpu, Palette, Bell, User, Zap, BookmarkPlus, BookOpen } from 'lucide
 import { useState, useEffect } from 'react';
 import { authenticatedFetch } from '../lib/apiClient';
 import { Persona, NotificationPreferences } from '../types';
-import { applyPreset, PresetId } from '../lib/presets';
+import { applyPreset, presetTierFor, PresetId } from '../lib/presets';
 import { CouncilPreset } from '../lib/councilPresets';
+import { seatCouncilRoster } from '../lib/chamberLabs';
 import { useModelRecommendations } from '../hooks/useModelRecommendations';
 import { useOpenRouterCredits } from '../hooks/useOpenRouterCredits';
 import { CreatePersonalityModal } from './CreatePersonalityModal';
@@ -57,6 +58,8 @@ interface SettingsPanelProps {
   setStopAfterStage1?: (val: boolean) => void;
   useSingleModelForSimple?: boolean;
   setUseSingleModelForSimple?: (val: boolean) => void;
+  outcomeTrackingEnabled?: boolean;
+  setOutcomeTrackingEnabled?: (val: boolean) => void;
   archivistRecentRounds?: number;
   setArchivistRecentRounds?: (val: number) => void;
   disableFallback?: boolean;
@@ -119,6 +122,8 @@ export function SettingsPanel({
   stopAfterStage1 = false,
   setStopAfterStage1,
   useSingleModelForSimple = false,
+  outcomeTrackingEnabled = false,
+  setOutcomeTrackingEnabled,
   setUseSingleModelForSimple,
   archivistRecentRounds = 2,
   setArchivistRecentRounds,
@@ -187,6 +192,17 @@ export function SettingsPanel({
   };
 
   const handleApplyCouncilPreset = (preset: CouncilPreset) => {
+    if (autoSelectModels && rawModelsCatalog && rawModelsCatalog.length > 0) {
+      const seated = seatCouncilRoster({
+        personas: preset.personas,
+        synthesizer: preset.synthesizer,
+        catalog: rawModelsCatalog,
+        budget: presetTierFor(activePresetId),
+      });
+      setPersonas(seated.updatedPersonas);
+      setSynthesizer(seated.updatedSynthesizer);
+      return;
+    }
     setPersonas(preset.personas);
     setSynthesizer(preset.synthesizer);
   };
@@ -196,7 +212,13 @@ export function SettingsPanel({
     if (onApplyPreset) {
       onApplyPreset(presetId);
     } else {
-      const { updatedPersonas, updatedSynthesizer } = applyPreset(presetId, personas, synthesizer, rawModelsCatalog);
+      const { updatedPersonas, updatedSynthesizer } = applyPreset(
+        presetId,
+        personas,
+        synthesizer,
+        rawModelsCatalog,
+        { autoSelect: autoSelectModels }
+      );
       setPersonas(updatedPersonas);
       setSynthesizer(updatedSynthesizer);
     }
@@ -321,6 +343,8 @@ export function SettingsPanel({
               setStopAfterStage1={setStopAfterStage1}
               useSingleModelForSimple={useSingleModelForSimple}
               setUseSingleModelForSimple={setUseSingleModelForSimple}
+              outcomeTrackingEnabled={outcomeTrackingEnabled}
+              setOutcomeTrackingEnabled={setOutcomeTrackingEnabled}
               archivistRecentRounds={archivistRecentRounds}
               setArchivistRecentRounds={setArchivistRecentRounds}
               disableFallback={disableFallback}
@@ -341,7 +365,7 @@ export function SettingsPanel({
           )}
 
           {activeTab === 'oracle_bible' && (
-            <SettingsOracleBibleTab />
+            <SettingsOracleBibleTab catalog={rawModelsCatalog} />
           )}
 
           {activeTab === 'theme' && (

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { BookOpen, Globe, Save, Copy, Check, Download, Trash2, RefreshCw, MessageSquare, Sliders, X, Plus, Dices, Eye } from 'lucide-react';
 import {
   OracleThread,
@@ -13,6 +13,28 @@ import {
   DEFAULT_ROTATION_ROSTER,
   VISION_SAFE_FALLBACK_MODEL,
 } from '../../lib/oracleStore';
+import {
+  buildOracleModelOptions,
+  classifyOracleModel,
+  normalizeModelId,
+  addCustomOracleModel,
+  removeCustomOracleModel,
+  loadCustomOracleModels,
+  loadOracleDirectList,
+  saveOracleDirectList,
+  ensureInOracleDirectList,
+  removeFromOracleDirectList,
+  restoreDefaultOracleDirectList,
+  defaultOracleDirectList,
+} from '../../lib/oracleModelPool';
+import {
+  loadBriefingStore,
+  updateBriefingSettings,
+} from '../../lib/briefingDetector';
+import { applyOracleRewrite, dropUnsealed, renderBiblePrompt } from '../../lib/bibleClaims';
+import type { BriefingSettings } from '../../lib/briefingDetector';
+import type { OracleCustomModel, OracleModelOption, OracleModelStatus } from '../../lib/oracleModelPool';
+import type { RawOpenRouterModel } from '../../types';
 import { copyToClipboard } from '../../lib/clipboard';
 
 type OracleMode = 'direct' | 'mini_deliberation' | 'rotation';
@@ -23,7 +45,7 @@ const MODE_LABELS: Record<OracleMode, { title: string; desc: string }> = {
   rotation: { title: 'Auto-Rotate', desc: 'Automatically cycles through your chosen models, one per turn.' },
 };
 
-export const SettingsOracleBibleTab: React.FC = () => {
+export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] | null }> = ({ catalog }) => {
   const [threads, setThreads] = useState<OracleThread[]>(() => loadOracleThreads());
   const [selectedThreadId, setSelectedThreadId] = useState<string>(() => {
     const list = loadOracleThreads();
@@ -36,6 +58,25 @@ export const SettingsOracleBibleTab: React.FC = () => {
   const [isSavedNotice, setIsSavedNotice] = useState(false);
 
   const selectedThread = threads.find((t) => t.id === selectedThreadId) || threads[0] || null;
+
+  // ---- Oracle model pool: custom models + Direct palette (global) ----
+  const [customModels, setCustomModels] = useState<OracleCustomModel[]>(() => loadCustomOracleModels());
+  const [directList, setDirectList] = useState<string[]>(() => loadOracleDirectList());
+  const [customInput, setCustomInput] = useState('');
+  const [customInputInfo, setCustomInputInfo] = useState<{
+    id: string;
+    status: OracleModelStatus;
+    vision: boolean | null;
+  } | null>(null);
+  const [customInputError, setCustomInputError] = useState<string | null>(null);
+  const [briefingSettings, setBriefingSettings] = useState<BriefingSettings>(
+    () => loadBriefingStore().settings
+  );
+
+  const handleBriefingSettingsChange = (patch: Partial<BriefingSettings>) => {
+    const next = updateBriefingSettings(patch);
+    setBriefingSettings(next);
+  };
 
   // ---- Model & Modes (moved off the main Oracle page) ----
   const [modelDraft, setModelDraft] = useState<{
@@ -65,7 +106,20 @@ export const SettingsOracleBibleTab: React.FC = () => {
     });
   }, [selectedThreadId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const candidateModels = ORACLE_MODEL_OPTIONS;
+  const candidateModels: OracleModelOption[] = useMemo(
+    () => buildOracleModelOptions(catalog, customModels),
+    [catalog, customModels]
+  );
+
+  /** The Direct palette, always including the thread's currently selected model. */
+  const directDisplayList = useMemo(() => {
+    const list = [...directList];
+    if (modelDraft.model && !list.includes(modelDraft.model)) list.push(modelDraft.model);
+    return list;
+  }, [directList, modelDraft.model]);
+
+  const optionMeta = (id: string): OracleModelOption | undefined =>
+    candidateModels.find((m) => m.id === id);
 
   const addRosterModel = (roster: 'mini' | 'rotation', id: string) => {
     setModelDraft((d) => {
@@ -92,14 +146,97 @@ export const SettingsOracleBibleTab: React.FC = () => {
     setModelDraft((d) => (roster === 'mini' ? { ...d, miniRoster: next } : { ...d, rotationRoster: next }));
   };
 
+  // ---- Custom model management (validated against the live catalog) ----
+  const handleCustomInput = (value: string) => {
+    setCustomInput(value);
+    setCustomInputError(null);
+    const normalized = normalizeModelId(value);
+    if (!normalized) {
+      setCustomInputInfo(null);
+      return;
+    }
+    const cls = classifyOracleModel(normalized, catalog);
+    setCustomInputInfo({ id: normalized, status: cls.status, vision: cls.vision });
+  };
+
+  const handleAddCustomModel = () => {
+    const res = addCustomOracleModel(customInput, catalog);
+    if (!res.ok) {
+      setCustomInputError(res.reason || 'Could not add that model.');
+      return;
+    }
+    setCustomModels(loadCustomOracleModels());
+    setDirectList(loadOracleDirectList());
+    setCustomInput('');
+    setCustomInputInfo(null);
+    setCustomInputError(null);
+  };
+
+  const handleRemoveCustomModel = (id: string) => {
+    removeCustomOracleModel(id);
+    const nextPool = loadCustomOracleModels();
+    // Drop it from the Direct palette (restoring defaults if it was the only
+    // entry) and from the current thread's rosters.
+    const cleaned = removeFromOracleDirectList(id).filter((m) => m !== id);
+    const nextDirect = cleaned.length > 0 ? cleaned : defaultOracleDirectList();
+    saveOracleDirectList(nextDirect);
+    setCustomModels(nextPool);
+    setDirectList(nextDirect);
+    setModelDraft((d) => ({
+      ...d,
+      model: d.model === id ? nextDirect[0] || ORACLE_MODEL_OPTIONS[0].id : d.model,
+      miniRoster: d.miniRoster.filter((m) => m !== id),
+      rotationRoster: d.rotationRoster.filter((m) => m !== id),
+    }));
+  };
+
+  // ---- Direct palette management ----
+  const handleSelectDirectModel = (id: string) => {
+    setModelDraft((d) => ({ ...d, model: id }));
+  };
+
+  const handleRemoveFromDirectList = (id: string) => {
+    const next = removeFromOracleDirectList(id);
+    setDirectList(next);
+    setModelDraft((d) =>
+      d.model === id ? { ...d, model: next[0] || ORACLE_MODEL_OPTIONS[0].id } : d
+    );
+  };
+
+  const handleAddToDirectList = (id: string) => {
+    const next = ensureInOracleDirectList(id);
+    setDirectList(next);
+    setModelDraft((d) => ({ ...d, model: id }));
+  };
+
+  const handleRandomizeDirect = () => {
+    const pool =
+      directDisplayList.length > 1
+        ? directDisplayList.filter((m) => m !== modelDraft.model)
+        : directDisplayList;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    if (pick) setModelDraft((d) => ({ ...d, model: pick }));
+  };
+
+  const handleRestoreDirectDefaults = () => {
+    const next = restoreDefaultOracleDirectList();
+    setDirectList(next);
+    setModelDraft((d) => ({ ...d, model: next.includes(d.model) ? d.model : next[0] }));
+  };
+
   const handleSaveModelConfig = () => {
     if (!selectedThread) return;
-    patchOracleThread(selectedThread.id, {
-      mode: modelDraft.mode,
-      model: modelDraft.model,
-      miniDeliberationModels: modelDraft.miniRoster,
-      rotationModels: modelDraft.rotationRoster,
-    });
+    try {
+      patchOracleThread(selectedThread.id, {
+        mode: modelDraft.mode,
+        model: modelDraft.model,
+        miniDeliberationModels: modelDraft.miniRoster,
+        rotationModels: modelDraft.rotationRoster,
+      });
+    } catch (err) {
+      console.warn('[Oracle Settings] Could not save model config:', err);
+      return;
+    }
     const loaded = loadOracleThreads();
     setThreads(loaded);
     setIsModelSavedNotice(true);
@@ -109,9 +246,9 @@ export const SettingsOracleBibleTab: React.FC = () => {
   // Refresh thread & global bible draft on change
   useEffect(() => {
     if (targetType === 'thread') {
-      setBibleDraft(selectedThread?.bible?.content || '');
+      setBibleDraft(renderBiblePrompt(selectedThread?.bible) || '');
     } else {
-      setBibleDraft(globalBible.content || '');
+      setBibleDraft(renderBiblePrompt(globalBible) || '');
     }
   }, [targetType, selectedThreadId, selectedThread?.bible?.content, globalBible.content]);
 
@@ -131,21 +268,27 @@ export const SettingsOracleBibleTab: React.FC = () => {
 
     if (targetType === 'thread') {
       if (!selectedThread) return;
+      const nextBible = applyOracleRewrite(selectedThread.bible, cleanContent, now);
       const updatedThreads = threads.map((t) =>
-        t.id === selectedThread.id
-          ? {
-              ...t,
-              bible: { content: cleanContent, updatedAt: now },
-              updatedAt: now,
-            }
-          : t
+        t.id === selectedThread.id ? { ...t, bible: nextBible, updatedAt: now } : t
       );
       setThreads(updatedThreads);
-      saveOracleThreads(updatedThreads);
+      try {
+        saveOracleThreads(updatedThreads);
+      } catch (err) {
+        console.warn('[Oracle Settings] Could not save thread Bible:', err);
+        return;
+      }
     } else {
-      const updatedGlobal: OracleBible = { content: cleanContent, updatedAt: now };
+      const updatedGlobal = applyOracleRewrite(globalBible, cleanContent, now);
       setGlobalBible(updatedGlobal);
-      saveGlobalBible(updatedGlobal);
+      setBibleDraft(renderBiblePrompt(updatedGlobal));
+      try {
+        saveGlobalBible(updatedGlobal);
+      } catch (err) {
+        console.warn('[Oracle Settings] Could not save Global Bible:', err);
+        return;
+      }
     }
 
     setIsSavedNotice(true);
@@ -175,26 +318,32 @@ export const SettingsOracleBibleTab: React.FC = () => {
   };
 
   const handleClear = () => {
-    if (!window.confirm('Are you sure you want to clear this Bible memory?')) return;
-    setBibleDraft('');
+    if (!window.confirm('Clear unsealed working notes? Sealed LAW (Admit) stays.')) return;
     const now = Date.now();
     if (targetType === 'thread') {
       if (!selectedThread) return;
+      const nextBible = dropUnsealed(selectedThread.bible, now);
       const updatedThreads = threads.map((t) =>
-        t.id === selectedThread.id
-          ? {
-              ...t,
-              bible: { content: '', updatedAt: now },
-              updatedAt: now,
-            }
-          : t
+        t.id === selectedThread.id ? { ...t, bible: nextBible, updatedAt: now } : t
       );
       setThreads(updatedThreads);
-      saveOracleThreads(updatedThreads);
+      setBibleDraft(renderBiblePrompt(nextBible));
+      try {
+        saveOracleThreads(updatedThreads);
+      } catch (err) {
+        console.warn('[Oracle Settings] Could not clear thread Bible:', err);
+        return;
+      }
     } else {
-      const updatedGlobal: OracleBible = { content: '', updatedAt: now };
+      const updatedGlobal = dropUnsealed(globalBible, now);
       setGlobalBible(updatedGlobal);
-      saveGlobalBible(updatedGlobal);
+      setBibleDraft(renderBiblePrompt(updatedGlobal));
+      try {
+        saveGlobalBible(updatedGlobal);
+      } catch (err) {
+        console.warn('[Oracle Settings] Could not clear Global Bible:', err);
+        return;
+      }
     }
   };
 
@@ -213,7 +362,7 @@ export const SettingsOracleBibleTab: React.FC = () => {
           </h3>
         </div>
         <p className="text-xs text-slate-500 dark:text-slate-400">
-          The Oracle autonomously maintains a living summary of established facts, user preferences, decisions, and context in the background. You can inspect or refine the memories below.
+          The Bible is claims, not a diary. Lines under LAW are sealed (Admit to Bible) — Oracle rewrite, Drive sync, Save, and Clear cannot eat them. Working notes below LAW may change.
         </p>
       </div>
 
@@ -313,32 +462,105 @@ export const SettingsOracleBibleTab: React.FC = () => {
           ))}
         </div>
 
-        {/* Direct: single model picker */}
+        {/* Direct: single model palette (add/remove as you like) */}
         {modelDraft.mode === 'direct' && (
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-slate-700 dark:text-slate-300">Model:</label>
-            <div className="flex items-center gap-2">
+            <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
+              Model — click to select, <span className="font-mono">×</span> to remove from the list:
+            </label>
+            <div className="flex flex-wrap gap-1.5">
+              {directDisplayList.map((id) => {
+                const meta = optionMeta(id);
+                const isSelected = modelDraft.model === id;
+                const inList = directList.includes(id);
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => handleSelectDirectModel(id)}
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] transition-colors cursor-pointer ${
+                      isSelected
+                        ? 'bg-fuchsia-600/15 border-fuchsia-500/60 text-fuchsia-700 dark:text-fuchsia-300 font-semibold'
+                        : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-slate-400'
+                    }`}
+                    title={`${id}${meta?.custom ? ' (custom)' : ''}`}
+                  >
+                    {meta?.status && (
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          meta.status === 'live'
+                            ? 'bg-emerald-400'
+                            : meta.status === 'delisted'
+                              ? 'bg-amber-400'
+                              : 'bg-slate-400'
+                        }`}
+                      />
+                    )}
+                    {meta?.vision ? (
+                      <Eye size={10} className="text-indigo-400" />
+                    ) : (
+                      <span className="text-[9px] text-slate-400">txt</span>
+                    )}
+                    {meta?.name || id.split('/').pop()}
+                    {inList && (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveFromDirectList(id);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleRemoveFromDirectList(id);
+                          }
+                        }}
+                        className="text-slate-400 hover:text-red-500 cursor-pointer"
+                        aria-label={`Remove ${id} from the direct list`}
+                      >
+                        <X size={11} />
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-1.5">
               <select
-                value={modelDraft.model}
-                onChange={(e) => setModelDraft((d) => ({ ...d, model: e.target.value }))}
+                value=""
+                onChange={(e) => {
+                  if (!e.target.value) return;
+                  handleAddToDirectList(e.target.value);
+                }}
                 className="flex-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs rounded-lg px-3 py-2 focus:ring-1 focus:ring-fuchsia-500 outline-none"
               >
-                {candidateModels.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name} {m.tag ? `(${m.tag})` : ''} {m.vision ? '· Vision' : '· Text only'}
-                  </option>
-                ))}
+                <option value="">Add a model to this list…</option>
+                {candidateModels
+                  .filter((m) => !directList.includes(m.id))
+                  .map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name} {m.tag ? `(${m.tag})` : ''} {m.vision ? '· Vision' : '· Text only'}
+                    </option>
+                  ))}
               </select>
+              <Plus size={13} className="text-slate-400" />
               <button
                 type="button"
-                onClick={() => {
-                  const pick = candidateModels[Math.floor(Math.random() * candidateModels.length)];
-                  setModelDraft((d) => ({ ...d, model: pick.id }));
-                }}
+                onClick={handleRandomizeDirect}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-amber-600 dark:text-amber-400 border border-amber-300/60 dark:border-amber-500/40 text-xs font-semibold cursor-pointer"
-                title="Pick a random frontier model"
+                title="Pick a random model from this list"
               >
                 <Dices size={13} /> Randomize
+              </button>
+              <button
+                type="button"
+                onClick={handleRestoreDirectDefaults}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-300 dark:border-slate-700 text-[11px] cursor-pointer"
+                title="Restore the default frontier list"
+              >
+                <RefreshCw size={11} /> Defaults
               </button>
             </div>
           </div>
@@ -379,12 +601,24 @@ export const SettingsOracleBibleTab: React.FC = () => {
 
             <div className="flex flex-wrap gap-1.5">
               {(modelDraft.mode === 'mini_deliberation' ? modelDraft.miniRoster : modelDraft.rotationRoster).map((id) => {
-                const meta = candidateModels.find((m) => m.id === id);
+                const meta = optionMeta(id);
                 return (
                   <span
                     key={id}
                     className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] text-slate-700 dark:text-slate-300"
+                    title={id}
                   >
+                    {meta?.status && (
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          meta.status === 'live'
+                            ? 'bg-emerald-400'
+                            : meta.status === 'delisted'
+                              ? 'bg-amber-400'
+                              : 'bg-slate-400'
+                        }`}
+                      />
+                    )}
                     {meta?.vision ? <Eye size={10} className="text-indigo-400" /> : <span className="text-[9px] text-slate-400">txt</span>}
                     {meta?.name || id.split('/').pop()}
                     <button
@@ -422,6 +656,165 @@ export const SettingsOracleBibleTab: React.FC = () => {
             </div>
           </div>
         )}
+
+        {/* Custom models: any OpenRouter id, validated against the live catalog */}
+        <div className="space-y-1.5 border-t border-slate-200 dark:border-slate-800 pt-3">
+          <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
+            Add a custom model (any OpenRouter id):
+          </label>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <input
+              type="text"
+              value={customInput}
+              onChange={(e) => handleCustomInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleAddCustomModel();
+                }
+              }}
+              placeholder="e.g. z-ai/glm-5.3"
+              spellCheck={false}
+              className="flex-1 min-w-[180px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs rounded-lg px-3 py-2 focus:ring-1 focus:ring-fuchsia-500 outline-none font-mono"
+            />
+            {customInputInfo && (
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[10px] font-semibold ${
+                  customInputInfo.status === 'live'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300/60 dark:border-emerald-700/60'
+                    : customInputInfo.status === 'delisted'
+                      ? 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-300/60 dark:border-amber-700/60'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700'
+                }`}
+                title={
+                  customInputInfo.status === 'unknown'
+                    ? 'No live catalog loaded yet — the id is saved and will be re-checked online.'
+                    : undefined
+                }
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    customInputInfo.status === 'live'
+                      ? 'bg-emerald-400'
+                      : customInputInfo.status === 'delisted'
+                        ? 'bg-amber-400'
+                        : 'bg-slate-400'
+                  }`}
+                />
+                {customInputInfo.status === 'live'
+                  ? 'Live'
+                  : customInputInfo.status === 'delisted'
+                    ? 'Delisted'
+                    : 'Unverified (offline)'}
+                {customInputInfo.vision !== null &&
+                  (customInputInfo.vision ? ' · Vision' : ' · Text only')}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleAddCustomModel}
+              disabled={!customInputInfo}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold cursor-pointer"
+            >
+              <Plus size={13} /> Add
+            </button>
+          </div>
+          {customInputError && (
+            <div className="text-[11px] text-red-500">{customInputError}</div>
+          )}
+          <p className="text-[10px] text-slate-500 dark:text-slate-400">
+            Custom models join this list and every roster picker, rotate like any other model, and obey the
+            vision guard (text-only models are never sent images). The live catalog is the source of truth:
+            a delisted id is always shown as Delisted — never silently dropped.
+          </p>
+          {customModels.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 pt-0.5">
+              {customModels.map((m) => {
+                const meta = optionMeta(m.id);
+                return (
+                  <span
+                    key={m.id}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-fuchsia-50 dark:bg-fuchsia-950/40 border border-fuchsia-300/60 dark:border-fuchsia-700/60 text-[11px] text-slate-700 dark:text-slate-300"
+                    title={m.id}
+                  >
+                    {meta?.status && (
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          meta.status === 'live'
+                            ? 'bg-emerald-400'
+                            : meta.status === 'delisted'
+                              ? 'bg-amber-400'
+                              : 'bg-slate-400'
+                        }`}
+                      />
+                    )}
+                    {meta?.vision ? (
+                      <Eye size={10} className="text-indigo-400" />
+                    ) : (
+                      <span className="text-[9px] text-slate-400">txt</span>
+                    )}
+                    {meta?.name || m.id.split('/').pop()}
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveCustomModel(m.id)}
+                      className="text-slate-400 hover:text-red-500 cursor-pointer"
+                      aria-label={`Remove custom model ${m.id}`}
+                      title="Remove from your custom models (also removed from the direct list and this thread's rosters)"
+                    >
+                      <X size={11} />
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Council Briefings (Unasked Verdict) — zero-token local suggestions */}
+        <div className="space-y-1.5 border-t border-slate-200 dark:border-slate-800 pt-3">
+          <div className="flex items-center justify-between gap-2">
+            <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
+              Council Briefings (Unasked Verdict)
+            </label>
+            <input
+              type="checkbox"
+              checked={briefingSettings.enabled}
+              onChange={(e) => handleBriefingSettingsChange({ enabled: e.target.checked })}
+              className="rounded text-fuchsia-500 focus:ring-0 cursor-pointer"
+            />
+          </div>
+          <p className="text-[10px] text-slate-500 dark:text-slate-400">
+            The Oracle notices when you keep circling the same decision-style question across threads
+            and offers to convene a mini-council. Detection is local and costs nothing — nothing runs
+            until you click “Convene”. Personal topics are always excluded.
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="flex items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-400">
+              Suggest after
+              <select
+                value={briefingSettings.minMentions}
+                onChange={(e) => handleBriefingSettingsChange({ minMentions: parseInt(e.target.value) || 3 })}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-[11px] rounded-lg px-2 py-1 outline-none"
+              >
+                {[2, 3, 4, 5, 6].map((n) => (
+                  <option key={n} value={n}>{n} mentions</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-400">
+              looking back
+              <select
+                value={briefingSettings.lookbackDays}
+                onChange={(e) => handleBriefingSettingsChange({ lookbackDays: parseInt(e.target.value) || 14 })}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-[11px] rounded-lg px-2 py-1 outline-none"
+              >
+                {[3, 7, 14, 30].map((n) => (
+                  <option key={n} value={n}>{n} days</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
 
         <div className="flex items-center justify-end gap-2 pt-1">
           {isModelSavedNotice && (

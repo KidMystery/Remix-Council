@@ -15,8 +15,13 @@ import {
   AlertTriangle,
   Trash2,
   Loader2,
+  Target,
+  BookOpen,
 } from 'lucide-react';
 import type { CouncilRound, Persona } from '../types';
+import { EvidenceDocket } from './EvidenceDocket';
+import { OUTCOME_LABELS } from '../lib/outcomeLedger';
+import type { TrackedOutcome, LedgerOutcome } from '../lib/outcomeLedger';
 import { useSpeech } from '../hooks/useSpeech';
 import { copyToClipboard } from '../lib/clipboard';
 import { countRoundCost, formatCost } from '../lib/archivist';
@@ -38,6 +43,15 @@ export interface CouncilRoundViewProps {
   onDeleteRound?: (roundId: string) => void;
   isDeliberating?: boolean;
   showConsensusVisualizer?: boolean;
+  /** Whether this round is the newest in the stack (kept open; older rounds collapse). */
+  isLatestRound?: boolean;
+  /** Confidence Ledger (opt-in): whether outcome tracking is enabled. */
+  outcomeTrackingEnabled?: boolean;
+  trackedOutcome?: TrackedOutcome | null;
+  onTrackRound?: () => void;
+  onSetOutcome?: (outcome: LedgerOutcome) => void;
+  onAdmitToBible?: () => void;
+  bibleAdmitted?: boolean;
 }
 
 interface CardHeaderProps {
@@ -209,6 +223,13 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
   onRegeneratePersona,
   onForkBranch,
   onDeleteRound,
+  isLatestRound = true,
+  outcomeTrackingEnabled = false,
+  trackedOutcome = null,
+  onTrackRound,
+  onSetOutcome,
+  onAdmitToBible,
+  bibleAdmitted = false,
   isDeliberating = false,
   showConsensusVisualizer = false,
 }) => {
@@ -223,6 +244,31 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
   const [forkBranchName, setForkBranchName] = useState('');
   const [stage1Expanded, setStage1Expanded] = useState(true);
   const [stage2Expanded, setStage2Expanded] = useState(true);
+
+  // Whole-round collapse: the newest round is open; older rounds stack as a
+  // compact header + one-line summary (Resume/Re-run stay reachable).
+  const [roundCollapsed, setRoundCollapsed] = useState(!isLatestRound);
+
+  const roundIsStreaming = (() => {
+    const anyStreaming = (record: Record<string, any>): boolean =>
+      Object.values(record || {}).some((r) => r?.status === 'streaming');
+    return (
+      anyStreaming(stage1) ||
+      anyStreaming(stage2) ||
+      stage3?.status === 'streaming'
+    );
+  })();
+
+  // A round that starts streaming (resume/re-run) always opens; a round that
+  // is no longer the newest folds into the stack. Manual expand/collapse is
+  // respected until one of those two things changes.
+  useEffect(() => {
+    if (roundIsStreaming) {
+      setRoundCollapsed(false);
+    } else if (!isLatestRound) {
+      setRoundCollapsed(true);
+    }
+  }, [roundIsStreaming, isLatestRound]);
 
   // Per-card collapse state (Stage 1 & Stage 2).
   const [expandedPersonas, setExpandedPersonas] = useState<Set<string>>(new Set());
@@ -420,6 +466,64 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
             </button>
           ) : (
             <>
+              {onAdmitToBible && round.stamp === 'completed' && (
+                <ConfirmButton
+                  onConfirm={onAdmitToBible}
+                  disabled={isDeliberating || bibleAdmitted}
+                  confirmPrompt="Admit invariants only?"
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-amber-950 bg-amber-50 hover:bg-amber-100 px-2.5 py-1.5 rounded-lg border border-amber-300 transition-colors disabled:opacity-50 cursor-pointer"
+                  title="Admit only the stamped invariants to the Global Bible. The essay stays here."
+                >
+                  <BookOpen size={12} />
+                  <span>{bibleAdmitted ? 'Admitted' : 'Admit to Bible'}</span>
+                </ConfirmButton>
+              )}
+              {outcomeTrackingEnabled && round.stamp === 'completed' && (
+                <div
+                  className="flex items-center gap-0.5 p-0.5 rounded-lg border border-slate-700 bg-slate-950/70"
+                  title="Confidence Ledger — only rounds you explicitly track are recorded"
+                >
+                  {!trackedOutcome ? (
+                    <button
+                      onClick={onTrackRound}
+                      disabled={isDeliberating}
+                      className="inline-flex items-center gap-1 text-[10px] font-mono text-cyan-300 hover:text-cyan-200 px-2 py-1 rounded-md transition-colors disabled:opacity-50 cursor-pointer"
+                      title="Track this verdict and mark how it turns out"
+                    >
+                      <Target size={11} />
+                      <span>Track verdict</span>
+                    </button>
+                  ) : (
+                    <>
+                      {(['worked', 'didnt', 'ignored', 'pending'] as LedgerOutcome[]).map((o) => {
+                        const active = trackedOutcome.outcome === o;
+                        return (
+                          <button
+                            key={o}
+                            onClick={() => onSetOutcome?.(o)}
+                            disabled={isDeliberating}
+                            title={OUTCOME_LABELS[o]}
+                            aria-label={`Mark verdict: ${OUTCOME_LABELS[o]}`}
+                            className={`inline-flex items-center justify-center w-7 h-6 rounded-md text-[11px] font-bold transition-colors disabled:opacity-50 cursor-pointer ${
+                              active
+                                ? o === 'worked'
+                                  ? 'bg-emerald-600/30 text-emerald-300 border border-emerald-600/60'
+                                  : o === 'didnt'
+                                    ? 'bg-red-600/30 text-red-300 border border-red-600/60'
+                                    : o === 'ignored'
+                                      ? 'bg-slate-700/60 text-slate-300 border border-slate-500/60'
+                                      : 'bg-amber-600/30 text-amber-300 border border-amber-600/60'
+                                : 'text-slate-500 hover:text-slate-300'
+                            }`}
+                          >
+                            {o === 'worked' ? '✓' : o === 'didnt' ? '✗' : o === 'ignored' ? '↷' : '…'}
+                          </button>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
+              )}
               {onForkBranch && (
                 <button
                   onClick={() => setIsForking(!isForking)}
@@ -454,10 +558,29 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
               )}
             </>
           )}
+          <button
+            type="button"
+            onClick={() => setRoundCollapsed((v) => !v)}
+            className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-xs text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors cursor-pointer"
+            title={roundCollapsed ? 'Expand this round' : 'Collapse this round into the stack'}
+            aria-expanded={!roundCollapsed}
+          >
+            {roundCollapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
+          </button>
         </div>
       </header>
 
-      {/* Sub-Council Fork Prompt Popup */}
+      {!roundCollapsed && (round.evidence?.length || round.blockers?.length || round.stamp) ? (
+        <div className="mb-4">
+          <EvidenceDocket
+            evidence={round.evidence || []}
+            blockers={round.blockers || []}
+            stamp={round.stamp}
+          />
+        </div>
+      ) : null}
+
+      {/* Sub-Council Fork Prompt Popup (stays reachable while collapsed) */}
       {isForking && (
         <form onSubmit={handleCreateFork} className="mb-4 p-3 bg-purple-950/40 border border-purple-700/60 rounded-xl flex items-center gap-2">
           <input
@@ -485,8 +608,37 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
         </form>
       )}
 
+      {/* Collapsed stacked view: compact one-line summary of the round. */}
+      {roundCollapsed ? (
+        <button
+          type="button"
+          onClick={() => setRoundCollapsed(false)}
+          className="w-full mb-1 flex items-center gap-2 px-4 py-2.5 bg-slate-950/40 border border-slate-800/70 rounded-xl text-left text-[11px] text-slate-400 hover:bg-slate-950/70 hover:border-slate-700 transition-colors cursor-pointer"
+          title="Expand this round"
+        >
+          {incompleteStage?.isIncomplete ? (
+            <AlertTriangle size={12} className="text-amber-400 shrink-0" />
+          ) : (
+            <Check size={12} className="text-emerald-400 shrink-0" />
+          )}
+          <span className="truncate">
+            {(() => {
+              if (stage3?.content) {
+                return stage3.content.replace(/^#+\s*/gm, '').replace(/[*_`>[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 200) || 'Round complete';
+              }
+              if (incompleteStage?.isIncomplete) {
+                return `Incomplete — ${incompleteStage.description}. Resume from the header above.`;
+              }
+              return `Deliberating: Stage 1 (${stage1Completed}/${activePersonas.length}) · Stage 2 (${stage2Completed}/${activePersonas.length})`;
+            })()}
+          </span>
+        </button>
+      ) : (
+        <></>
+      )}
+
       {/* Consensus View (Basic Mode) */}
-      {basicMode ? (
+      {!roundCollapsed && (basicMode ? (
         <div className="space-y-4">
           {stage3?.content ? (
             <section className="p-5 bg-slate-950/80 border border-cyan-500/40 rounded-xl shadow-inner">
@@ -568,7 +720,7 @@ export const CouncilRoundView: React.FC<CouncilRoundViewProps> = ({
             />
           )}
         </div>
-      )}
+      ))}
     </article>
   );
 };

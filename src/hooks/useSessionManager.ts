@@ -3,33 +3,26 @@ import type { Session, CouncilRound, Persona } from '../types';
 import { summarizeTitle } from '../lib/titleUtils';
 import {
   saveSessionsToDrive,
-  loadSessionsFromDrive,
+  loadSessionDriveDoc,
   deleteSessionFromDrive,
   isGoogleSignedIn,
   signInWithGoogle,
   signOutGoogle,
   mergeSessions,
+  DriveUnreadError,
+  type Tombstone,
 } from '../lib/drivePersistence';
+import { stripSessionsBodies } from '../lib/evidence';
+import { addTombstone, applyTombstones, DRIVE_UNREAD_MESSAGE, mergeTombstones } from '../lib/syncContract';
 
 const LOCAL_STORAGE_KEY = 'council-sessions-v3';
+const TOMBSTONE_STORAGE_KEY = 'council-session-tombstones-v1';
 const LOCAL_WRITE_THROTTLE_MS = 750;
 const DRIVE_WRITE_THROTTLE_MS = 5000;
-const LOCAL_CONTENT_MAX_CHARS = 2000;
 
-/** Strips attached file contents to the given char cap for storage safety. */
-function sanitizeForStorage(sessions: Session[], maxContentChars: number): Session[] {
-  return sessions.map((s) => ({
-    ...s,
-    rounds: (s.rounds || []).map((r) => ({
-      ...r,
-      attachedTextFiles: (r.attachedTextFiles || []).map((f) => ({
-        ...f,
-        content: f.content && f.content.length > maxContentChars
-          ? f.content.slice(0, maxContentChars)
-          : f.content || '',
-      })),
-    })),
-  }));
+/** Persist exhibit metadata only. Never slice a body to fit. */
+function sanitizeForStorage(sessions: Session[]): Session[] {
+  return stripSessionsBodies(sessions);
 }
 
 function loadFromLocalStorage(): Session[] {
@@ -46,10 +39,30 @@ function loadFromLocalStorage(): Session[] {
 
 function persistToLocalStorage(sessions: Session[]): void {
   try {
-    const sanitized = sanitizeForStorage(sessions, LOCAL_CONTENT_MAX_CHARS);
+    const sanitized = sanitizeForStorage(sessions);
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(sanitized));
   } catch (err) {
-    console.warn('[SessionManager] Local storage write failed (quota?):', err);
+    console.warn('[SessionManager] Local storage write failed (quota?). Evidence blobs were not truncated.', err);
+    throw err;
+  }
+}
+
+function loadTombstones(): Tombstone[] {
+  try {
+    const raw = localStorage.getItem(TOMBSTONE_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistTombstones(stones: Tombstone[]): void {
+  try {
+    localStorage.setItem(TOMBSTONE_STORAGE_KEY, JSON.stringify(stones));
+  } catch (err) {
+    console.warn('[SessionManager] Could not persist delete marks:', err);
   }
 }
 
@@ -65,6 +78,7 @@ export function useSessionManager() {
 
   const sessionsRef = useRef<Session[]>([]);
   sessionsRef.current = sessions;
+  const deletedRef = useRef<Tombstone[]>(loadTombstones());
 
   // ---- Throttled localStorage persistence (max 1 write per 750ms) ----
   const pendingLocalRef = useRef<Session[] | null>(null);
@@ -108,15 +122,19 @@ export function useSessionManager() {
         const payload = pendingDriveRef.current;
         pendingDriveRef.current = null;
         setIsSyncing(true);
-        saveSessionsToDrive(payload)
-          .then(() => {
+        saveSessionsToDrive(payload, deletedRef.current)
+          .then((doc) => {
+            deletedRef.current = doc.deleted;
+            persistTombstones(doc.deleted);
+            sessionsRef.current = doc.sessions;
+            setSessions(doc.sessions);
             setLastSavedAt(Date.now());
             setSaveDestination('cloud');
             setSaveError(null);
           })
           .catch((err) => {
             console.warn('[SessionManager] Drive throttled write error:', err);
-            setSaveError('Drive sync error');
+            setSaveError(err instanceof DriveUnreadError ? DRIVE_UNREAD_MESSAGE : 'Drive sync error');
           })
           .finally(() => setIsSyncing(false));
       }
@@ -147,20 +165,12 @@ export function useSessionManager() {
       }
       if (isGoogleSignedIn()) {
         setIsSyncing(true);
-        // Pre-fetch remote to merge so concurrent or remote changes are not overwritten
-        let toSave = current;
-        try {
-          const remote = await loadSessionsFromDrive();
-          if (remote.length > 0) {
-            const { merged } = mergeSessions(current, remote);
-            toSave = merged;
-            setSessions(merged);
-            persistToLocalStorage(merged);
-          }
-        } catch (e) {
-          console.warn('[SessionManager] Non-fatal pre-fetch merge notice:', e);
-        }
-        await saveSessionsToDrive(toSave);
+        const doc = await saveSessionsToDrive(current, deletedRef.current);
+        deletedRef.current = doc.deleted;
+        persistTombstones(doc.deleted);
+        sessionsRef.current = doc.sessions;
+        setSessions(doc.sessions);
+        persistToLocalStorage(doc.sessions);
         setLastSavedAt(Date.now());
         setSaveDestination('cloud');
         setSaveError(null);
@@ -187,18 +197,22 @@ export function useSessionManager() {
       if (isGoogleSignedIn()) {
         setIsSyncing(true);
         try {
-          const driveSessions = await loadSessionsFromDrive();
-          if (driveSessions.length > 0) {
-            const { merged } = mergeSessions(local, driveSessions);
-            unified = merged;
-            loadedFromCloud = true;
-            persistToLocalStorage(merged);
-          }
+          const remote = await loadSessionDriveDoc();
+          const localDeleted = mergeTombstones(deletedRef.current, remote.deleted);
+          const { merged, deleted } = mergeSessions(local, remote.sessions, localDeleted, remote.deleted);
+          deletedRef.current = deleted;
+          persistTombstones(deleted);
+          unified = merged;
+          loadedFromCloud = remote.sessions.length > 0 || remote.deleted.length > 0;
+          persistToLocalStorage(merged);
         } catch (err) {
           console.warn('[SessionManager] Drive load notice (using local cache):', err);
+          unified = applyTombstones(local, deletedRef.current);
         } finally {
           setIsSyncing(false);
         }
+      } else {
+        unified = applyTombstones(local, deletedRef.current);
       }
 
       if (isMounted) {
@@ -213,6 +227,7 @@ export function useSessionManager() {
           setLastSavedAt(Date.now());
           setSaveDestination('local');
         }
+        setIsLoading(false);
       }
     }
     load();
@@ -225,7 +240,8 @@ export function useSessionManager() {
     title: string = 'New Deliberation',
     personas: Persona[] = [],
     synthesizer?: Persona,
-    activePresetId?: string
+    activePresetId?: string,
+    extras?: { handoff?: Session['handoff'] }
   ): Session => {
     const newSession: Session = {
       id: `session_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -234,6 +250,7 @@ export function useSessionManager() {
       personas,
       synthesizer,
       activePresetId,
+      handoff: extras?.handoff,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -250,6 +267,15 @@ export function useSessionManager() {
     setActiveSessionId(sessionId);
   }, []);
 
+  const patchSession = useCallback((sessionId: string, patch: Partial<Session>) => {
+    const next = sessionsRef.current.map((s) =>
+      s.id === sessionId ? { ...s, ...patch, id: s.id, updatedAt: Date.now() } : s
+    );
+    setSessions(next);
+    writeLocalThrottled(next);
+    writeDriveThrottled(next);
+  }, [writeLocalThrottled, writeDriveThrottled]);
+
   const renameSession = useCallback((sessionId: string, title: string) => {
     const clean = (title || '').trim();
     if (!clean) return;
@@ -263,6 +289,8 @@ export function useSessionManager() {
 
   const deleteSession = useCallback((sessionId: string) => {
     const next = sessionsRef.current.filter((s) => s.id !== sessionId);
+    deletedRef.current = addTombstone(deletedRef.current, sessionId);
+    persistTombstones(deletedRef.current);
     setSessions(next);
     setActiveSessionId((prev) => (prev === sessionId ? next[0]?.id || null : prev));
     writeLocalThrottled(next);
@@ -288,6 +316,11 @@ export function useSessionManager() {
   }, [activeSessionId, writeLocalThrottled, writeDriveThrottled]);
 
   const clearAllSessions = useCallback(() => {
+    const now = Date.now();
+    for (const s of sessionsRef.current) {
+      deletedRef.current = addTombstone(deletedRef.current, s.id, now);
+    }
+    persistTombstones(deletedRef.current);
     setSessions([]);
     setActiveSessionId(null);
     writeLocalThrottled([]);
@@ -332,8 +365,15 @@ export function useSessionManager() {
       persistToLocalStorage(next);
       if (isGoogleSignedIn()) {
         setIsSyncing(true);
-        saveSessionsToDrive(next)
-          .catch((err) => console.warn('[SessionManager] Drive immediate write error:', err))
+        saveSessionsToDrive(next, deletedRef.current)
+          .then((doc) => {
+            deletedRef.current = doc.deleted;
+            persistTombstones(doc.deleted);
+          })
+          .catch((err) => {
+            console.warn('[SessionManager] Drive immediate write error:', err);
+            setSaveError(err instanceof DriveUnreadError ? DRIVE_UNREAD_MESSAGE : 'Drive sync error');
+          })
           .finally(() => setIsSyncing(false));
       }
     }
@@ -447,22 +487,23 @@ export function useSessionManager() {
     await signInWithGoogle();
     setIsSyncing(true);
     try {
-      const driveSessions = await loadSessionsFromDrive();
-      if (driveSessions.length > 0) {
-        // Merge drive sessions with current local sessions so neither is lost
-        const { merged } = mergeSessions(sessionsRef.current, driveSessions);
-        setSessions(merged);
-        if (merged.length > 0) {
-          setActiveSessionId((prev) =>
-            prev && merged.some((s) => s.id === prev) ? prev : merged[0].id
-          );
-        }
-        persistToLocalStorage(merged);
-        await saveSessionsToDrive(merged);
-      } else if (sessionsRef.current.length > 0) {
-        // Drive was empty; upload current local sessions to Drive
-        await saveSessionsToDrive(sessionsRef.current);
+      const remote = await loadSessionDriveDoc();
+      const { merged, deleted } = mergeSessions(
+        sessionsRef.current,
+        remote.sessions,
+        deletedRef.current,
+        remote.deleted
+      );
+      deletedRef.current = deleted;
+      persistTombstones(deleted);
+      setSessions(merged);
+      if (merged.length > 0) {
+        setActiveSessionId((prev) =>
+          prev && merged.some((s) => s.id === prev) ? prev : merged[0].id
+        );
       }
+      persistToLocalStorage(merged);
+      await saveSessionsToDrive(merged, deleted);
       setLastSavedAt(Date.now());
       setSaveDestination('cloud');
       setSaveError(null);
@@ -486,6 +527,7 @@ export function useSessionManager() {
     activeSession,
     activeSessionId,
     createSession,
+    patchSession,
     selectSession,
     renameSession,
     deleteSession,

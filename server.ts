@@ -4,8 +4,16 @@ import { fileURLToPath } from 'url';
 import { z } from 'zod';
 import { GoogleGenAI, Modality } from '@google/genai';
 import { allocateCouncilSeats } from './src/lib/serverModelAllocator';
-import { pickBestFromCatalog, type ModelTier } from './src/lib/modelScoring';
+import { isOpenRouterRouterId, pickBestFromCatalog, type ModelTier } from './src/lib/modelScoring';
+import { extractRoutedModelFromSSE } from './src/lib/autoRouter';
 import { RoundCostLedger, modelRatesUSD, usageCostUSD, extractUsageFromSSEChunk } from './src/lib/costGovernor';
+import {
+  AgentLoopRunner,
+  sanitizeAgentSpec,
+  newAgentJobId,
+  DEFAULT_MAX_JOB_COST_USD,
+  type AgentJob,
+} from './src/server/agentLoop';
 
 // Works under both ESM (tsx dev) and the CJS production bundle (esbuild).
 const __filename =
@@ -93,6 +101,9 @@ const CouncilRequestSchema = z.object({
   // per-round ceiling using REAL usage, independent of the client bundle.
   roundKey: z.string().max(160).optional(),
   costCeilingUSD: z.number().positive().max(1000).optional(),
+  /** OpenRouter Auto: family filters + cost band. Ignored for concrete models. */
+  plugins: z.array(z.any()).optional(),
+  session_id: z.string().max(200).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -422,7 +433,19 @@ export async function startServer(portOverride?: number) {
       });
     }
 
-    const { model: rawModel, messages, temperature, max_tokens, budget, stream, tools, roundKey, costCeilingUSD } = parseResult.data;
+    const {
+      model: rawModel,
+      messages,
+      temperature,
+      max_tokens,
+      budget,
+      stream,
+      tools,
+      roundKey,
+      costCeilingUSD,
+      plugins,
+      session_id,
+    } = parseResult.data;
 
     // Input caps: bound message count and total payload size to prevent runaway
     // prompt costs via the proxy.
@@ -451,7 +474,9 @@ export async function startServer(portOverride?: number) {
     // resolve the best live substitute instead of burning the request on a
     // guaranteed 404. Free mode may only be substituted with free models.
     let resolvedModel = rawModel;
-    if (cachedCatalog && cachedCatalog.length > 0) {
+    // Router slugs are not catalog endpoints. Substituting them would silently
+    // kill Auto and seat a random Flash. Never rewrite them.
+    if (cachedCatalog && cachedCatalog.length > 0 && !isOpenRouterRouterId(rawModel)) {
       const liveIds = new Set(cachedCatalog.map((m: any) => String(m?.id || '').toLowerCase()));
       if (!liveIds.has(rawModel.toLowerCase())) {
         const tier: ModelTier = budget === 'free' ? 'free' : budget === 'quality' ? 'quality' : 'cheap';
@@ -485,14 +510,16 @@ export async function startServer(portOverride?: number) {
     // or JSON response). Accepts raw snake_case (JSON path) or normalized
     // camelCase (SSE extractor). No-op when the client didn't send a roundKey.
     let usageRecorded = false;
-    const recordRoundUsage = (rawUsage: any) => {
+    let billedModel = resolvedModel;
+    const recordRoundUsage = (rawUsage: any, seatedModel?: string) => {
       if (usageRecorded || !roundKey || !rawUsage) return;
       usageRecorded = true;
+      if (seatedModel) billedModel = seatedModel;
       const usage = {
         promptTokens: Number(rawUsage.prompt_tokens ?? rawUsage.promptTokens) || 0,
         completionTokens: Number(rawUsage.completion_tokens ?? rawUsage.completionTokens) || 0,
       };
-      const rates = modelRatesUSD(cachedCatalog, resolvedModel);
+      const rates = modelRatesUSD(cachedCatalog, billedModel);
       const cost = usageCostUSD(usage, rates);
       if (cost > 0) roundCostLedger.add(roundKey, cost);
     };
@@ -520,6 +547,8 @@ export async function startServer(portOverride?: number) {
     };
     if (max_tokens) payload.max_tokens = max_tokens;
     if (tools && tools.length > 0) payload.tools = tools;
+    if (plugins && plugins.length > 0) payload.plugins = plugins;
+    if (session_id) payload.session_id = session_id;
     // Request per-token usage stats on the final stream chunk.
     payload.stream_options = { include_usage: true };
 
@@ -594,7 +623,10 @@ export async function startServer(portOverride?: number) {
             if (roundKey && !usageRecorded) {
               sseScanTail = (sseScanTail + new TextDecoder('utf-8').decode(value)).slice(-4096);
               const usage = extractUsageFromSSEChunk(sseScanTail);
-              if (usage) recordRoundUsage(usage);
+              if (usage) {
+                const seated = extractRoutedModelFromSSE(sseScanTail);
+                recordRoundUsage(usage, seated);
+              }
             }
           }
           // Tell the client immediately when the round has hit its ceiling so
@@ -645,6 +677,84 @@ export async function startServer(portOverride?: number) {
         error: error.message || 'Upstream LLM communication failure',
       });
     }
+  });
+
+  // 5b. Server-side Agent Loop — assess → plan → research → deliberate →
+  //     fact-check → answer, entirely on the server. Jobs survive tab closes
+  //     and are persisted to disk (bounded). Env knobs:
+  //       AGENT_DEFAULT_MODEL      (default google/gemini-2.5-flash)
+  //       AGENT_MAX_JOB_COST_USD   (default 2.00)
+  //       AGENT_DATA_DIR           (default ./data)
+  const agentDataDir = process.env.AGENT_DATA_DIR?.trim() || path.join(process.cwd(), 'data');
+  const getAgentDefaultModel = () =>
+    process.env.AGENT_DEFAULT_MODEL?.trim() || 'google/gemini-2.5-flash';
+  const getAgentMaxJobCost = () => {
+    const raw = parseFloat(String(process.env.AGENT_MAX_JOB_COST_USD || ''));
+    return !isNaN(raw) && raw > 0 ? raw : DEFAULT_MAX_JOB_COST_USD;
+  };
+  const agentRunner = new AgentLoopRunner(
+    {
+      catalog: () => cachedCatalog || [],
+      openRouterKey: () => process.env.OPENROUTER_API_KEY?.trim() || '',
+      defaultModel: getAgentDefaultModel,
+      defaultMaxJobCostUSD: getAgentMaxJobCost,
+    },
+    agentDataDir
+  );
+
+  const toAgentSummary = (job: AgentJob) => ({
+    id: job.id,
+    goal: job.spec.goal.slice(0, 120),
+    mode: job.spec.mode,
+    status: job.status,
+    progress: job.progress,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    finishedAt: job.finishedAt,
+    usageUSD: Number(job.usageUSD.toFixed(6)),
+    citations: job.citations.length,
+    error: job.error,
+  });
+
+  app.post('/api/agent', requireRateLimit, requireOwnerGate, (req, res) => {
+    const spec = sanitizeAgentSpec(req.body);
+    if ('error' in spec) {
+      return res.status(400).json({ error: spec.error });
+    }
+    const job: AgentJob = {
+      id: newAgentJobId(),
+      spec,
+      status: 'planning',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      plan: null,
+      research: [],
+      passes: [],
+      verdict: '',
+      citations: [],
+      usageUSD: 0,
+      progress: { phase: 'planning', detail: 'Job accepted — planning next.' },
+    };
+    // Fire-and-forget: the client polls job status; the loop persists every
+    // phase so a restart leaves an honest trail.
+    void agentRunner.run(job);
+    return res.status(202).json({ data: { id: job.id, status: job.status } });
+  });
+
+  app.get('/api/agent/jobs', requireOwnerGate, requireRateLimit, (_req, res) => {
+    return res.json({ data: agentRunner.list().slice(0, 20).map(toAgentSummary) });
+  });
+
+  app.get('/api/agent/jobs/:id', requireOwnerGate, requireRateLimit, (req, res) => {
+    const job = agentRunner.get(String(req.params.id || ''));
+    if (!job) return res.status(404).json({ error: 'Agent job not found.' });
+    return res.json({ data: job });
+  });
+
+  app.post('/api/agent/jobs/:id/cancel', requireOwnerGate, requireRateLimit, (req, res) => {
+    const ok = agentRunner.cancel(String(req.params.id || ''));
+    if (!ok) return res.status(404).json({ error: 'Agent job not found.' });
+    return res.json({ data: { cancelled: true } });
   });
 
   // 6. Client assets handling (Vite middleware in dev, static dist in production)

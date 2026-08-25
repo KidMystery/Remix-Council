@@ -82,6 +82,15 @@ const FINANCE_KEYWORDS = [
   'income statement', 'unit economics', 'tax', 'margin', 'forecast',
 ];
 
+/**
+ * Finance terms too short or generic for substring matching (e.g. "cost"
+ * inside "costume") — matched on word boundaries instead.
+ */
+const FINANCE_BOUNDARY_KEYWORDS = [
+  'cost', 'costs', 'price', 'prices', 'pricing', 'quote', 'quotes',
+  'estimate', 'estimates', 'estimating', 'invoice', 'bid', 'bids',
+];
+
 const CREATIVE_KEYWORDS = [
   'story', 'fiction', 'creative', 'narrative', 'poem', 'brainstorm ideas',
   'brand name', 'tagline', 'marketing copy', 'ad copy', 'worldbuilding',
@@ -116,6 +125,7 @@ export function detectTaskDomain(
   if (CODE_KEYWORDS.some((kw) => q.includes(kw))) return 'code';
   if (MATH_KEYWORDS.some((kw) => q.includes(kw))) return 'math';
   if (FINANCE_KEYWORDS.some((kw) => q.includes(kw))) return 'finance';
+  if (FINANCE_BOUNDARY_KEYWORDS.some((kw) => new RegExp(`\\b${kw}\\b`).test(q))) return 'finance';
   if (CREATIVE_KEYWORDS.some((kw) => q.includes(kw))) return 'creative';
   return 'general';
 }

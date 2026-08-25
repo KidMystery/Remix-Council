@@ -12,17 +12,20 @@ import {
   X,
   Mic,
 } from 'lucide-react';
-import type { AttachedFile } from '../types';
-import { extractCodeFromArchive } from '../lib/zipReader';
-import { extractTextFromPDF } from '../lib/pdfUtils';
+import type { AttachedFile, EvidenceRecord } from '../types';
+import { ingestFile } from '../lib/evidenceIngest';
+import { collectRunBlockers } from '../lib/evidence';
+import { EvidenceDocket } from './EvidenceDocket';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 
 export interface ComposerProps {
-  onSend: (query: string, attachedFiles: AttachedFile[], isFollowUp: boolean) => void;
+  onSend: (query: string, attachedFiles: AttachedFile[], isFollowUp: boolean, evidence: EvidenceRecord[]) => void;
   isDeliberating: boolean;
   onStop?: () => void;
   estimatedCost?: number;
   estimatedTokens?: number;
+  /** Prefill from an Oracle Case brief. Operator still presses Deliberate. */
+  initialQuery?: string;
 }
 
 export const Composer: React.FC<ComposerProps> = ({
@@ -31,9 +34,14 @@ export const Composer: React.FC<ComposerProps> = ({
   onStop,
   estimatedCost = 0,
   estimatedTokens = 0,
+  initialQuery,
 }) => {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(initialQuery || '');
+  useEffect(() => {
+    if (initialQuery) setQuery(initialQuery);
+  }, [initialQuery]);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const [evidence, setEvidence] = useState<EvidenceRecord[]>([]);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [topicMode, setTopicMode] = useState<'fresh' | 'followup'>('fresh');
@@ -72,7 +80,7 @@ export const Composer: React.FC<ComposerProps> = ({
     if (!query.trim() && attachedFiles.length === 0) return;
     if (isDeliberating || isExtracting) return;
 
-    onSend(query.trim(), attachedFiles, topicMode === 'followup');
+    onSend(query.trim(), attachedFiles, topicMode === 'followup', evidence);
     setQuery('');
     setAttachedFiles([]);
     if (textareaRef.current) {
@@ -91,44 +99,21 @@ export const Composer: React.FC<ComposerProps> = ({
     if (!files || files.length === 0) return;
     setIsExtracting(true);
     const newFiles: AttachedFile[] = [];
+    const newEvidence: EvidenceRecord[] = [];
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const name = file.name;
-      const lower = name.toLowerCase();
-
       try {
-        if (lower.endsWith('.zip') || lower.endsWith('.rar') || lower.endsWith('.tar') || lower.endsWith('.gz')) {
-          const result = await extractCodeFromArchive(file);
-          newFiles.push({
-            name,
-            content: result.formattedContext,
-            size: file.size,
-            type: result.archiveType,
-          });
-        } else if (lower.endsWith('.pdf')) {
-          const text = await extractTextFromPDF(file);
-          newFiles.push({
-            name,
-            content: text,
-            size: file.size,
-            type: 'pdf',
-          });
-        } else {
-          const text = await file.text();
-          newFiles.push({
-            name,
-            content: text,
-            size: file.size,
-            type: file.type || 'text/plain',
-          });
-        }
+        const ingested = await ingestFile(file);
+        newFiles.push(ingested.attached);
+        newEvidence.push(ingested.evidence);
       } catch (err: any) {
-        console.error(`Failed to process file ${name}:`, err);
+        console.error(`[evidence] Failed to ingest ${file.name}:`, err);
       }
     }
 
     setAttachedFiles((prev) => [...prev, ...newFiles]);
+    setEvidence((prev) => [...prev, ...newEvidence]);
     setIsExtracting(false);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -173,10 +158,14 @@ export const Composer: React.FC<ComposerProps> = ({
           isDraggingOver ? 'border-cyan-400 ring-2 ring-cyan-400/40 bg-cyan-950/20' : 'border-slate-700/80'
         }`}
       >
-        {/* Large attachment storage warning */}
-        {attachedFiles.some((f) => (f.content || '').length > 8000) && (
-          <div className="mb-2 px-3 py-1.5 rounded-lg bg-amber-950/70 border border-amber-600/40 text-amber-300 text-[11px] leading-snug">
-            ⚠️ A large attachment will be truncated to ~8,000 characters in local storage. Use Drive sync or attach smaller files for full fidelity.
+        {evidence.length > 0 && (
+          <div className="mb-2">
+            <EvidenceDocket
+              compact
+              evidence={evidence}
+              blockers={collectRunBlockers({ evidence, personas: [] })}
+              emptyHint="Exhibits are stored on this device. Session sync never carries the file body."
+            />
           </div>
         )}
 

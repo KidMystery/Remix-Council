@@ -3,7 +3,12 @@ import { useSessionManager } from './hooks/useSessionManager';
 import { useModelRecommendations } from './hooks/useModelRecommendations';
 import { useTheme } from './hooks/useTheme';
 import { fetchCouncilModels } from './lib/openrouter';
-import { applyPreset, MODEL_PRESETS, type PresetId } from './lib/presets';
+import { applyPreset, MODEL_PRESETS, presetTierFor, type PresetId } from './lib/presets';
+import { seatCouncilRoster } from './lib/chamberLabs';
+import {
+  shouldAutoCreateInitialSession,
+  reconcileFreePresetWithModels,
+} from './lib/chamberGuards';
 import { INITIAL_PERSONAS, defaultSynthesizer } from './data';
 import type {
   Persona,
@@ -21,6 +26,8 @@ import { CouncilSidebar } from './components/council/CouncilSidebar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { StorageSyncModal } from './components/StorageSyncModal';
 import { UnifiedToast } from './components/UnifiedToast';
+import type { ChamberHandoff } from './lib/chamberHandoff';
+import { summarizeTitle } from './lib/titleUtils';
 
 const SETTINGS_KEYS = {
   enableChunking: 'council_enable_chunking',
@@ -58,7 +65,7 @@ export default function App() {
   const [synthesizer, setSynthesizer] = useState<Persona>(defaultSynthesizer);
   // Default is the working cheap tier — the free tier is opt-in (its models
   // rotate and are verified against the live catalog before use).
-  const [activePresetId, setActivePresetId] = useState<PresetId>('balanced_quality');
+  const [activePresetId, setActivePresetId] = useState<PresetId>('highest_quality');
   const [catalog, setCatalog] = useState<RawOpenRouterModel[]>([]);
   const { theme, setTheme } = useTheme();
 
@@ -97,6 +104,8 @@ export default function App() {
   const [maxRoundCostCeiling, setMaxRoundCostCeiling] = useState(0);
   const [stopAfterStage1, setStopAfterStage1] = useState(false);
   const [useSingleModelForSimple, setUseSingleModelForSimple] = useState(false);
+  // Confidence Ledger — opt-in Chamber add-on (default off).
+  const [outcomeTrackingEnabled, setOutcomeTrackingEnabled] = useState(false);
   const [archivistRecentRounds, setArchivistRecentRounds] = useState(2);
   const [disableFallback, setDisableFallback] = useState(false);
   const [disableLoadingOverlay, setDisableLoadingOverlay] = useState(false);
@@ -123,6 +132,7 @@ export default function App() {
     activeSession,
     activeSessionId,
     createSession,
+    patchSession,
     selectSession,
     renameSession,
     deleteSession,
@@ -141,6 +151,7 @@ export default function App() {
     saveDestination,
     autoSaveState,
     flushNow,
+    isLoading,
   } = useSessionManager();
 
   // Load the model catalog on mount.
@@ -150,16 +161,25 @@ export default function App() {
       .catch((err) => console.warn('[App] Catalog load notice:', err.message));
   }, []);
 
-  // Create an initial session if none exists.
+  // Create an initial session if none exists — but only AFTER the session
+  // manager has finished loading local/Drive storage. Creating one while the
+  // load is in flight produced a blank "New Deliberation" that merged into
+  // the synced thread set on every unsigned visit.
   const createdRef = useRef(false);
   useEffect(() => {
     if (createdRef.current) return;
-    if (sessions.length === 0 && !activeSessionId) {
+    if (
+      shouldAutoCreateInitialSession({
+        isLoading,
+        sessionCount: sessions.length,
+        hasActiveSessionId: Boolean(activeSessionId),
+      })
+    ) {
       createdRef.current = true;
       createSession('New Deliberation', personas, synthesizer, activePresetId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions.length, activeSessionId]);
+  }, [isLoading, sessions.length, activeSessionId]);
 
   const showToast = useCallback((message: string, type: ToastMessage['type'] = 'info', details?: string) => {
     const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -172,6 +192,54 @@ export default function App() {
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  // Manual model picks win: a free-tier preset whose roster contains a
+  // hand-picked paid model leaves free mode EXPLICITLY (with a toast) instead
+  // of erroring mid-deliberation and forcing the owner to re-apply a preset
+  // that wipes their choices. The "free never upgrades to paid silently"
+  // invariant is untouched: this is a visible preset change, never an
+  // in-mode upgrade.
+  const presetJustAppliedRef = useRef(0);
+  const reconcilePresetWithModels = useCallback(
+    (nextPersonas: Persona[], nextSynthesizer: Persona) => {
+      const result = reconcileFreePresetWithModels({
+        activePresetId,
+        personaModels: nextPersonas.filter((p) => p.enabled !== false).map((p) => p.model),
+        synthesizerModel: nextSynthesizer?.model,
+        catalog,
+        presetJustAppliedUntil: presetJustAppliedRef.current,
+      });
+      if (result.switchToPresetId && result.reason) {
+        setActivePresetId(result.switchToPresetId);
+        showToast(result.reason, 'warning');
+      }
+    },
+    [activePresetId, catalog, showToast]
+  );
+
+  const handleSetPersonas = useCallback(
+    (next: Persona[]) => {
+      setPersonas(next);
+      reconcilePresetWithModels(next, synthesizer);
+    },
+    [reconcilePresetWithModels, synthesizer]
+  );
+
+  const handleSetSynthesizer = useCallback(
+    (next: Persona) => {
+      setSynthesizer(next);
+      reconcilePresetWithModels(personas, next);
+    },
+    [reconcilePresetWithModels, personas]
+  );
+
+  // Reconcile once when the live catalog arrives (covers sessions restored
+  // with paid picks sitting under a free preset from a previous visit).
+  useEffect(() => {
+    if (!catalog || catalog.length === 0) return;
+    reconcilePresetWithModels(personas, synthesizer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalog.length]);
 
   const handleSignIn = useCallback(async () => {
     try {
@@ -188,11 +256,37 @@ export default function App() {
   }, [signOut, showToast]);
 
   const handleApplyPreset = useCallback((presetId: PresetId) => {
+    presetJustAppliedRef.current = Date.now() + 3000;
     setActivePresetId(presetId);
-    const { updatedPersonas, updatedSynthesizer } = applyPreset(presetId, personas, synthesizer, catalog);
+    const { updatedPersonas, updatedSynthesizer } = applyPreset(
+      presetId,
+      personas,
+      synthesizer,
+      catalog,
+      { autoSelect: autoSelectModels }
+    );
     setPersonas(updatedPersonas);
     setSynthesizer(updatedSynthesizer);
-  }, [personas, synthesizer, catalog]);
+  }, [personas, synthesizer, catalog, autoSelectModels]);
+
+  // $0 preload: Auto on + catalog/roster change reseats unique live labs. No completions.
+  const lastSeatKeyRef = useRef('');
+  useEffect(() => {
+    if (!autoSelectModels || !catalog || catalog.length === 0) return;
+    const rosterKey = `${activePresetId}|${catalog.map((m) => m.id).join(',')}|${personas.map((p) => p.id).join(',')}|${synthesizer.id}`;
+    if (lastSeatKeyRef.current === rosterKey) return;
+    lastSeatKeyRef.current = rosterKey;
+    const seated = seatCouncilRoster({
+      personas,
+      synthesizer,
+      catalog,
+      budget: presetTierFor(activePresetId),
+    });
+    setPersonas(seated.updatedPersonas);
+    setSynthesizer(seated.updatedSynthesizer);
+    if (seated.plan.toast) showToast(seated.plan.toast, 'warning');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSelectModels, catalog, activePresetId, personas.map((p) => p.id).join(','), synthesizer.id]);
 
   const handleExportSessions = useCallback(() => {
     const json = exportSessionsJSON();
@@ -206,6 +300,16 @@ export default function App() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, [exportSessionsJSON]);
+
+  const handleOracleHandoff = useCallback(
+    (handoff: ChamberHandoff) => {
+      const title = `Case — ${summarizeTitle(handoff.question) || handoff.threadTitle || 'Oracle'}`;
+      createSession(title, personas, synthesizer, activePresetId, { handoff });
+      setView('chamber');
+      showToast('Case brief opened in the Chamber. Review it, then Deliberate. Nothing is written to the Bible yet.', 'info');
+    },
+    [createSession, personas, synthesizer, activePresetId, showToast]
+  );
 
   const handleImportSessions = useCallback((file: File, mode: 'merge' | 'replace' = 'merge') => {
     const reader = new FileReader();
@@ -320,6 +424,7 @@ export default function App() {
               archivistRecentRounds={archivistRecentRounds}
               disableFallback={disableFallback}
               useSingleModelForSimple={useSingleModelForSimple}
+              outcomeTrackingEnabled={outcomeTrackingEnabled}
               autoSaveState={autoSaveState}
               lastSavedAt={lastSavedAt}
               isSaving={isSaving}
@@ -327,6 +432,7 @@ export default function App() {
               saveDestination={saveDestination}
               onOpenSettings={() => setIsSettingsOpen(true)}
               showToast={showToast}
+              onPatchSession={patchSession}
             />
           ) : view === 'nexus' ? (
             <NexusLabView
@@ -354,9 +460,9 @@ export default function App() {
         onClose={() => setIsSettingsOpen(false)}
         initialTab={settingsInitialTab}
         personas={personas}
-        setPersonas={setPersonas}
+        setPersonas={handleSetPersonas}
         synthesizer={synthesizer}
-        setSynthesizer={setSynthesizer}
+        setSynthesizer={handleSetSynthesizer}
         theme={theme}
         setTheme={setTheme}
         maxTokens={maxTokens}
@@ -389,6 +495,8 @@ export default function App() {
         stopAfterStage1={stopAfterStage1}
         setStopAfterStage1={setStopAfterStage1}
         useSingleModelForSimple={useSingleModelForSimple}
+        outcomeTrackingEnabled={outcomeTrackingEnabled}
+        setOutcomeTrackingEnabled={setOutcomeTrackingEnabled}
         setUseSingleModelForSimple={setUseSingleModelForSimple}
         archivistRecentRounds={archivistRecentRounds}
         setArchivistRecentRounds={setArchivistRecentRounds}

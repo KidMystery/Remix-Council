@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Plus,
   Trash2,
@@ -26,9 +26,6 @@ import {
   Cloud,
   Sliders,
   ChevronDown,
-  Search,
-  Dices,
-  Shuffle,
   Pencil,
   Eraser,
   AlertCircle,
@@ -43,16 +40,40 @@ import {
   newOracleThread,
   loadOracleThreads,
   saveOracleThreads,
+  loadOracleTombstones,
+  saveOracleTombstones,
   loadGlobalBible,
   saveGlobalBible,
   exportOracleThreads,
   importOracleThreads,
-  ORACLE_MODEL_OPTIONS,
+  ORACLE_DEFAULT_MODEL,
   DEFAULT_MINI_DELIBERATION_MODELS,
   DEFAULT_ROTATION_ROSTER,
   VISION_SAFE_FALLBACK_MODEL,
   ORACLE_THREADS_UPDATED_EVENT,
 } from '../lib/oracleStore';
+import {
+  buildOracleModelOptions,
+  loadCustomOracleModels,
+  saveCustomOracleModels,
+  loadOracleDirectList,
+  saveOracleDirectList,
+  resolveRotationModel,
+  filterVisionSafeRoster,
+} from '../lib/oracleModelPool';
+import {
+  detectBriefingCandidates,
+  filterBriefingCandidates,
+  loadBriefingStore,
+  recordBriefingConvened,
+  dismissBriefingTopic,
+  capitalizeLabel,
+  ORACLE_BRIEFINGS_UPDATED_EVENT,
+} from '../lib/briefingDetector';
+import type { OracleCustomModel } from '../lib/oracleModelPool';
+import type { BriefingCandidate } from '../lib/briefingDetector';
+import { launchAgentJob, getAgentJob, cancelAgentJob, isAgentJobTerminal } from '../lib/agentClient';
+import type { AgentJobFull } from '../lib/agentClient';
 import { modelHasVision } from '../lib/modelScoring';
 import { streamOpenRouterCompletion } from '../lib/openrouter';
 import { streamWithTokenGovernor } from '../lib/tokenGovernor';
@@ -65,8 +86,12 @@ import {
   saveOracleToDrive,
   loadOracleFromDrive,
   mergeOracleThreads,
+  DriveUnreadError,
 } from '../lib/drivePersistence';
+import { addTombstone, AGENT_LOST_ON_REDEPLOY, DRIVE_UNREAD_MESSAGE, mergeTombstones } from '../lib/syncContract';
 import { copyToClipboard } from '../lib/clipboard';
+import { buildCaseBrief, parseChamberCommand, type ChamberHandoff } from '../lib/chamberHandoff';
+import { applyOracleRewrite, hydrateBible, renderBiblePrompt } from '../lib/bibleClaims';
 import { MessageMarkdown } from './MessageMarkdown';
 import type { RawOpenRouterModel } from '../types';
 
@@ -77,9 +102,9 @@ Never mention the Bibles or your internal reflection unless the user asks.`;
 
 const REFLECT_PROMPT = `You are The Oracle's fast internal planner. Given the Living Memory and the user's latest message, produce a short plan (2-4 bullet points) for your answer and note any Bible facts that will need updating. Keep it under 60 words.`;
 
-const BIBLE_SYSTEM_PROMPT = `You maintain a thread's Living Bible: a concise, current, self-contained summary of everything established in this conversation (facts, decisions, preferences, constraints, open questions). Merge new confirmed information, preserve user-stated facts verbatim, drop stale or contradicted details. Use compact sections. Return ONLY the updated Bible — no preamble, no code fences.`;
+const BIBLE_SYSTEM_PROMPT = `You maintain a thread's working notes (unsealed). Lines under LAW are sealed and must be copied forward verbatim — never reword, drop, or contradict them. Add only new working notes. Return ONLY the notes as short bullets — no preamble, no code fences.`;
 
-const GLOBAL_BIBLE_SYSTEM_PROMPT = `You maintain a shared Global Bible: durable, cross-conversation knowledge distilled from all threads. Merge the incoming digest, deduplicate, keep it concise and organized by topic. Return ONLY the updated Global Bible — no preamble, no code fences.`;
+const GLOBAL_BIBLE_SYSTEM_PROMPT = `You maintain unsealed working notes for a shared Global Bible. Lines under LAW are sealed: copy them forward verbatim. Never rewrite or omit LAW. Add only new durable notes (preferences, facts). Return ONLY short bullets — no preamble, no code fences.`;
 
 function stripFences(text: string): string {
   return (text || '').replace(/^```[a-zA-Z]*\s*\n?/gm, '').replace(/```$/gm, '').trim();
@@ -98,6 +123,7 @@ export interface OracleViewProps {
   catalog?: RawOpenRouterModel[];
   availableModels?: { id: string; name: string }[];
   onOpenSettings?: (tab?: 'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account') => void;
+  onHandoffToChamber?: (handoff: ChamberHandoff) => void;
 }
 
 export const OracleView: React.FC<OracleViewProps> = ({
@@ -105,6 +131,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
   catalog = [],
   availableModels = [],
   onOpenSettings,
+  onHandoffToChamber,
 }) => {
   const [threads, setThreads] = useState<OracleThread[]>(() => loadOracleThreads());
   const [activeId, setActiveId] = useState<string | null>(() => {
@@ -117,12 +144,15 @@ export const OracleView: React.FC<OracleViewProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [driveSyncState, setDriveSyncState] = useState<'idle' | 'syncing' | 'saved' | 'error'>('idle');
   const [lastDriveSync, setLastDriveSync] = useState<number | null>(null);
-  const [showRosterModal, setShowRosterModal] = useState(false);
-  const [searchModelQuery, setSearchModelQuery] = useState('');
+  const [persistError, setPersistError] = useState<string | null>(null);
+  const deletedRef = useRef(loadOracleTombstones());
+  const [customModels, setCustomModels] = useState<OracleCustomModel[]>(() => loadCustomOracleModels());
+  const [briefingStoreVersion, setBriefingStoreVersion] = useState(0);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
+  // Server-run briefing (the agent loop lives in server.ts; survives tab close).
+  const [serverBriefingJob, setServerBriefingJob] = useState<AgentJobFull | null>(null);
+  const serverBriefingIdRef = useRef<string | null>(null);
   const [threadDraftTitle, setThreadDraftTitle] = useState('');
-  const [randomizeFlash, setRandomizeFlash] = useState(false);
-  const [randomizedModelName, setRandomizedModelName] = useState<string | null>(null);
   const [confirmClearThreadId, setConfirmClearThreadId] = useState<string | null>(null);
 
   const threadsRef = useRef(threads);
@@ -140,9 +170,16 @@ export const OracleView: React.FC<OracleViewProps> = ({
       threadsRef.current = loaded;
       setThreads(loaded);
       setActiveId((prev) => (loaded.some((t) => t.id === prev) ? prev : loaded[0]?.id || null));
+      // The custom model pool / direct palette may have changed too.
+      setCustomModels(loadCustomOracleModels());
     };
+    const handleBriefingsUpdated = () => setBriefingStoreVersion((v) => v + 1);
     window.addEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
-    return () => window.removeEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
+    window.addEventListener(ORACLE_BRIEFINGS_UPDATED_EVENT, handleBriefingsUpdated);
+    return () => {
+      window.removeEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
+      window.removeEventListener(ORACLE_BRIEFINGS_UPDATED_EVENT, handleBriefingsUpdated);
+    };
   }, []);
 
   const { speak, stop, speakingId, loadingId, voice: activeVoice, setVoice, availableVoices } = useSpeech();
@@ -160,42 +197,32 @@ export const OracleView: React.FC<OracleViewProps> = ({
     }
   }, [threads.length]);
 
-  // Combine built-in curated options with live catalog models and availableModels
-  const combinedModelOptions = React.useMemo(() => {
-    const map = new Map<string, { id: string; name: string; tag?: string; vision: boolean }>();
-    // Seed curated
-    for (const opt of ORACLE_MODEL_OPTIONS) {
-      map.set(opt.id, opt);
+  // Curated roster + the owner's custom models, each classified against the
+  // live catalog (source of truth). Used by the vision guard and rotation.
+  const combinedModelOptions = useMemo(
+    () => buildOracleModelOptions(catalog, customModels),
+    [catalog, customModels]
+  );
+
+  // Unasked Verdict: locally detect topics the owner keeps circling across
+  // threads (zero tokens) and offer a council briefing on the top candidate.
+  const briefingCandidate: BriefingCandidate | null = useMemo(() => {
+    try {
+      const store = loadBriefingStore();
+      if (!store.settings.enabled) return null;
+      const candidates = filterBriefingCandidates(
+        detectBriefingCandidates(threads, {
+          minMentions: store.settings.minMentions,
+          lookbackDays: store.settings.lookbackDays,
+        }),
+        store
+      );
+      return candidates[0] || null;
+    } catch {
+      return null;
     }
-    // Seed available (vision flag from the live catalog when it's loaded)
-    for (const m of availableModels) {
-      if (!map.has(m.id)) {
-        const entry = Array.isArray(catalog)
-          ? catalog.find((c) => c?.id?.toLowerCase() === m.id.toLowerCase())
-          : undefined;
-        map.set(m.id, {
-          id: m.id,
-          name: m.name || m.id.split('/').pop() || m.id,
-          tag: 'Catalog',
-          vision: entry ? modelHasVision(entry) : true,
-        });
-      }
-    }
-    // Seed catalog
-    if (Array.isArray(catalog)) {
-      for (const m of catalog) {
-        if (!map.has(m.id)) {
-          map.set(m.id, {
-            id: m.id,
-            name: m.name || m.id.split('/').pop() || m.id,
-            tag: m.pricing?.prompt === '0' || m.id.endsWith(':free') ? 'Free Tier' : 'Catalog',
-            vision: Boolean(m.architecture?.modality?.includes('image->') || m.description?.toLowerCase().includes('vision')),
-          });
-        }
-      }
-    }
-    return Array.from(map.values());
-  }, [availableModels, catalog]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threads, briefingStoreVersion]);
 
   // Drive sync
   useEffect(() => {
@@ -205,16 +232,28 @@ export const OracleView: React.FC<OracleViewProps> = ({
       setDriveSyncState('syncing');
       try {
         const remote = await loadOracleFromDrive();
-        if (!cancelled && remote && remote.threads.length > 0) {
-          const { merged } = mergeOracleThreads(threadsRef.current, remote.threads);
+        if (!cancelled && remote) {
+          const { merged, deleted } = mergeOracleThreads(
+            threadsRef.current,
+            remote.threads,
+            deletedRef.current,
+            remote.deleted
+          );
+          deletedRef.current = deleted;
+          saveOracleTombstones(deleted);
           threadsRef.current = merged;
           setThreads(merged);
-          saveOracleThreads(merged);
+          try {
+            saveOracleThreads(merged);
+          } catch (err: any) {
+            setPersistError(err?.message || 'Could not save locally.');
+          }
           setActiveId((prev) => (merged.some((t: any) => t.id === prev) ? prev : merged[0]?.id || null));
           if (remote.globalBible) {
-            globalBibleRef.current = remote.globalBible;
-            setGlobalBible(remote.globalBible);
-            saveGlobalBible(remote.globalBible);
+            const gb = hydrateBible(remote.globalBible);
+            globalBibleRef.current = gb;
+            setGlobalBible(gb);
+            saveGlobalBible(gb);
           }
           setLastDriveSync(Date.now());
         }
@@ -222,6 +261,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
       } catch (err) {
         console.warn('[Oracle] Drive load failed:', err);
         setDriveSyncState('error');
+        if (err instanceof DriveUnreadError) {
+          setPersistError(DRIVE_UNREAD_MESSAGE);
+        }
       }
     })();
     return () => {
@@ -236,14 +278,21 @@ export const OracleView: React.FC<OracleViewProps> = ({
     if (driveSaveTimer.current) clearTimeout(driveSaveTimer.current);
     driveSaveTimer.current = setTimeout(() => {
       setDriveSyncState('syncing');
-      saveOracleToDrive(threadsRef.current, globalBibleRef.current)
-        .then(() => {
+      saveOracleToDrive(threadsRef.current, globalBibleRef.current, deletedRef.current)
+        .then((doc) => {
+          deletedRef.current = mergeTombstones(deletedRef.current, doc.deleted);
+          saveOracleTombstones(deletedRef.current);
+          threadsRef.current = doc.threads;
+          setThreads(doc.threads);
           setDriveSyncState('saved');
           setLastDriveSync(Date.now());
         })
         .catch((err) => {
           console.warn('[Oracle] Drive save failed:', err);
           setDriveSyncState('error');
+          if (err instanceof DriveUnreadError) {
+            setPersistError(DRIVE_UNREAD_MESSAGE);
+          }
         });
     }, 4000);
     return () => {
@@ -251,28 +300,55 @@ export const OracleView: React.FC<OracleViewProps> = ({
     };
   }, [threads, globalBible, isSignedIn]);
 
-  const commitThread = useCallback((updated: OracleThread) => {
-    const next = threadsRef.current.map((t) => (t.id === updated.id ? updated : t));
+  const persistAll = useCallback((next: OracleThread[]) => {
     threadsRef.current = next;
     setThreads(next);
-    saveOracleThreads(next);
+    try {
+      saveOracleThreads(next);
+      setPersistError(null);
+    } catch (err: any) {
+      setPersistError(
+        err?.message || 'Could not save this turn locally (storage full). Last good copy is still on this device.'
+      );
+    }
   }, []);
+
+  const commitThread = useCallback((updated: OracleThread) => {
+    persistAll(threadsRef.current.map((t) => (t.id === updated.id ? updated : t)));
+  }, [persistAll]);
 
   const handleNewThread = () => {
     const t = newOracleThread(activeThread?.model);
+    if (activeThread) {
+      // New threads inherit the active thread's mode, rosters, and toggles —
+      // the models you added to Auto-Rotate are the ones that rotate.
+      t.mode = activeThread.mode || 'direct';
+      t.miniDeliberationModels = [
+        ...(activeThread.miniDeliberationModels && activeThread.miniDeliberationModels.length > 0
+          ? activeThread.miniDeliberationModels
+          : DEFAULT_MINI_DELIBERATION_MODELS),
+      ];
+      t.rotationModels = [
+        ...(activeThread.rotationModels && activeThread.rotationModels.length > 0
+          ? activeThread.rotationModels
+          : DEFAULT_ROTATION_ROSTER),
+      ];
+      t.reflectEnabled = activeThread.reflectEnabled;
+      t.webEnabled = activeThread.webEnabled;
+      t.rotateVoices = activeThread.rotateVoices;
+      t.rotateVoiceModels = activeThread.rotateVoiceModels;
+    }
     const next = [t, ...threadsRef.current];
-    threadsRef.current = next;
-    setThreads(next);
+    persistAll(next);
     setActiveId(t.id);
-    saveOracleThreads(next);
   };
 
   const handleDeleteThread = (id: string) => {
     const next = threadsRef.current.filter((t) => t.id !== id);
-    threadsRef.current = next;
-    setThreads(next);
+    deletedRef.current = addTombstone(deletedRef.current, id);
+    saveOracleTombstones(deletedRef.current);
+    persistAll(next);
     if (activeId === id) setActiveId(next[0]?.id || null);
-    saveOracleThreads(next);
   };
 
   const patchThread = (id: string, patch: Partial<OracleThread>) => {
@@ -281,35 +357,140 @@ export const OracleView: React.FC<OracleViewProps> = ({
     commitThread({ ...thread, ...patch, updatedAt: Date.now() });
   };
 
-  const handleRandomizeModel = () => {
-    if (!activeId || combinedModelOptions.length === 0) return;
-    const currentModelId = activeThread?.model;
-    const choices = combinedModelOptions.filter((m) => m.id !== currentModelId);
-    const pool = choices.length > 0 ? choices : combinedModelOptions;
-    const picked = pool[Math.floor(Math.random() * pool.length)];
-    if (!picked) return;
+  const handleConveneBriefing = () => {
+    const candidate = briefingCandidate;
+    if (!candidate || isBusy) return;
+    const t = newOracleThread(activeThread?.model || ORACLE_DEFAULT_MODEL);
+    t.title = `Council Briefing — ${capitalizeLabel(candidate.label)}`;
+    t.mode = 'mini_deliberation';
+    t.miniDeliberationModels = [
+      ...(activeThread?.miniDeliberationModels && activeThread.miniDeliberationModels.length > 0
+        ? activeThread.miniDeliberationModels
+        : DEFAULT_MINI_DELIBERATION_MODELS),
+    ];
+    t.webEnabled = activeThread?.webEnabled ?? true;
+    t.reflectEnabled = activeThread?.reflectEnabled ?? true;
+    t.rotateVoices = false;
+    persistAll([t, ...threadsRef.current]);
+    setActiveId(t.id);
+    recordBriefingConvened(candidate.key);
+    const text = `Please convene a full mini-council on this recurring question: ${candidate.label}\n\nMy latest framing:\n${candidate.sample}`;
+    void handleSend(text, [], [], undefined, false, t.id);
+  };
 
-    if (activeThread?.mode === 'mini_deliberation') {
-      // Pick 3 random distinct models for deliberation
-      const shuffled = [...combinedModelOptions].sort(() => 0.5 - Math.random());
-      const selected = shuffled.slice(0, 3).map((m) => m.id);
-      patchThread(activeId, { miniDeliberationModels: selected });
-      setRandomizedModelName(`Deliberation Roster (${selected.length} Models)`);
-    } else if (activeThread?.mode === 'rotation') {
-      // Pick 4 random models for rotation
-      const shuffled = [...combinedModelOptions].sort(() => 0.5 - Math.random());
-      const selected = shuffled.slice(0, 4).map((m) => m.id);
-      patchThread(activeId, { rotationModels: selected });
-      setRandomizedModelName(`Rotation Roster (${selected.length} Models)`);
-    } else {
-      // Direct model pick
-      patchThread(activeId, { model: picked.id });
-      setRandomizedModelName(picked.name);
+  const handleDismissBriefing = () => {
+    if (briefingCandidate) dismissBriefingTopic(briefingCandidate.key);
+  };
+
+  /**
+   * Server-run briefing: the agent loop plans, researches (live citations),
+   * and deliberates inside server.ts, then folds the verdict back into a
+   * briefing thread. Survives tab close.
+   */
+  const handleConveneBriefingOnServer = async () => {
+    const candidate = briefingCandidate;
+    if (!candidate || isBusy || serverBriefingIdRef.current) return;
+    const model = activeThread?.model || ORACLE_DEFAULT_MODEL;
+    try {
+      const { id } = await launchAgentJob({
+        goal: `Convene a council briefing on this recurring question: ${candidate.label}. My latest framing: ${candidate.sample}`,
+        mode: 'oracle',
+        model,
+        budget: 'cheap',
+        maxResearchQueries: 3,
+        maxDeliberationPasses: 1,
+        maxJobCostUSD: 1.0,
+      });
+      serverBriefingIdRef.current = id;
+      setServerBriefingJob({
+        id,
+        goal: candidate.label,
+        mode: 'oracle',
+        status: 'planning',
+        progress: { phase: 'planning', detail: 'Server briefing launched — you can close this tab.' },
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        usageUSD: 0,
+        citations: 0,
+        plan: null,
+        research: [],
+        passes: [],
+        verdict: '',
+        citationsList: [],
+      });
+      recordBriefingConvened(candidate.key);
+      const tick = async () => {
+        const jobId = serverBriefingIdRef.current;
+        if (!jobId) return;
+        try {
+          const job = await getAgentJob(jobId);
+          if (!job) {
+            serverBriefingIdRef.current = null;
+            setServerBriefingJob(null);
+            setPersistError(AGENT_LOST_ON_REDEPLOY);
+            return;
+          }
+          setServerBriefingJob(job);
+          if (!isAgentJobTerminal(job.status)) {
+            window.setTimeout(tick, 4000);
+            return;
+          }
+          serverBriefingIdRef.current = null;
+          // Fold the verdict into a new briefing thread.
+          const t = newOracleThread(model);
+          t.title = `Council Briefing — ${capitalizeLabel(candidate.label)}`;
+          t.mode = 'mini_deliberation';
+          t.webEnabled = activeThread?.webEnabled ?? true;
+          t.reflectEnabled = activeThread?.reflectEnabled ?? true;
+          t.rotateVoices = false;
+          const sourcesBlock =
+            (job.citationsList || []).length > 0
+              ? `\n\n**Sources**\n${job.citationsList
+                  .slice(0, 8)
+                  .map((s) => `- [${s.title || s.url}](${s.url})`)
+                  .join('\n')}`
+              : '';
+          const content =
+            job.status === 'done'
+              ? `${job.verdict}${sourcesBlock}`
+              : `⚠️ The server briefing ${job.status === 'stopped_budget' ? 'hit its cost cap before finishing' : job.status === 'failed' ? 'failed' : 'was interrupted'}. What it had so far:\n\n${job.passes[job.passes.length - 1]?.consensus || job.error || '(nothing)'}`;
+          t.messages = [
+            {
+              id: `brief_${Date.now()}`,
+              role: 'user',
+              content: `Please convene a full mini-council on this recurring question: ${candidate.label}\n\nMy latest framing:\n${candidate.sample}`,
+              timestamp: Date.now(),
+            },
+            {
+              id: `brief_${Date.now()}_a`,
+              role: 'assistant',
+              content,
+              model,
+              timestamp: Date.now() + 1,
+            },
+          ];
+          t.updatedAt = Date.now();
+          persistAll([t, ...threadsRef.current]);
+          setActiveId(t.id);
+          setServerBriefingJob(null);
+        } catch (err) {
+          console.warn('[Oracle] Server briefing poll failed:', err);
+          window.setTimeout(tick, 6000);
+        }
+      };
+      window.setTimeout(tick, 1500);
+    } catch (err: any) {
+      console.warn('[Oracle] Server briefing launch failed:', err);
+      setServerBriefingJob(null);
     }
+  };
 
-    setRandomizeFlash(true);
-    setTimeout(() => setRandomizeFlash(false), 700);
-    setTimeout(() => setRandomizedModelName(null), 3500);
+  const handleCancelServerBriefing = () => {
+    const id = serverBriefingIdRef.current;
+    if (!id) return;
+    void cancelAgentJob(id).catch(() => {});
+    serverBriefingIdRef.current = null;
+    setServerBriefingJob(null);
   };
 
   const handleClearActiveThreadMessages = (threadId: string) => {
@@ -365,16 +546,38 @@ export const OracleView: React.FC<OracleViewProps> = ({
     );
   };
 
+  const handoffToChamber = (questionOverride?: string) => {
+    if (!onHandoffToChamber) return;
+    const thread = threadsRef.current.find((t) => t.id === activeId) || threadsRef.current[0];
+    if (!thread) return;
+    const handoff = buildCaseBrief({
+      threadId: thread.id,
+      threadTitle: thread.title,
+      question: questionOverride,
+      messages: thread.messages,
+      threadBible: renderBiblePrompt(thread.bible),
+      globalBible: renderBiblePrompt(globalBibleRef.current),
+    });
+    onHandoffToChamber(handoff);
+  };
+
   const handleSend = async (
     text: string,
     images: OracleImage[],
     files: OracleTextFile[],
     modelOverride?: string,
-    isRetry = false
+    isRetry = false,
+    threadIdOverride?: string
   ) => {
+    const cmd = parseChamberCommand(text);
+    if (cmd.isCommand && onHandoffToChamber) {
+      handoffToChamber(cmd.question);
+      return;
+    }
     if (!text.trim() && images.length === 0 && files.length === 0) return;
-    if (!activeId || isBusy) return;
-    const thread = threadsRef.current.find((t) => t.id === activeId);
+    const targetThreadId = threadIdOverride || activeId;
+    if (!targetThreadId || isBusy) return;
+    const thread = threadsRef.current.find((t) => t.id === targetThreadId);
     if (!thread) return;
 
     const controller = new AbortController();
@@ -415,7 +618,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
     const filesBlock = files.length
       ? '\n\n[Attached Files]:\n' + files.map((f) => `--- ${f.name} ---\n${f.content}`).join('\n\n')
       : '';
-    const contextBlock = `[Your Living Memory (Thread Bible)]:\n${latest.bible?.content || '(empty)'}\n\n[Global Bible]:\n${globalBibleRef.current.content || '(empty)'}`;
+    const contextBlock = `[Your Living Memory (Thread Bible)]:\n${renderBiblePrompt(latest.bible) || '(empty)'}\n\n[Global Bible]:\n${renderBiblePrompt(globalBibleRef.current) || '(empty)'}`;
 
     const mode = latest.mode || 'direct';
 
@@ -454,8 +657,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
           : enrichedText;
 
       // Vision guard: when images are attached, only models that can actually see
-      // them should run. Text-only models get swapped to a vision-capable
-      // fallback and the swap is surfaced in the answer header note.
+      // them should run. Text-only models (including custom entries) get dropped
+      // or swapped to a vision-capable fallback, and the swap is surfaced in the
+      // answer header note.
       const isModelVisionOk = (modelId: string): boolean => {
         const opt = combinedModelOptions.find((o) => o.id === modelId);
         if (opt) return opt.vision;
@@ -471,13 +675,17 @@ export const OracleView: React.FC<OracleViewProps> = ({
           latest.miniDeliberationModels && latest.miniDeliberationModels.length > 0
             ? latest.miniDeliberationModels
             : DEFAULT_MINI_DELIBERATION_MODELS;
-        const visionOk = roster.filter(isModelVisionOk);
-        if (visionOk.length === 0) {
-          visionSafePanelModels = [VISION_SAFE_FALLBACK_MODEL];
+        const { safe, dropped, usedFallback } = filterVisionSafeRoster(
+          roster,
+          isModelVisionOk,
+          VISION_SAFE_FALLBACK_MODEL
+        );
+        if (usedFallback) {
+          visionSafePanelModels = safe;
           visionNote = `No vision-capable models in the panel — all routed to ${VISION_SAFE_FALLBACK_MODEL.split('/').pop()}. `;
-        } else if (visionOk.length < roster.length) {
-          visionSafePanelModels = visionOk;
-          visionNote = `Panel limited to vision-capable models: ${visionOk.map((m) => m.split('/').pop()).join(', ')}. `;
+        } else if (dropped.length > 0) {
+          visionSafePanelModels = safe;
+          visionNote = `Panel limited to vision-capable models: ${safe.map((m) => m.split('/').pop()).join(', ')}. `;
         }
       }
 
@@ -579,11 +787,12 @@ export const OracleView: React.FC<OracleViewProps> = ({
         // --- DIRECT OR ROTATION MODE ---
         let selectedModel = effectiveModel;
         if (mode === 'rotation') {
-          const rotationList =
-            latest.rotationModels && latest.rotationModels.length > 0
-              ? latest.rotationModels
-              : DEFAULT_ROTATION_ROSTER;
-          selectedModel = rotationList[(latest.turnCount || 0) % rotationList.length];
+          // Deterministic cycling through the thread's roster (wrap-around).
+          selectedModel = resolveRotationModel(
+            latest.turnCount || 0,
+            latest.rotationModels,
+            DEFAULT_ROTATION_ROSTER
+          );
         }
 
         const voice = latest.rotateVoices ? pickVoice(latest.turnCount || 0) : null;
@@ -668,7 +877,11 @@ export const OracleView: React.FC<OracleViewProps> = ({
         });
         const newBible = stripFences(bibleRes.content || '');
         if (newBible) {
-          latest = { ...latest, bible: { content: newBible, updatedAt: Date.now() }, updatedAt: Date.now() };
+          latest = {
+            ...latest,
+            bible: applyOracleRewrite(latest.bible, newBible),
+            updatedAt: Date.now(),
+          };
           commitThread(latest);
         }
       } catch (err) {
@@ -696,10 +909,14 @@ export const OracleView: React.FC<OracleViewProps> = ({
         });
         const newGlobal = stripFences(gbRes.content || '');
         if (newGlobal) {
-          const nextGb = { content: newGlobal, updatedAt: Date.now() };
+          const nextGb = applyOracleRewrite(globalBibleRef.current, newGlobal);
           globalBibleRef.current = nextGb;
           setGlobalBible(nextGb);
-          saveGlobalBible(nextGb);
+          try {
+            saveGlobalBible(nextGb);
+          } catch (err: any) {
+            setPersistError(err?.message || 'Could not save the Bible (storage full).');
+          }
         }
       } catch (err) {
         console.warn('[Oracle] Global Bible background update failed:', err);
@@ -736,7 +953,10 @@ export const OracleView: React.FC<OracleViewProps> = ({
   };
 
   const handleExport = () => {
-    const json = exportOracleThreads(threadsRef.current, globalBibleRef.current);
+    const json = exportOracleThreads(threadsRef.current, globalBibleRef.current, {
+      customModels: loadCustomOracleModels(),
+      directList: loadOracleDirectList(),
+    });
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -754,14 +974,26 @@ export const OracleView: React.FC<OracleViewProps> = ({
       const result = importOracleThreads(String(reader.result || ''));
       if (result.success && result.threads) {
         const { merged } = mergeOracleThreads(threadsRef.current, result.threads);
-        threadsRef.current = merged;
-        setThreads(merged);
+        persistAll(merged);
         setActiveId(merged[0]?.id || null);
-        saveOracleThreads(merged);
         if (result.globalBible) {
-          globalBibleRef.current = result.globalBible;
-          setGlobalBible(result.globalBible);
-          saveGlobalBible(result.globalBible);
+          const gb = hydrateBible(result.globalBible);
+          globalBibleRef.current = gb;
+          setGlobalBible(gb);
+          saveGlobalBible(gb);
+        }
+        // Restore the custom model pool and Direct palette from the export.
+        if (result.extras?.customModels && result.extras.customModels.length > 0) {
+          const existing = new Set(loadCustomOracleModels().map((m) => m.id));
+          const mergedCustom = [
+            ...loadCustomOracleModels(),
+            ...result.extras.customModels.filter((m) => m && m.id && !existing.has(m.id)),
+          ];
+          saveCustomOracleModels(mergedCustom);
+          setCustomModels(loadCustomOracleModels());
+        }
+        if (result.extras?.directList && result.extras.directList.length > 0) {
+          saveOracleDirectList(result.extras.directList);
         }
       } else {
         console.warn('[Oracle] Import failed:', result.message);
@@ -832,6 +1064,18 @@ export const OracleView: React.FC<OracleViewProps> = ({
                 <span className="text-slate-500">credits —</span>
               )}
             </button>
+            {onHandoffToChamber && (
+              <button
+                type="button"
+                onClick={() => handoffToChamber()}
+                disabled={isBusy}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-950 border border-amber-300 cursor-pointer shadow-sm disabled:opacity-50"
+                title="Send a one-page Case brief to the Chamber. Does not copy the thread. Does not write the Bible."
+              >
+                <Users size={13} />
+                <span>Send to Chamber</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={handleNewThread}
@@ -882,6 +1126,93 @@ export const OracleView: React.FC<OracleViewProps> = ({
             )}
           </div>
         </header>
+
+        {persistError && (
+          <div className="flex items-start gap-3 p-3.5 bg-amber-50 border border-amber-300 rounded-2xl text-amber-950">
+            <AlertCircle size={16} className="text-amber-700 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0 text-sm leading-relaxed">
+              <div className="font-semibold">Could not save this turn</div>
+              <p className="text-amber-900/90 mt-0.5">{persistError}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPersistError(null)}
+              className="text-amber-800 hover:text-amber-950 p-1 cursor-pointer"
+              title="Dismiss"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
+        {/* Unasked Verdict — a topic the owner keeps circling across threads */}
+        {briefingCandidate && (
+          <div className="flex items-center gap-3 flex-wrap p-3.5 bg-gradient-to-r from-amber-950/70 via-slate-900 to-slate-900 border border-amber-600/40 rounded-2xl shadow-lg">
+            <span className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/40 shrink-0">
+              <Sparkles size={16} className="text-amber-300" />
+            </span>
+            <div className="flex-1 min-w-[240px] text-xs text-slate-300 leading-relaxed">
+              <span className="font-semibold text-amber-200">You've circled this one a few times.</span>{' '}
+              Asked about{' '}
+              <span className="font-mono text-amber-300">“{briefingCandidate.label}”</span> in{' '}
+              {briefingCandidate.threads} thread{briefingCandidate.threads === 1 ? '' : 's'} across{' '}
+              {briefingCandidate.mentions} question{briefingCandidate.mentions === 1 ? '' : 's'}. Want a
+              council briefing on it?
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleConveneBriefing}
+                disabled={isBusy || Boolean(serverBriefingJob)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-xs font-bold cursor-pointer shadow-md transition-colors"
+                title="Convene a mini-council to settle this recurring question"
+              >
+                <Sparkles size={13} />
+                Convene mini-council
+              </button>
+              <button
+                type="button"
+                onClick={handleConveneBriefingOnServer}
+                disabled={isBusy || Boolean(serverBriefingJob)}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs text-sky-300 hover:text-sky-200 border border-sky-700/60 hover:border-sky-500 cursor-pointer disabled:opacity-50"
+                title="Run the briefing on the server: it plans, researches with live citations, and deliberates — close the tab and it keeps working"
+              >
+                ☁ on server
+              </button>
+              <button
+                type="button"
+                onClick={handleDismissBriefing}
+                disabled={isBusy}
+                className="inline-flex items-center px-2.5 py-1.5 rounded-xl text-xs text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-500 cursor-pointer disabled:opacity-50"
+                title="Snooze this suggestion (a new mention will bring it back)"
+              >
+                Later
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Live server-briefing progress */}
+        {serverBriefingJob && (
+          <div className="flex items-center gap-3 flex-wrap p-3 bg-sky-950/50 border border-sky-700/50 rounded-2xl text-xs">
+            <Loader2 size={14} className="text-sky-300 animate-spin shrink-0" />
+            <div className="flex-1 min-w-[200px] text-slate-300">
+              <span className="font-semibold text-sky-200">Server briefing</span> —{' '}
+              {serverBriefingJob.progress.detail}
+              {serverBriefingJob.usageUSD > 0 && (
+                <span className="font-mono text-[10px] text-slate-400"> · ${serverBriefingJob.usageUSD.toFixed(4)} USD</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={handleCancelServerBriefing}
+              className="text-[11px] text-slate-400 hover:text-red-300 border border-slate-700 hover:border-red-500/60 px-2 py-1 rounded-lg cursor-pointer"
+              title="Cancel the server briefing"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
 
         {/* Controls and Thread Strip */}
         <div className="flex flex-col space-y-3">
@@ -1206,140 +1537,14 @@ export const OracleView: React.FC<OracleViewProps> = ({
           </div>
 
           {/* Composer */}
-          <OracleComposer onSend={handleSend} isBusy={isBusy} onStop={handleStop} />
+          <OracleComposer
+            onSend={handleSend}
+            isBusy={isBusy}
+            onStop={handleStop}
+            onHandoffToChamber={onHandoffToChamber ? () => handoffToChamber() : undefined}
+          />
         </div>
       </div>
-
-      {/* Roster & Model Selection Modal */}
-      {showRosterModal && activeThread && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className="w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-5 space-y-4 max-h-[85vh] flex flex-col">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Sliders className="text-fuchsia-400 w-5 h-5" />
-                <h3 className="text-sm font-bold text-white">
-                  {currentMode === 'mini_deliberation'
-                    ? 'Configure Mini Deliberation Panel'
-                    : 'Configure Model Rotation Roster'}
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowRosterModal(false)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg cursor-pointer"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-400">
-              {currentMode === 'mini_deliberation'
-                ? 'Select which models will deliberate concurrently before The Oracle synthesizes the final consensus:'
-                : 'Select the models to rotate through turn-by-turn during this conversation:'}
-            </p>
-
-            <div className="relative">
-              <Search size={13} className="absolute left-3 top-2.5 text-slate-500" />
-              <input
-                type="text"
-                placeholder="Filter models by name or id..."
-                value={searchModelQuery}
-                onChange={(e) => setSearchModelQuery(e.target.value)}
-                className="w-full bg-slate-950 text-slate-200 text-xs pl-8 pr-3 py-2 rounded-xl border border-slate-800 focus:outline-none focus:border-indigo-500"
-              />
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar min-h-[220px]">
-              {combinedModelOptions
-                .filter(
-                  (m) =>
-                    !searchModelQuery ||
-                    m.name.toLowerCase().includes(searchModelQuery.toLowerCase()) ||
-                    m.id.toLowerCase().includes(searchModelQuery.toLowerCase())
-                )
-                .map((m) => {
-                  const targetList =
-                    currentMode === 'mini_deliberation'
-                      ? activeThread.miniDeliberationModels || DEFAULT_MINI_DELIBERATION_MODELS
-                      : activeThread.rotationModels || DEFAULT_ROTATION_ROSTER;
-                  const isSelected = targetList.includes(m.id);
-
-                  const toggleModel = () => {
-                    let nextList: string[];
-                    if (isSelected) {
-                      nextList = targetList.filter((x) => x !== m.id);
-                      if (nextList.length === 0) nextList = [m.id]; // keep at least 1
-                    } else {
-                      nextList = [...targetList, m.id];
-                    }
-
-                    if (currentMode === 'mini_deliberation') {
-                      patchThread(activeThread.id, { miniDeliberationModels: nextList });
-                    } else {
-                      patchThread(activeThread.id, { rotationModels: nextList });
-                    }
-                  };
-
-                  return (
-                    <div
-                      key={m.id}
-                      onClick={toggleModel}
-                      className={`flex items-center justify-between p-2.5 rounded-xl border cursor-pointer transition-all ${
-                        isSelected
-                          ? 'bg-indigo-950/50 border-indigo-600 text-white'
-                          : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700'
-                      }`}
-                    >
-                      <div className="min-w-0 pr-2">
-                        <div className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
-                          <span>{m.name}</span>
-                          {m.tag && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
-                              {m.tag}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[10px] font-mono text-slate-500 truncate">{m.id}</div>
-                      </div>
-                      <div
-                        className={`w-5 h-5 rounded-md flex items-center justify-center border text-xs ${
-                          isSelected
-                            ? 'bg-indigo-600 border-indigo-500 text-white'
-                            : 'border-slate-700 bg-slate-900'
-                        }`}
-                      >
-                        {isSelected && <Check size={12} />}
-                      </div>
-                    </div>
-                  );
-                })}
-            </div>
-
-            <div className="flex items-center justify-between pt-2 border-t border-slate-800">
-              <button
-                type="button"
-                onClick={() => {
-                  if (currentMode === 'mini_deliberation') {
-                    patchThread(activeThread.id, { miniDeliberationModels: [...DEFAULT_MINI_DELIBERATION_MODELS] });
-                  } else {
-                    patchThread(activeThread.id, { rotationModels: [...DEFAULT_ROTATION_ROSTER] });
-                  }
-                }}
-                className="text-xs text-slate-400 hover:text-white cursor-pointer"
-              >
-                Reset to Default
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowRosterModal(false)}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl cursor-pointer"
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
@@ -1539,10 +1744,12 @@ function OracleComposer({
   onSend,
   isBusy,
   onStop,
+  onHandoffToChamber,
 }: {
   onSend: (text: string, images: OracleImage[], files: OracleTextFile[]) => void;
   isBusy: boolean;
   onStop: () => void;
+  onHandoffToChamber?: () => void;
 }) {
   const [text, setText] = useState('');
   const [images, setImages] = useState<OracleImage[]>([]);
@@ -1736,6 +1943,18 @@ function OracleComposer({
         </div>
 
         <div className="flex items-center gap-2">
+          {onHandoffToChamber && (
+            <button
+              type="button"
+              onClick={onHandoffToChamber}
+              disabled={isBusy}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-950 border border-amber-300 cursor-pointer disabled:opacity-50"
+              title="Type /chamber or tap here. Sends a Case brief, not the transcript."
+            >
+              <Users size={13} />
+              Chamber
+            </button>
+          )}
           {isBusy && (
             <button
               type="button"

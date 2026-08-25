@@ -26,6 +26,8 @@ interface SettingsAdvancedTabProps {
   setStopAfterStage1?: (val: boolean) => void;
   useSingleModelForSimple: boolean;
   setUseSingleModelForSimple?: (val: boolean) => void;
+  outcomeTrackingEnabled?: boolean;
+  setOutcomeTrackingEnabled?: (val: boolean) => void;
   archivistRecentRounds?: number;
   setArchivistRecentRounds?: (val: number) => void;
   disableFallback?: boolean;
@@ -68,6 +70,8 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
   setStopAfterStage1,
   useSingleModelForSimple,
   setUseSingleModelForSimple,
+  outcomeTrackingEnabled = false,
+  setOutcomeTrackingEnabled,
   archivistRecentRounds = 2,
   setArchivistRecentRounds,
   disableFallback = false,
@@ -341,6 +345,23 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
             </label>
             <p className="text-[11px] text-slate-500">
               Routes new deliberations to the single-model Quick Panel (one primary model, no multi-panel peer review). Fastest and cheapest mode.
+            </p>
+          </div>
+
+          <div className="pt-2 space-y-2 border-t border-slate-200/60 dark:border-slate-800/60">
+            <label className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
+              <span>Outcome Tracking (Confidence Ledger)</span>
+              <input
+                type="checkbox"
+                checked={outcomeTrackingEnabled}
+                onChange={(e) => setOutcomeTrackingEnabled?.(e.target.checked)}
+                className="rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+              />
+            </label>
+            <p className="text-[11px] text-slate-500">
+              Opt-in add-on: mark how tracked verdicts turned out (worked / didn't / ignored) and see an
+              honest per-panelist and per-model track record in the Chamber. Only rounds you explicitly
+              track are ever recorded — nothing is automatic.
             </p>
           </div>
 

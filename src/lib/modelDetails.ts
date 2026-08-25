@@ -236,10 +236,23 @@ function getModelQualityScore(m: RawOpenRouterModel): number {
   const b = m.benchmarks;
   if (!b) {
     const family = (m.id || '').split('/')[1] || '';
-    const frontier = ['claude-sonnet-4.5', 'claude-opus-4', 'claude-opus-4.1', 'gpt-5.1', 'gemini-2.5-pro'];
+    const frontier = ['claude-sonnet-4.5', 'claude-opus-4', 'claude-opus-4.1', 'gpt-5.1', 'gemini-2.5-pro', 'claude-fable-5'];
     if (frontier.some((f) => family === f || family.startsWith(f + '-'))) return 100;
-    if (family.startsWith('deepseek-r1') || family === 'gemini-3.7-flash' || family === 'gpt-4o') return 96;
-    if (family === 'gemini-2.5-flash' || family === 'gpt-4o-mini' || family.startsWith('o3-mini')) return 90;
+    if (
+      family.startsWith('deepseek-r1') ||
+      family === 'gemini-3.7-flash' ||
+      family === 'gpt-4o' ||
+      family === 'glm-5.3' ||
+      family === 'muse-spark-1.2'
+    )
+      return 96;
+    if (
+      family === 'gemini-2.5-flash' ||
+      family === 'gpt-4o-mini' ||
+      family.startsWith('o3-mini') ||
+      family.startsWith('deepseek-v4-flash')
+    )
+      return 90;
     if (family.startsWith('llama-3.3-70b') || family.startsWith('qwen3-235b')) return 88;
     if (family.startsWith('gemma-4')) return 78;
     if (family.startsWith('nemotron-3')) return 72;
@@ -270,6 +283,7 @@ function formatOrgName(org: string): string {
     anthropic: 'Anthropic',
     openai: 'OpenAI',
     deepseek: 'DeepSeek',
+    'z-ai': 'Z.ai',
     'meta-llama': 'Meta Llama',
     meta: 'Meta',
     nvidia: 'NVIDIA',

@@ -13,6 +13,8 @@ import {
   Sparkles,
   ChevronDown,
   FileDown,
+  Target,
+  BookOpen,
 } from 'lucide-react';
 import type {
   Persona,
@@ -22,6 +24,8 @@ import type {
   PersonaId,
   AutoSaveState,
   Session,
+  EvidenceRecord,
+  RunBlocker,
 } from '../types';
 import { ConfirmButton } from './ConfirmButton';
 import { policyForPreset } from '../lib/executionPolicy';
@@ -30,16 +34,42 @@ import { resolveExecutionMode } from '../lib/modeClassifier';
 import { compressSessionContext } from '../lib/contextCompressor';
 import { preprocessLargeAttachment } from '../lib/chunkProcessor';
 import { shouldEnableWebSearch } from '../lib/webGrounding';
-import { detectTaskDomain, applySmartModelSelection } from '../lib/smartModelSelector';
+import { detectTaskDomain } from '../lib/smartModelSelector';
 import { countRoundCost, formatCost, getModelRates, estimateTokens, splitRecentRounds } from '../lib/archivist';
 import { DollarCostGovernor } from '../lib/dollarCostGovernor';
-import { allocateCouncilSeats } from '../lib/serverModelAllocator';
 import { pricingIsFree } from '../lib/modelScoring';
+import {
+  OPENROUTER_AUTO,
+  buildAutoRouterPlugin,
+  costTierForBudget,
+  shouldUseOpenRouterAuto,
+} from '../lib/autoRouter';
+import { allocateChamberLabs, autoFiltersFromPlan, type ChamberLabPlan } from '../lib/chamberLabs';
+import { presetTierFor } from '../lib/presets';
 import { useCouncilReducer } from '../hooks/useCouncilReducer';
 import { CouncilRoundView } from './CouncilRoundView';
 import { Composer } from './Composer';
 import { CouncilSummaryBar } from './CouncilSummaryBar';
 import { CHAIRMAN_PROMPT } from '../data';
+import {
+  loadOutcomeLedger,
+  trackOutcome,
+  setTrackedOutcome,
+  buildLedgerStats,
+  describeStat,
+  classifyOutcomeDomain,
+  MIN_RESOLVED_FOR_RATIO,
+} from '../lib/outcomeLedger';
+import type { TrackedOutcome, LedgerOutcome } from '../lib/outcomeLedger';
+import {
+  applyStamp,
+  collectRunBlockers,
+  resolveCostCeilingUSD,
+  stampFromBlockers,
+} from '../lib/evidence';
+import { hydrateAttachedBodies } from '../lib/evidenceIngest';
+import { admitInvariantsToBible, extractInvariants } from '../lib/chamberHandoff';
+import { loadGlobalBible, saveGlobalBible } from '../lib/oracleStore';
 
 export interface CouncilSettings {
   enableChunking: boolean;
@@ -83,6 +113,8 @@ export interface CouncilChamberProps {
   disableFallback?: boolean;
   /** Simple questions resolve to the single-model Quick Panel path. */
   useSingleModelForSimple?: boolean;
+  /** Opt-in Confidence Ledger: track verdict outcomes (default off). */
+  outcomeTrackingEnabled?: boolean;
   autoSaveState?: AutoSaveState;
   lastSavedAt?: number | null;
   isSaving?: boolean;
@@ -90,6 +122,7 @@ export interface CouncilChamberProps {
   saveDestination?: 'cloud' | 'local' | null;
   onOpenSettings?: () => void;
   showToast?: (message: string, type?: 'info' | 'success' | 'error' | 'warning') => void;
+  onPatchSession?: (sessionId: string, patch: Partial<Session>) => void;
 }
 
 /** Deep-clones a round so in-flight streaming never mutates props/session state. */
@@ -125,6 +158,23 @@ export function getRoundIncompleteStage(
   round: CouncilRound,
   personas: Persona[]
 ): { isIncomplete: boolean; description: string } {
+  if (round.stamp === 'completed') {
+    return { isIncomplete: false, description: 'Complete' };
+  }
+  if (round.stamp === 'blocked' || (round.blockers && round.blockers.length > 0)) {
+    const first = round.blockers?.[0];
+    return {
+      isIncomplete: true,
+      description: first?.detail ? `Docket blocked — ${first.detail}` : 'Docket blocked',
+    };
+  }
+  if (round.stamp === 'failed') {
+    return { isIncomplete: true, description: 'Failed' };
+  }
+  if (round.stamp === 'stopped') {
+    return { isIncomplete: true, description: 'Stopped' };
+  }
+
   const active = personas.filter((p) => p.enabled !== false);
   const stage1 = round.deliberation?.stage1 || {};
   const stage2 = round.deliberation?.stage2 || {};
@@ -200,6 +250,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   archivistRecentRounds = 2,
   disableFallback = false,
   useSingleModelForSimple = false,
+  outcomeTrackingEnabled = false,
   autoSaveState,
   lastSavedAt,
   isSaving,
@@ -207,6 +258,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   saveDestination,
   onOpenSettings,
   showToast,
+  onPatchSession,
   activeSession,
   sessions = [],
   onSelectSession,
@@ -222,6 +274,73 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   const [lastDomain, setLastDomain] = useState<string | undefined>(undefined);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
+  // Confidence Ledger (opt-in add-on): only rounds the owner explicitly tracks.
+  const [outcomeLedger, setOutcomeLedger] = useState<TrackedOutcome[]>(() => loadOutcomeLedger());
+  const [showTrackRecord, setShowTrackRecord] = useState(false);
+
+  const handleTrackRound = (round: CouncilRound) => {
+    const personasList: TrackedOutcome['personas'] = [];
+    const models: string[] = [];
+    Object.entries(round.deliberation?.stage1 || {}).forEach(([pid, r]) => {
+      const persona = personas.find((p) => p.id === pid);
+      const model = r.actualModel || r.model;
+      personasList.push({ id: pid, name: persona?.name || pid, model });
+      if (model) models.push(model);
+    });
+    if (round.deliberation?.stage3?.model) models.push(round.deliberation.stage3.model);
+    if (round.synthesis?.model) models.push(round.synthesis.model);
+    const next = trackOutcome({
+      id: round.id,
+      sessionId: activeSessionId || undefined,
+      query: round.userQuery,
+      domain: classifyOutcomeDomain(round.userQuery, round.attachedTextFiles),
+      personas: personasList,
+      models: [...new Set(models)],
+    });
+    setOutcomeLedger(next);
+  };
+
+  const handleSetRoundOutcome = (roundId: string, outcome: LedgerOutcome) => {
+    setOutcomeLedger(setTrackedOutcome(roundId, outcome));
+  };
+
+  const handleAdmitToBible = (round: CouncilRound) => {
+    if (round.stamp !== 'completed') {
+      showToast?.('The docket is not stamped. Unstamped text cannot become Bible.', 'warning');
+      return;
+    }
+    const synthesis = round.synthesis?.content || round.deliberation?.stage3?.content || '';
+    const invariants = extractInvariants(synthesis);
+    if (!invariants) {
+      showToast?.('No invariants to admit — the Chair did not produce a usable synthesis.', 'warning');
+      return;
+    }
+    const question = activeSession?.handoff?.question || round.userQuery || '';
+    const now = Date.now();
+    const next = admitInvariantsToBible(loadGlobalBible(), invariants, {
+      question,
+      admittedAt: now,
+      threadId: activeSession?.handoff?.threadId,
+    });
+    try {
+      saveGlobalBible(next);
+    } catch (err: any) {
+      showToast?.(err?.message || 'Could not save sealed claims (storage full).', 'error');
+      return;
+    }
+    if (activeSessionId && onPatchSession) {
+      onPatchSession(activeSessionId, {
+        handoff: activeSession?.handoff
+          ? { ...activeSession.handoff, bibleAdmittedAt: now }
+          : undefined,
+      });
+    }
+    showToast?.('Invariants admitted to the Global Bible. The essay was not.', 'success');
+  };
+
+  const ledgerStats = outcomeTrackingEnabled
+    ? buildLedgerStats(outcomeLedger)
+    : { total: { tracked: 0, resolved: 0, correct: 0, wrong: 0 }, byPersona: {}, byModel: {}, byDomain: {} };
 
   /** Human-readable error text (AbortError => clean "Stopped" message). */
   const friendlyError = (err: any): string =>
@@ -298,19 +417,18 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 
   const policy = policyForPreset(activePresetId);
 
-  // Dollar-Denominated Cost Governor
+  // Dollar-Denominated Cost Governor. 0 = unlimited (matches the Settings slider).
   const dollarGovernor = useRef<DollarCostGovernor>(
     new DollarCostGovernor({
-      maxSpendPerMissionUSD: maxRoundCostCeiling > 0 ? maxRoundCostCeiling : 2.0,
+      maxSpendPerMissionUSD: resolveCostCeilingUSD(maxRoundCostCeiling) ?? 0,
       requireApprovalAboveUSD: 0.25,
       strictHardStop: true,
     })
   );
 
-  // Keep governor limit synchronized with maxRoundCostCeiling prop
   useEffect(() => {
     dollarGovernor.current = new DollarCostGovernor({
-      maxSpendPerMissionUSD: maxRoundCostCeiling > 0 ? maxRoundCostCeiling : 2.0,
+      maxSpendPerMissionUSD: resolveCostCeilingUSD(maxRoundCostCeiling) ?? 0,
       requireApprovalAboveUSD: 0.25,
       strictHardStop: true,
     });
@@ -318,6 +436,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 
   // Round being executed (single-flight under the deliberation lock).
   const activeRoundRef = useRef<CouncilRound | null>(null);
+  const labPlanRef = useRef<ChamberLabPlan | null>(null);
 
   /**
    * Builds the full query for a round, optionally preprocessing oversized
@@ -369,11 +488,28 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     if (!roundToSynthesize || !activeSessionId) return;
 
     // Server cost governor (same round identity as the run loop).
-    const costCeilingUSD = maxRoundCostCeiling > 0 ? maxRoundCostCeiling : undefined;
+    const costCeilingUSD = resolveCostCeilingUSD(maxRoundCostCeiling);
     const roundKey = `${activeSessionId}:${roundToSynthesize.id}`;
 
     const activePersonas = personas.filter((p) => p.enabled !== false);
-    const synthesisModel = synthesizer.model || activePersonas[0]?.model || 'google/gemini-2.5-flash';
+    const useAuto = shouldUseOpenRouterAuto({ autoSelect: autoSelectModels, budget: policy.budget });
+    const chairId = synthesizer.id || 'synthesizer';
+    const chairFilters = labPlanRef.current ? autoFiltersFromPlan(labPlanRef.current) : {};
+    const chairFilter = chairFilters[chairId] || chairFilters.synthesizer;
+    const synthesisModel = useAuto
+      ? OPENROUTER_AUTO
+      : labPlanRef.current?.seats[chairId]?.representativeModel ||
+        synthesizer.model ||
+        activePersonas[0]?.model ||
+        'google/gemini-2.5-flash';
+    const chairPlugins = useAuto
+      ? [
+          buildAutoRouterPlugin({
+            allowedModels: chairFilter,
+            costTier: costTierForBudget(presetTierFor(activePresetId)),
+          }),
+        ]
+      : undefined;
 
     const s1Text = Object.entries(stage1Outputs || {})
       .map(([id, r]) => `Proposal (${id}):\n${(r as any)?.content || '[No proposal]'}`)
@@ -422,14 +558,15 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       let res: Awaited<ReturnType<typeof streamPersonaWithFallback>>;
       try {
         res = await streamPersonaWithFallback({
-          persona: chairPersona,
+          persona: { ...chairPersona, model: synthesisModel },
           messages: [
             { role: 'system', content: CHAIRMAN_PROMPT },
             { role: 'user', content: synthPrompt },
           ],
           policy,
           rawModels: rawModelsCatalog,
-          sessionId: activeSessionId ?? undefined,
+          sessionId: activeSessionId ? `${activeSessionId}:synthesizer` : undefined,
+          plugins: chairPlugins,
           signal: call.signal,
           maxTokens: synthesisMaxTokens,
           disableFallback,
@@ -556,8 +693,17 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     // Server-side cost governor: the server accumulates REAL per-token spend
     // for this round and refuses further calls once the ceiling is reached —
     // the money backstop behind the client-side ceiling check.
-    const costCeilingUSD = maxRoundCostCeiling > 0 ? maxRoundCostCeiling : undefined;
+    const costCeilingUSD = resolveCostCeilingUSD(maxRoundCostCeiling);
     const roundKey = activeSessionId ? `${activeSessionId}:${currentRoundState.id}` : undefined;
+
+    const hydrated = await hydrateAttachedBodies(
+      currentRoundState.attachedTextFiles || [],
+      currentRoundState.evidence || []
+    );
+    currentRoundState.attachedTextFiles = hydrated.files;
+    const missingBlobIds = hydrated.missingBlobIds;
+    currentRoundState.stamp = 'running';
+    currentRoundState.blockers = [];
 
     // Ensure the live render list has this round and persist it immediately so
     // an interrupted run can be resumed after a reload.
@@ -589,7 +735,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       contextSummary = memoryParts.join('\n\n');
     }
 
-    let fullQuery = preparedQuery || (await prepareQuery(roundToRun));
+    let fullQuery = preparedQuery || (await prepareQuery(currentRoundState));
     if (contextSummary) {
       fullQuery = `[Prior Council Consensus Memory]:\n${contextSummary}\n\n[Active Topic Query]:\n${fullQuery}`;
     }
@@ -614,39 +760,55 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     const stageTokenLimit = isQuickPanel ? (quickPanelMaxTokens || 350) : (maxTokens || 4000);
     const webEnabled = shouldEnableWebSearch(currentRoundState.userQuery, webMode, policy.budget).enabled;
 
-    // Task-domain detection + smart model recommendations (applied when enabled).
+    // Task-domain detection. Paid auto-select seats OpenRouter Auto.
+    // Free mode keeps the local catalog allocator (Auto routes to paid models).
     const domain = detectTaskDomain(
       currentRoundState.userQuery,
       (currentRoundState.attachedTextFiles || []) as any
     );
     setLastDomain(domain);
+    const useAuto = shouldUseOpenRouterAuto({ autoSelect: autoSelectModels, budget: policy.budget });
+    const labPlan = allocateChamberLabs({
+      seats: [
+        ...activePersonas,
+        {
+          id: synthesizer.id || 'synthesizer',
+          name: synthesizer.name,
+          role: synthesizer.role,
+          systemPrompt: synthesizer.systemPrompt,
+          model: synthesizer.model,
+        },
+      ],
+      catalog: rawModelsCatalog || [],
+      budget: presetTierFor(activePresetId),
+      chairId: synthesizer.id || 'synthesizer',
+    });
+    labPlanRef.current = labPlan;
+    console.info('[ChamberLabs]', labPlan.uniqueness, Object.fromEntries(
+      Object.values(labPlan.seats).map((seat) => [seat.personaId, `${seat.lab} → ${seat.representativeModel}`])
+    ));
+    if (autoSelectModels && labPlan.toast) {
+      showToast?.(labPlan.toast, 'warning');
+    }
+    const personaFilters = useAuto ? autoFiltersFromPlan(labPlan) : {};
+    const autoPluginsFor = (id: string) =>
+      useAuto
+        ? [
+            buildAutoRouterPlugin({
+              allowedModels: personaFilters[id],
+              costTier: costTierForBudget(presetTierFor(activePresetId)),
+            }),
+          ]
+        : undefined;
     const modelOverrides: Record<string, string> = {};
-    if (autoSelectModels) {
-      try {
-        const budgetTier = policy.budget === 'free' ? 'free' : policy.budget === 'quality' ? 'quality' : 'cheap';
-        const plan = allocateCouncilSeats({
-          domain: (domain as any) || 'general',
-          budgetTier,
-          personas: activePersonas,
-          synthesizer,
-          catalog: rawModelsCatalog || [],
-        });
-        Object.entries(plan.seats).forEach(([id, seat]) => {
-          modelOverrides[id] = seat.assignedModel;
-        });
-      } catch {
-        try {
-          const selection = applySmartModelSelection(domain, activePersonas, synthesizer, {
-            rawModelsCatalog: rawModelsCatalog || [],
-            autoSelectModels: true,
-          });
-          selection.updatedPersonas.forEach((p) => {
-            modelOverrides[p.id] = p.model;
-          });
-        } catch {
-          // fall back to each persona's configured model
-        }
-      }
+    if (useAuto) {
+      activePersonas.forEach((p) => {
+        modelOverrides[p.id] = OPENROUTER_AUTO;
+      });
+    } else if (autoSelectModels) {
+      Object.values(labPlan.seats).forEach((seat) => {
+        if (seat.representativeModel) modelOverrides[seat.personaId] = seat.representativeModel;
+      });
     }
     const modelFor = (id: string) =>
       modelOverrides[id] || activePersonas.find((p) => p.id === id)?.model || '';
@@ -689,7 +851,8 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
             ],
             policy,
             rawModels: rawModelsCatalog,
-            sessionId: activeSessionId ?? undefined,
+            sessionId: activeSessionId ? `${activeSessionId}:${persona.id}` : undefined,
+            plugins: autoPluginsFor(persona.id),
             signal: call.signal,
             maxTokens: stageTokenLimit,
             webSearch: webEnabled,
@@ -761,35 +924,113 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       onUpdateRound(activeSessionId, { ...currentRoundState });
     }
 
-    if (isRunAborted()) return;
+    if (isRunAborted()) {
+      const blockers = collectRunBlockers({
+        evidence: currentRoundState.evidence,
+        attached: currentRoundState.attachedTextFiles,
+        personas,
+        stage1: currentRoundState.deliberation.stage1,
+        stage2: currentRoundState.deliberation.stage2,
+        isQuickPanel,
+        costCeilingUSD,
+        missingBlobIds,
+        stage1Attempted: true,
+      });
+      const stamped = applyStamp(currentRoundState, stampFromBlockers(blockers, { aborted: true }), blockers);
+      Object.assign(currentRoundState, stamped);
+      onUpdateRound(activeSessionId, { ...currentRoundState });
+      return;
+    }
+
+    const panelBlockers = collectRunBlockers({
+      evidence: currentRoundState.evidence,
+      attached: currentRoundState.attachedTextFiles,
+      personas,
+      stage1: currentRoundState.deliberation.stage1,
+      stage2: currentRoundState.deliberation.stage2,
+      isQuickPanel,
+      costCeilingUSD,
+      missingBlobIds,
+      stage1Attempted: true,
+    });
+    const fatalPanel = panelBlockers.some(
+      (b) =>
+        b.type === 'partial_panel' ||
+        b.type === 'blob_missing' ||
+        b.type === 'extraction_failed' ||
+        b.type === 'legacy_truncated_inline'
+    );
+    if (fatalPanel) {
+      const stamped = applyStamp(currentRoundState, 'blocked', panelBlockers);
+      Object.assign(currentRoundState, stamped);
+      dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
+      onUpdateRound(activeSessionId, { ...currentRoundState });
+      flushNow();
+      showToast?.('Docket blocked — the Chair will not stamp a verdict from a partial panel or unread exhibit.', 'warning');
+      return;
+    }
 
     // Cost ceiling enforcement: skip further stages once the round's estimated
-    // spend exceeds the user's per-round cap.
+    // spend exceeds the user's per-round cap. This is NOT a completed verdict.
     const overCeiling =
-      maxRoundCostCeiling > 0 &&
-      countRoundCost(currentRoundState).totalCost > maxRoundCostCeiling;
+      Boolean(costCeilingUSD) &&
+      countRoundCost(currentRoundState).totalCost > (costCeilingUSD as number);
     const skipRemaining = stopAfterStage1 || overCeiling;
 
-    // Quick panel: synthesize from Stage 1 outputs only.
+    // Quick panel: synthesize from Stage 1 outputs only, then stamp the docket.
     if (isQuickPanel) {
       if (existingSynthesis?.status !== 'completed') {
         await runSynthesisPhase(currentRoundState.deliberation.stage1, {});
       }
+      const qpBlockers = collectRunBlockers({
+        evidence: currentRoundState.evidence,
+        attached: currentRoundState.attachedTextFiles,
+        personas,
+        stage1: currentRoundState.deliberation.stage1,
+        isQuickPanel: true,
+        costCeilingUSD,
+        missingBlobIds,
+        stage1Attempted: true,
+      });
+      const stamped = applyStamp(
+        currentRoundState,
+        stampFromBlockers(qpBlockers, { aborted: isRunAborted() }),
+        qpBlockers
+      );
+      Object.assign(currentRoundState, stamped);
+      if (stamped.stamp === 'completed' && currentRoundState.synthesis) {
+        currentRoundState.synthesis = { ...currentRoundState.synthesis, status: 'completed' };
+        currentRoundState.stamp = 'completed';
+      }
+      dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
+      onUpdateRound(activeSessionId, { ...currentRoundState });
       return;
     }
 
     // Optional early exit: Stop After Stage 1 or cost ceiling reached.
+    // These are blockers, not a stamped verdict.
     if (skipRemaining) {
       const reason = overCeiling
-        ? `Stage 2 & Synthesis skipped (estimated round cost ${formatCost(countRoundCost(currentRoundState).totalCost)} exceeded the $${maxRoundCostCeiling.toFixed(2)} ceiling).`
-        : 'Stage 2 & Synthesis skipped (Stop After Stage 1 is enabled).';
-      currentRoundState.synthesis = { model: synthesizer.model, content: reason, status: 'completed' };
-      currentRoundState.deliberation.stage3 = { model: synthesizer.model, content: reason, status: 'completed' };
-      dispatch({
-        type: 'FINISH_SYNTHESIS',
-        payload: { roundId: currentRoundState.id, content: reason, model: synthesizer.model },
+        ? `Stage 2 & Synthesis were not run (estimated round cost ${formatCost(countRoundCost(currentRoundState).totalCost)} reached the $${(costCeilingUSD as number).toFixed(2)} ceiling).`
+        : 'Stage 2 & Synthesis were not run (Stop After Stage 1 is enabled).';
+      currentRoundState.synthesis = { model: synthesizer.model, content: reason, status: 'idle' };
+      currentRoundState.deliberation.stage3 = { model: synthesizer.model, content: reason, status: 'idle' };
+      const skipBlockers = collectRunBlockers({
+        evidence: currentRoundState.evidence,
+        attached: currentRoundState.attachedTextFiles,
+        personas,
+        stage1: currentRoundState.deliberation.stage1,
+        isQuickPanel,
+        stopAfterStage1,
+        overCeiling,
+        costCeilingUSD,
+        missingBlobIds,
+        stage1Attempted: true,
       });
-      onCompleteRound(activeSessionId, { ...currentRoundState });
+      const stamped = applyStamp(currentRoundState, 'blocked', skipBlockers);
+      Object.assign(currentRoundState, stamped);
+      dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
+      onUpdateRound(activeSessionId, { ...currentRoundState });
       flushNow();
       return;
     }
@@ -847,7 +1088,8 @@ If the question contains code, documents, or attached files, treat them as avail
             ],
             policy,
             rawModels: rawModelsCatalog,
-            sessionId: activeSessionId ?? undefined,
+            sessionId: activeSessionId ? `${activeSessionId}:${persona.id}` : undefined,
+            plugins: autoPluginsFor(persona.id),
             signal: call.signal,
             maxTokens: stageTokenLimit,
             disableFallback,
@@ -924,6 +1166,30 @@ If the question contains code, documents, or attached files, treat them as avail
     if (existingSynthesis?.status !== 'completed') {
       await runSynthesisPhase(currentRoundState.deliberation.stage1, currentRoundState.deliberation.stage2);
     }
+
+    const finalBlockers = collectRunBlockers({
+      evidence: currentRoundState.evidence,
+      attached: currentRoundState.attachedTextFiles,
+      personas,
+      stage1: currentRoundState.deliberation.stage1,
+      stage2: currentRoundState.deliberation.stage2,
+      isQuickPanel,
+      costCeilingUSD,
+      missingBlobIds,
+      stage1Attempted: true,
+    });
+    const stamped = applyStamp(
+      currentRoundState,
+      stampFromBlockers(finalBlockers, { aborted: isRunAborted() }),
+      finalBlockers
+    );
+    Object.assign(currentRoundState, stamped);
+    if (stamped.stamp === 'completed' && currentRoundState.synthesis) {
+      currentRoundState.synthesis = { ...currentRoundState.synthesis, status: 'completed' };
+      currentRoundState.stamp = 'completed';
+    }
+    dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
+    onUpdateRound(activeSessionId, { ...currentRoundState });
   };
 
   /** Builds a full Markdown dossier of the active session (query, proposals, critiques, synthesis, sources). */
@@ -978,7 +1244,12 @@ If the question contains code, documents, or attached files, treat them as avail
     }
   };
 
-  const handleDeliberate = async (query: string, attachedFiles: AttachedTextFile[], isFollowUp: boolean) => {
+  const handleDeliberate = async (
+    query: string,
+    attachedFiles: AttachedTextFile[],
+    isFollowUp: boolean,
+    evidence: EvidenceRecord[] = []
+  ) => {
     if (!acquireDeliberationLock()) return;
 
     try {
@@ -987,11 +1258,21 @@ If the question contains code, documents, or attached files, treat them as avail
       const resolvedMode = useSingleModelForSimple
         ? 'quick_panel'
         : resolveExecutionMode(executionMode, query, attachedFiles);
+      const isFirstHandoffRound =
+        Boolean(activeSession?.handoff?.brief) &&
+        (localRounds.length || rounds.length) === 0 &&
+        !query.includes('CASE BRIEF');
+      const userQuery = isFirstHandoffRound
+        ? `${activeSession!.handoff!.brief}\n\n[Operator restates the Question]:\n${query}`
+        : query;
       const newRound: CouncilRound = {
         id: `round_${Date.now()}`,
-        userQuery: query,
+        userQuery,
         timestamp: Date.now(),
         attachedTextFiles: attachedFiles,
+        evidence,
+        stamp: 'pending',
+        blockers: [],
         mode: resolvedMode === 'quick_panel' ? 'quick_panel' : 'full',
         resolvedMode,
         isQuickPanel: resolvedMode === 'quick_panel',
@@ -1040,8 +1321,7 @@ If the question contains code, documents, or attached files, treat them as avail
     try {
       const round = rounds.find((r) => r.id === roundId);
       if (round) {
-        const fullQuery = await prepareQuery(round);
-        await runRoundExecution({ ...round }, fullQuery);
+        await runRoundExecution({ ...round });
       }
     } finally {
       releaseDeliberationLock();
@@ -1054,14 +1334,15 @@ If the question contains code, documents, or attached files, treat them as avail
     try {
       const round = rounds.find((r) => r.id === roundId);
       if (round) {
-        const fullQuery = await prepareQuery(round);
         const freshRound: CouncilRound = {
           ...round,
           timestamp: Date.now(),
+          stamp: 'pending',
+          blockers: [],
           deliberation: { stage1: {}, stage2: {} },
           synthesis: { content: '', status: 'idle' },
         };
-        await runRoundExecution(freshRound, fullQuery);
+        await runRoundExecution(freshRound);
       }
     } finally {
       releaseDeliberationLock();
@@ -1084,9 +1365,11 @@ If the question contains code, documents, or attached files, treat them as avail
       abortRef.current = new AbortController();
       activeRoundRef.current = currentRoundState;
       // Server cost governor (counts against the same round budget).
-      const costCeilingUSD = maxRoundCostCeiling > 0 ? maxRoundCostCeiling : undefined;
+      const costCeilingUSD = resolveCostCeilingUSD(maxRoundCostCeiling);
       const roundKey = `${activeSessionId}:${currentRoundState.id}`;
-      const fullQuery = await prepareQuery(round);
+      const hydrated = await hydrateAttachedBodies(round.attachedTextFiles || [], round.evidence || []);
+      currentRoundState.attachedTextFiles = hydrated.files;
+      const fullQuery = await prepareQuery(currentRoundState);
       const webEnabled = shouldEnableWebSearch(currentRoundState.userQuery, webMode, policy.budget).enabled;
 
       dispatch({
@@ -1095,9 +1378,37 @@ If the question contains code, documents, or attached files, treat them as avail
       });
 
       const call = makeCallController((panelTimeoutSeconds || 120) * 1000);
+      const regenUseAuto = shouldUseOpenRouterAuto({ autoSelect: autoSelectModels, budget: policy.budget });
+      const regenPlan = allocateChamberLabs({
+        seats: [
+          ...personas.filter((p) => p.enabled !== false),
+          {
+            id: synthesizer.id || 'synthesizer',
+            name: synthesizer.name,
+            role: synthesizer.role,
+            systemPrompt: synthesizer.systemPrompt,
+            model: synthesizer.model,
+          },
+        ],
+        catalog: rawModelsCatalog || [],
+        budget: presetTierFor(activePresetId),
+        chairId: synthesizer.id || 'synthesizer',
+      });
+      labPlanRef.current = regenPlan;
+      const regenPersona = regenUseAuto
+        ? { ...persona, model: OPENROUTER_AUTO }
+        : { ...persona, model: regenPlan.seats[persona.id]?.representativeModel || persona.model };
+      const regenPlugins = regenUseAuto
+        ? [
+            buildAutoRouterPlugin({
+              allowedModels: autoFiltersFromPlan(regenPlan)[persona.id],
+              costTier: costTierForBudget(presetTierFor(activePresetId)),
+            }),
+          ]
+        : undefined;
       try {
         const res = await streamPersonaWithFallback({
-          persona,
+          persona: regenPersona,
           messages: [
             { role: 'system', content: persona.systemPrompt },
             { role: 'user', content: fullQuery },
@@ -1105,6 +1416,7 @@ If the question contains code, documents, or attached files, treat them as avail
           policy,
           rawModels: rawModelsCatalog,
           sessionId: activeSessionId ?? undefined,
+          plugins: regenPlugins,
           signal: call.signal,
           maxTokens: maxTokens || 4000,
           webSearch: webEnabled,
@@ -1319,6 +1631,82 @@ If the question contains code, documents, or attached files, treat them as avail
               </button>
             )}
 
+            {/* Confidence Ledger — opt-in track record */}
+            {outcomeTrackingEnabled && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowTrackRecord((v) => !v)}
+                  className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 hover:border-slate-600 transition-colors cursor-pointer min-h-[34px]"
+                  title="Who was right, for you? — the ledger of tracked verdict outcomes"
+                >
+                  <Target size={13} className="text-cyan-400" />
+                  <span className="font-medium">Track Record</span>
+                  {outcomeLedger.length > 0 && (
+                    <span className="text-[9px] font-mono text-cyan-300 bg-cyan-950/80 border border-cyan-800/60 px-1.5 py-0.5 rounded-full">
+                      {outcomeLedger.length}
+                    </span>
+                  )}
+                </button>
+                {showTrackRecord && (
+                  <div className="absolute right-0 mt-1.5 w-80 max-w-[90vw] bg-slate-950 border border-slate-700 rounded-xl shadow-2xl p-3 z-50 space-y-2 animate-fadeIn text-xs">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                      <span className="font-semibold text-slate-200">Confidence Ledger</span>
+                      <button
+                        type="button"
+                        onClick={() => setShowTrackRecord(false)}
+                        className="text-slate-500 hover:text-slate-300 cursor-pointer"
+                        aria-label="Close track record"
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                    {outcomeLedger.length === 0 ? (
+                      <p className="text-slate-400 text-[11px] leading-relaxed">
+                        Nothing tracked yet. On any completed round, click{' '}
+                        <span className="text-cyan-300">Track verdict</span>, then mark how it
+                        turned out. Only what you explicitly track is recorded.
+                      </p>
+                    ) : (
+                      <>
+                        <div className="text-[11px] text-slate-400">
+                          Overall: <span className="text-slate-200 font-mono">{describeStat(ledgerStats.total)}</span>
+                        </div>
+                        {Object.keys(ledgerStats.byPersona).length > 0 && (
+                          <div className="space-y-1">
+                            <div className="text-[10px] uppercase tracking-wider text-slate-500">By panelist</div>
+                            {Object.entries(ledgerStats.byPersona).map(([id, row]) => (
+                              <div key={id} className="flex items-center justify-between gap-2 text-[11px]">
+                                <span className="text-slate-300 truncate">{row.name}</span>
+                                <span className="font-mono text-slate-400 shrink-0">{describeStat(row)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {Object.keys(ledgerStats.byModel).length > 0 && (
+                          <div className="space-y-1">
+                            <div className="text-[10px] uppercase tracking-wider text-slate-500">By model</div>
+                            {Object.entries(ledgerStats.byModel)
+                              .sort((a, b) => b[1].tracked - a[1].tracked)
+                              .map(([model, row]) => (
+                                <div key={model} className="flex items-center justify-between gap-2 text-[11px]">
+                                  <span className="text-slate-300 truncate font-mono">{model.split('/').pop()}</span>
+                                  <span className="font-mono text-slate-400 shrink-0">{describeStat(row)}</span>
+                                </div>
+                              ))}
+                          </div>
+                        )}
+                        <p className="text-[10px] text-slate-500 leading-relaxed border-t border-slate-800 pt-1.5">
+                          Ratios appear after {MIN_RESOLVED_FOR_RATIO} resolved outcomes — until then
+                          the ledger says it's still gathering evidence.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Dynamic Clear Active History */}
             {onClearActiveHistory && rounds.length > 0 && (
               <ConfirmButton
@@ -1373,6 +1761,34 @@ If the question contains code, documents, or attached files, treat them as avail
         )}
       </div>
 
+      {activeSession?.handoff && (
+        <section className="p-4 bg-amber-50 border border-amber-300 rounded-2xl text-amber-950 shadow-sm space-y-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <BookOpen size={15} className="text-amber-800" />
+              Case brief from Oracle
+              {activeSession.handoff.domain && (
+                <span className="text-[10px] font-mono uppercase tracking-wider bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded">
+                  {activeSession.handoff.domain}
+                </span>
+              )}
+            </div>
+            {activeSession.handoff.bibleAdmittedAt && (
+              <span className="text-[11px] font-mono text-amber-800">
+                Invariants admitted {new Date(activeSession.handoff.bibleAdmittedAt).toLocaleString()}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-amber-900/90 leading-relaxed">
+            This is a one-page brief, not the conversation. Review it. Press Deliberate when you want
+            the panel. Nothing is written to the Bible until you admit a <em>stamped</em> verdict.
+          </p>
+          <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed bg-white/80 border border-amber-200 rounded-xl p-3 max-h-56 overflow-y-auto text-amber-950">
+            {activeSession.handoff.brief}
+          </pre>
+        </section>
+      )}
+
       {/* Council Formation & Metric Summary Bar */}
       <CouncilSummaryBar
         presetId={activePresetId}
@@ -1417,12 +1833,15 @@ If the question contains code, documents, or attached files, treat them as avail
         </div>
       </div>
 
-      {/* Rounds Stack */}
+      {/* Rounds Stack — earlier rounds are stacked and collapsed; only the
+          newest round stays open. Incomplete rounds stay reachable via their
+          always-visible header (Resume control) even when collapsed. */}
       <div className="space-y-4">
-        {(localRounds.length > 0 ? localRounds : rounds).map((round) => (
+        {(localRounds.length > 0 ? localRounds : rounds).map((round, idx, arr) => (
           <CouncilRoundView
             key={round.id}
             round={round}
+            isLatestRound={idx === arr.length - 1}
             personas={personas}
             synthesizer={synthesizer}
             basicMode={basicMode}
@@ -1438,12 +1857,27 @@ If the question contains code, documents, or attached files, treat them as avail
             } : undefined}
             isDeliberating={isDeliberating}
             showConsensusVisualizer={effectiveSettings.showConsensusVisualizer}
+            outcomeTrackingEnabled={outcomeTrackingEnabled}
+            trackedOutcome={outcomeLedger.find((e) => e.id === round.id) || null}
+            onTrackRound={() => handleTrackRound(round)}
+            onSetOutcome={(o) => handleSetRoundOutcome(round.id, o)}
+            onAdmitToBible={() => handleAdmitToBible(round)}
+            bibleAdmitted={Boolean(activeSession?.handoff?.bibleAdmittedAt)}
           />
         ))}
       </div>
 
       {/* Input Composer */}
-      <Composer onSend={handleDeliberate} isDeliberating={isDeliberating} onStop={handleStop} />
+      <Composer
+        onSend={handleDeliberate}
+        isDeliberating={isDeliberating}
+        onStop={handleStop}
+        initialQuery={
+          activeSession?.handoff && (localRounds.length || rounds.length) === 0
+            ? activeSession.handoff.question
+            : undefined
+        }
+      />
     </div>
   );
 };

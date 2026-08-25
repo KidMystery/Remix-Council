@@ -120,11 +120,22 @@ export function computeOrderedBackupList(options: OrderedBackupOptions): BackupC
   const { activePersonas, failingPersonaId, rawModels, isFreeOnlyPreset = false } = options;
 
   const excluded = new Set<string>();
+  const otherOrgs = new Set<string>();
   activePersonas.forEach((p) => {
     if (p.model) excluded.add(p.model.trim().toLowerCase());
+    if (p.id !== failingPersonaId && p.model) {
+      const org = p.model.split('/')[0]?.toLowerCase();
+      if (org) otherOrgs.add(org);
+    }
   });
 
   const isFreeOnly = isFreeOnlyPreset;
+
+  const rank = (c: BackupCandidate): number => {
+    const org = (c.org || c.model.split('/')[0] || '').toLowerCase();
+    if (otherOrgs.has(org)) return 2;
+    return 0;
+  };
 
   // Dynamic catalog prioritization when a valid rawModels list is provided.
   if (rawModels && Array.isArray(rawModels) && rawModels.length > 0 && rawModels.some((m) => m?.id)) {
@@ -140,14 +151,20 @@ export function computeOrderedBackupList(options: OrderedBackupOptions): BackupC
         };
       })
       .filter((c) => !excluded.has(c.model.trim().toLowerCase()))
-      .filter((c) => (isFreeOnly ? c.isFree === true : true));
+      .filter((c) => (isFreeOnly ? c.isFree === true : true))
+      .sort((a, b) => rank(a) - rank(b));
 
+    const unusedOrg = candidates.filter((c) => rank(c) === 0);
+    if (unusedOrg.length > 0) return unusedOrg;
     if (candidates.length > 0) return candidates;
   }
 
   // Hardcoded default pool fallback.
-  const defaults = isFreeOnly ? DEFAULT_FREE_BACKUPS : DEFAULT_PAID_BACKUPS;
-  return defaults.filter((c) => !excluded.has(c.model.trim().toLowerCase()));
+  const defaults = (isFreeOnly ? DEFAULT_FREE_BACKUPS : DEFAULT_PAID_BACKUPS)
+    .filter((c) => !excluded.has(c.model.trim().toLowerCase()))
+    .sort((a, b) => rank(a) - rank(b));
+  const unusedDefaults = defaults.filter((c) => rank(c) === 0);
+  return unusedDefaults.length > 0 ? unusedDefaults : defaults;
 }
 
 export interface StreamPersonaWithFallbackOptions {
@@ -170,6 +187,7 @@ export interface StreamPersonaWithFallbackOptions {
   /** Server cost governor: round identity + per-round USD ceiling. */
   roundKey?: string;
   costCeilingUSD?: number;
+  plugins?: unknown[];
 }
 
 export interface StreamPersonaWithFallbackResult {
@@ -189,7 +207,7 @@ export interface StreamPersonaWithFallbackResult {
 export async function streamPersonaWithFallback(
   options: StreamPersonaWithFallbackOptions
 ): Promise<StreamPersonaWithFallbackResult> {
-  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding, disableFallback, roundKey, costCeilingUSD } = options;
+  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding, disableFallback, roundKey, costCeilingUSD, plugins } = options;
 
   const isFreeOnlyPreset = policy.budget === 'free';
   const originalModel = persona.model;
@@ -215,6 +233,8 @@ export async function streamPersonaWithFallback(
       onGrounding,
       roundKey,
       costCeilingUSD,
+      plugins,
+      sessionId,
     });
     return { ...strictRes, actualModel: strictRes.actualModel || originalModel, fallbackOccurred: false };
   }
@@ -295,6 +315,8 @@ export async function streamPersonaWithFallback(
         disableFallback,
         roundKey,
         costCeilingUSD,
+        plugins,
+        sessionId,
       };
 
       const streamResult = await streamOpenRouterCompletion(streamOptions);

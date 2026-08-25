@@ -180,7 +180,11 @@ export const SettingsPersonasTab: React.FC<SettingsPersonasTabProps> = ({
                     ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20'
                     : 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20'
                 }`}
-                title={autoSelectModels ? 'Auto-Select Models is ON (domain smart assignment enabled)' : 'Auto-Select Models is OFF (manual model choices preserved)'}
+                title={
+                  autoSelectModels
+                    ? 'ON: OpenRouter Auto seats a live model per turn. The model you parked is the lab filter (anthropic/*), not the seat. Free preset still uses the local free allocator.'
+                    : 'OFF: the model you see is the model that runs.'
+                }
               >
                 <span>Auto-Select: {autoSelectModels ? 'ON' : 'OFF'}</span>
               </button>

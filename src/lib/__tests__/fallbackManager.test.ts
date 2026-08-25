@@ -111,6 +111,29 @@ describe('Fallback Manager tests', () => {
       expect(backups[0].org).toBe('cohere');
     });
 
+    it('does not offer a lab already seated on another chair', () => {
+      const dynamicRawModels = [
+        {
+          id: 'anthropic/claude-sonnet-4.5',
+          name: 'Claude',
+          pricing: { prompt: '0.000003', completion: '0.000015' },
+        },
+        {
+          id: 'cohere/command-r-plus-08-2024',
+          name: 'Command R+',
+          pricing: { prompt: '0.0000025', completion: '0.00001' },
+        },
+      ];
+      const backups = computeOrderedBackupList({
+        activePersonas: personas, // visionary is already on anthropic
+        failingPersonaId: 'skeptic',
+        rawModels: dynamicRawModels as any,
+        isFreeOnlyPreset: false,
+      });
+      expect(backups.every((b) => b.org !== 'anthropic')).toBe(true);
+      expect(backups.some((b) => b.org === 'cohere')).toBe(true);
+    });
+
     it('falls back to hardcoded defaults if rawModels is empty array or invalid', () => {
       const backupsEmpty = computeOrderedBackupList({
         activePersonas: personas,

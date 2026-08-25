@@ -6,6 +6,8 @@ import {
   catalogHasFreeModels,
   type ModelTier,
 } from './modelScoring';
+import { seatCouncilRoster } from './chamberLabs';
+import { BUILTIN_COUNCIL_PRESETS, getCustomCouncilPresets } from './councilPresets';
 
 export type { RawOpenRouterModel };
 
@@ -206,12 +208,27 @@ export function applyPreset(
   presetId: PresetId,
   personas: Persona[],
   synthesizer: Persona,
-  rawModelsCatalog?: RawOpenRouterModel[]
+  rawModelsCatalog?: RawOpenRouterModel[],
+  options?: { autoSelect?: boolean }
 ): { updatedPersonas: Persona[]; updatedSynthesizer: Persona } {
   const preset = MODEL_PRESETS.find((p) => p.id === presetId) || MODEL_PRESETS[0];
   const catalog = (rawModelsCatalog || []).filter(isUsableCatalogModel);
   const tier = presetTierFor(presetId);
+  const autoSelect = options?.autoSelect !== false;
   const used = new Set<string>();
+
+  if (autoSelect && catalog.length > 0) {
+    const seated = seatCouncilRoster({
+      personas,
+      synthesizer,
+      catalog,
+      budget: tier,
+    });
+    return {
+      updatedPersonas: seated.updatedPersonas,
+      updatedSynthesizer: seated.updatedSynthesizer,
+    };
+  }
 
   const resolveModel = (slotId: string, fallback: string): string => {
     const assigned = preset.assignments[slotId]?.model;
@@ -269,45 +286,102 @@ export function updatePresetsFromFetchedModels(rawModels: RawOpenRouterModel[]):
   if (!rawModels || !Array.isArray(rawModels)) return;
 
   const usable = rawModels.filter(isUsableCatalogModel);
-  const byId = new Map(usable.map((m) => [m.id.toLowerCase(), m]));
   const anyFreeLive = catalogHasFreeModels(usable);
 
   MODEL_PRESETS.forEach((preset) => {
     const tier = presetTierFor(preset.id);
     const wantsFree = tier === 'free';
-    const used = new Set<string>();
     preset.freeTierAvailable = wantsFree ? anyFreeLive : true;
 
-    Object.keys(preset.assignments).forEach((slotId) => {
-      const assignment = preset.assignments[slotId];
-      if (!assignment) return;
-      const currentId = assignment.model?.toLowerCase();
-      if (currentId && byId.has(currentId)) {
-        used.add(currentId);
-        return; // still live — keep
-      }
+    const slotIds = Object.keys(preset.assignments);
+    if (slotIds.length === 0) return;
 
-      // Slot's current model vanished from the catalog; replace with a live candidate.
-      const preferOrg = currentId ? currentId.split('/')[0] : undefined;
-      let replacement;
-      if (wantsFree && anyFreeLive) {
-        // If the live free pool is smaller than the number of free slots,
-        // remaining seats honestly fall back to the cheapest paid models.
-        replacement =
-          pickBestFromCatalog(usable, 'free', preferOrg, used) ||
-          pickBestFromCatalog(usable, 'cheap', preferOrg, used);
-      } else if (wantsFree && !anyFreeLive) {
-        // Honest downgrade: no live free models → cheapest paid substitute.
-        replacement = pickBestFromCatalog(usable, 'cheap', preferOrg, used);
-      } else {
-        replacement = pickBestFromCatalog(usable, tier, preferOrg, used);
-      }
+    const fakePersonas: Persona[] = slotIds
+      .filter((id) => id !== 'synthesizer')
+      .map((id) => ({
+        id,
+        name: id,
+        role: id,
+        avatar: '',
+        systemPrompt: '',
+        model: preset.assignments[id]?.model || '',
+        color: '',
+        enabled: true,
+      }));
+    const fakeChair: Persona = {
+      id: 'synthesizer',
+      name: 'Chair',
+      role: 'Consensus Builder',
+      avatar: '',
+      systemPrompt: '',
+      model: preset.assignments.synthesizer?.model || '',
+      color: '',
+    };
 
-      if (replacement) {
-        assignment.model = replacement.id;
-        assignment.isFree = pricingIsFree(replacement);
-        used.add(replacement.id.toLowerCase());
-      }
+    const seated = seatCouncilRoster({
+      personas: fakePersonas,
+      synthesizer: fakeChair,
+      catalog: usable,
+      budget: tier,
     });
+
+    seated.updatedPersonas.forEach((p) => {
+      if (!preset.assignments[p.id]) return;
+      preset.assignments[p.id].model = p.model;
+      const entry = usable.find((m) => m.id.toLowerCase() === p.model.toLowerCase());
+      preset.assignments[p.id].isFree = entry ? pricingIsFree(entry) : p.model.endsWith(':free');
+    });
+    if (preset.assignments.synthesizer) {
+      preset.assignments.synthesizer.model = seated.updatedSynthesizer.model;
+      const entry = usable.find(
+        (m) => m.id.toLowerCase() === seated.updatedSynthesizer.model.toLowerCase()
+      );
+      preset.assignments.synthesizer.isFree = entry
+        ? pricingIsFree(entry)
+        : seated.updatedSynthesizer.model.endsWith(':free');
+    }
   });
+
+  refreshSavedCouncilModels(usable, 'quality');
+}
+
+/** $0 preload: rewrite builtin + custom council model fields from the live catalog. */
+export function refreshSavedCouncilModels(
+  catalog: RawOpenRouterModel[],
+  budget: ModelTier = 'quality'
+): void {
+  if (!Array.isArray(catalog) || catalog.length === 0) return;
+
+  for (const preset of BUILTIN_COUNCIL_PRESETS) {
+    const seated = seatCouncilRoster({
+      personas: preset.personas,
+      synthesizer: preset.synthesizer,
+      catalog,
+      budget,
+    });
+    preset.personas = seated.updatedPersonas;
+    preset.synthesizer = seated.updatedSynthesizer;
+  }
+
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const customs = getCustomCouncilPresets();
+    if (customs.length === 0) return;
+    const next = customs.map((preset) => {
+      const seated = seatCouncilRoster({
+        personas: preset.personas,
+        synthesizer: preset.synthesizer,
+        catalog,
+        budget,
+      });
+      return {
+        ...preset,
+        personas: seated.updatedPersonas,
+        synthesizer: seated.updatedSynthesizer,
+      };
+    });
+    localStorage.setItem('council_custom_presets', JSON.stringify(next));
+  } catch {
+    // localStorage quota / private mode — the live apply path still reseats.
+  }
 }

@@ -1,4 +1,5 @@
 import { pickBestFromCatalog, isUsableCatalogModel, modelHasVision } from './modelScoring';
+import { allocateChamberLabs } from './chamberLabs';
 
 export type TaskDomain = 'code' | 'math' | 'finance' | 'creative' | 'general';
 export type BudgetTier = 'free' | 'cheap' | 'quality';
@@ -153,7 +154,90 @@ export function allocateCouncilSeats(params: {
   const assignedModelsInPlan = new Set<string>();
   const seats: Record<string, AllocatedSeat> = {};
 
-  // Resolve Panelists
+  if (liveCatalog.length > 0) {
+    const scoringTier = budgetTier === 'quality' ? 'quality' : budgetTier === 'free' ? 'free' : 'cheap';
+    const labPlan = allocateChamberLabs({
+      seats: [
+        ...personas.map((p) => ({ id: p.id, name: p.name, role: p.role, model: p.model })),
+        {
+          id: synthesizer.id || 'synthesizer',
+          name: synthesizer.name,
+          role: synthesizer.role,
+          model: synthesizer.model,
+        },
+      ],
+      catalog: liveCatalog,
+      budget: scoringTier,
+      chairId: synthesizer.id || 'synthesizer',
+      lockedIds: humanOverrides,
+      visionRequired,
+    });
+
+    const toSeat = (
+      id: string,
+      name: string,
+      role: string,
+      assignedModel: string,
+      source: AllocatedSeat['source']
+    ): AllocatedSeat => {
+      const catalogEntry = catalog.find((m) => m?.id?.toLowerCase() === assignedModel.toLowerCase());
+      const pricing = extractPricingUSD(catalogEntry);
+      return {
+        personaId: id,
+        personaName: name,
+        role,
+        assignedModel: catalogEntry?.id || assignedModel,
+        source,
+        pricing,
+        isFree:
+          budgetTier === 'free' ||
+          assignedModel.endsWith(':free') ||
+          (catalogEntry ? pricing.promptUSDPer1M === 0 : false),
+      };
+    };
+
+    personas.forEach((p) => {
+      const assigned = labPlan.seats[p.id]?.representativeModel || p.model || '';
+      const source = humanOverrides[p.id] ? 'explicit_override' : 'curated_pareto';
+      seats[p.id] = toSeat(p.id, p.name, p.role, assigned, source);
+      assignedModelsInPlan.add(seats[p.id].assignedModel.toLowerCase());
+    });
+
+    const synthAssigned =
+      labPlan.seats[synthesizer.id]?.representativeModel ||
+      labPlan.seats['synthesizer']?.representativeModel ||
+      synthesizer.model ||
+      '';
+    const synthSource =
+      humanOverrides[synthesizer.id] || humanOverrides['synthesizer']
+        ? 'explicit_override'
+        : 'curated_pareto';
+    const synthSeat = toSeat(synthesizer.id, synthesizer.name, synthesizer.role, synthAssigned, synthSource);
+
+    let estRoundUSD = 0;
+    Object.values(seats).forEach((seat) => {
+      estRoundUSD += (2000 / 1_000_000) * seat.pricing.promptUSDPer1M + (800 / 1_000_000) * seat.pricing.completionUSDPer1M;
+    });
+    estRoundUSD += (4000 / 1_000_000) * synthSeat.pricing.promptUSDPer1M + (1500 / 1_000_000) * synthSeat.pricing.completionUSDPer1M;
+
+    const visionGap = visionRequired
+      ? [...Object.values(seats), synthSeat].some((seat) => {
+          const entry = liveCatalog.find((m) => m.id.toLowerCase() === seat.assignedModel.toLowerCase());
+          return entry ? !modelHasVision(entry) : false;
+        })
+      : false;
+
+    return {
+      domain,
+      budgetTier,
+      seats,
+      synthesizer: synthSeat,
+      estimatedCostPerRoundUSD: estRoundUSD,
+      visionGap,
+    };
+  }
+
+  // Resolve Panelists (offline — curated preferences)
   personas.forEach((p, idx) => {
     const override = humanOverrides[p.id];
 
