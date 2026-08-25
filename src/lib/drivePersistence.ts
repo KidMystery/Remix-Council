@@ -184,8 +184,19 @@ interface DriveFileRef {
   etag?: string;
 }
 
+/**
+ * Drive v3 list URL — must be files(id,name) only. v3 File resource has no etag field
+ * in the list response that is valid for If-Match; ETag comes from the GET media header.
+ * This function is exported so tests can assert the bundle never ships the bad fields combo.
+ */
+export function driveAppDataListUrl(fileName: string = SESSION_FILE_NAME): string {
+  const q = encodeURIComponent(`name='${fileName}'`);
+  // Never include etag — Drive v3 list with that extra field 400s and etag must come from GET header
+  return `${DRIVE_API_BASE}/files?spaces=appDataFolder&fields=files(id,name)&q=${q}`;
+}
+
 async function findDriveFile(token: string, fileName: string = SESSION_FILE_NAME): Promise<DriveFileRef | null> {
-  const url = `${DRIVE_API_BASE}/files?spaces=appDataFolder&fields=files(id,name,etag)&q=${encodeURIComponent(`name='${fileName}'`)}`;
+  const url = driveAppDataListUrl(fileName);
   const resp = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -198,9 +209,9 @@ async function findDriveFile(token: string, fileName: string = SESSION_FILE_NAME
   }
 
   const data = await resp.json();
-  const files: Array<{ id: string; name: string; etag?: string }> = data.files || [];
+  const files: Array<{ id: string; name: string }> = data.files || [];
   const match = files.find((f) => f.name === fileName);
-  return match ? { id: match.id, etag: match.etag } : null;
+  return match ? { id: match.id } : null;
 }
 
 
@@ -324,9 +335,11 @@ async function readDriveJson(
   if (!resp.ok) {
     throw new DriveUnreadError(`Failed to read Drive file (${fileName}): HTTP ${resp.status}`);
   }
+  // ETag for If-Match must come from GET header, not from list fields (v3 File has no etag in list)
+  const etagHeader = resp.headers.get('ETag') || resp.headers.get('etag') || undefined;
   try {
     const text = await resp.text();
-    return { missing: false, file, raw: text ? JSON.parse(text) : null };
+    return { missing: false, file: { id: file.id, etag: etagHeader }, raw: text ? JSON.parse(text) : null };
   } catch {
     throw new DriveUnreadError(`Drive file (${fileName}) was not readable JSON.`);
   }

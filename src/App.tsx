@@ -127,6 +127,14 @@ export default function App() {
 
   const hookRecs = useModelRecommendations();
 
+  // One seating source: if hook catalog is at least as complete as the direct fetch, use it.
+  // This avoids two competing catalogs where Auto could seat from a thinner list.
+  const effectiveCatalog = React.useMemo(() => {
+    const hookCat = (hookRecs.rawModelsCatalog || []) as RawOpenRouterModel[];
+    if (hookCat.length > 0 && hookCat.length >= catalog.length) return hookCat;
+    return catalog;
+  }, [catalog, hookRecs.rawModelsCatalog]);
+
   const {
     sessions,
     activeSession,
@@ -206,7 +214,7 @@ export default function App() {
         activePresetId,
         personaModels: nextPersonas.filter((p) => p.enabled !== false).map((p) => p.model),
         synthesizerModel: nextSynthesizer?.model,
-        catalog,
+        catalog: effectiveCatalog,
         presetJustAppliedUntil: presetJustAppliedRef.current,
       });
       if (result.switchToPresetId && result.reason) {
@@ -214,7 +222,7 @@ export default function App() {
         showToast(result.reason, 'warning');
       }
     },
-    [activePresetId, catalog, showToast]
+    [activePresetId, effectiveCatalog, showToast]
   );
 
   const handleSetPersonas = useCallback(
@@ -236,10 +244,10 @@ export default function App() {
   // Reconcile once when the live catalog arrives (covers sessions restored
   // with paid picks sitting under a free preset from a previous visit).
   useEffect(() => {
-    if (!catalog || catalog.length === 0) return;
+    if (!effectiveCatalog || effectiveCatalog.length === 0) return;
     reconcilePresetWithModels(personas, synthesizer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [catalog.length]);
+  }, [effectiveCatalog.length]);
 
   const handleSignIn = useCallback(async () => {
     try {
@@ -262,31 +270,32 @@ export default function App() {
       presetId,
       personas,
       synthesizer,
-      catalog,
+      effectiveCatalog,
       { autoSelect: autoSelectModels }
     );
     setPersonas(updatedPersonas);
     setSynthesizer(updatedSynthesizer);
-  }, [personas, synthesizer, catalog, autoSelectModels]);
+  }, [personas, synthesizer, effectiveCatalog, autoSelectModels]);
 
   // $0 preload: Auto on + catalog/roster change reseats unique live labs. No completions.
+  // One seating source: effectiveCatalog is hook catalog when it is at least as complete as fetchCouncilModels.
   const lastSeatKeyRef = useRef('');
   useEffect(() => {
-    if (!autoSelectModels || !catalog || catalog.length === 0) return;
-    const rosterKey = `${activePresetId}|${catalog.map((m) => m.id).join(',')}|${personas.map((p) => p.id).join(',')}|${synthesizer.id}`;
+    if (!autoSelectModels || !effectiveCatalog || effectiveCatalog.length === 0) return;
+    const rosterKey = `${activePresetId}|${effectiveCatalog.map((m) => m.id).join(',')}|${personas.map((p) => p.id).join(',')}|${synthesizer.id}`;
     if (lastSeatKeyRef.current === rosterKey) return;
     lastSeatKeyRef.current = rosterKey;
     const seated = seatCouncilRoster({
       personas,
       synthesizer,
-      catalog,
+      catalog: effectiveCatalog,
       budget: presetTierFor(activePresetId),
     });
     setPersonas(seated.updatedPersonas);
     setSynthesizer(seated.updatedSynthesizer);
     if (seated.plan.toast) showToast(seated.plan.toast, 'warning');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoSelectModels, catalog, activePresetId, personas.map((p) => p.id).join(','), synthesizer.id]);
+  }, [autoSelectModels, effectiveCatalog, activePresetId, personas.map((p) => p.id).join(','), synthesizer.id]);
 
   const handleExportSessions = useCallback(() => {
     const json = exportSessionsJSON();
@@ -410,7 +419,7 @@ export default function App() {
               onCompleteRound={updateRoundInActiveSession}
               onDeleteRound={deleteRoundFromActiveSession}
               flushNow={flushNow}
-              rawModelsCatalog={catalog}
+              rawModelsCatalog={effectiveCatalog}
               settings={settings}
               executionMode={executionMode}
               webMode={webMode}
@@ -438,7 +447,7 @@ export default function App() {
             <NexusLabView
               personas={personas}
               synthesizer={synthesizer}
-              catalog={catalog}
+              catalog={effectiveCatalog}
               onCompleteRound={updateRoundInActiveSession}
               activeSessionId={activeSessionId}
               costCeiling={costCeiling}
@@ -446,8 +455,8 @@ export default function App() {
           ) : (
             <OracleView
               isSignedIn={isSignedIn}
-              catalog={catalog}
-              availableModels={catalog.map((m) => ({ id: m.id, name: m.name || m.id }))}
+              catalog={effectiveCatalog}
+              availableModels={effectiveCatalog.map((m) => ({ id: m.id, name: m.name || m.id }))}
               onOpenSettings={handleOpenSettingsTab}
             />
           )}
@@ -482,7 +491,7 @@ export default function App() {
         activePresetId={activePresetId}
         setActivePresetId={setActivePresetId}
         onApplyPreset={handleApplyPreset}
-        rawModelsCatalog={catalog}
+        rawModelsCatalog={effectiveCatalog}
         availableModels={hookRecs.availableModels}
         recommendationMetadata={hookRecs.metadata}
         isRefreshing={hookRecs.isRefreshing}

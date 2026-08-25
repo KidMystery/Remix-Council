@@ -52,6 +52,29 @@ export function getAuthorOrganization(modelId: string): string {
   return org.toLowerCase();
 }
 
+/**
+ * Canonical lab grouping — collapses known org aliases that are the same company.
+ * Used for uniqueness counting and seating, NOT for the Auto glob (which stays raw org/*).
+ * Examples: deepseek-ai → deepseek, meta-llama → meta, xai → x-ai
+ */
+const LAB_CANONICAL_ALIASES: Record<string, string> = {
+  'deepseek-ai': 'deepseek',
+  'deepseek': 'deepseek',
+  'meta-llama': 'meta',
+  'meta': 'meta',
+  'xai': 'x-ai',
+  'x-ai': 'x-ai',
+  'mistralai': 'mistral',
+  'mistral': 'mistral',
+};
+
+export function canonicalLab(org: string): string {
+  if (!org) return 'unknown';
+  const low = org.trim().toLowerCase();
+  if (!low || low === 'unknown' || low === 'openrouter') return low;
+  return LAB_CANONICAL_ALIASES[low] || low;
+}
+
 /** Strips ":free" suffixes and experimental tags to get the canonical family id. */
 export function getFamily(modelId: string): string {
   if (!modelId) return '';
