@@ -14,6 +14,7 @@ export const KV_KEYS = {
   sessionTombstones: 'session-tombstones',
   nexusMission: 'nexus-mission',
   nexusArchive: 'nexus-archive',
+  nexusDeleted: 'nexus-deleted',
   oracleThreads: 'oracle-threads',
   oracleBible: 'oracle-bible',
   oracleTombstones: 'oracle-tombstones',

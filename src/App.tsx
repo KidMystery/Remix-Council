@@ -390,7 +390,7 @@ export default function App() {
       )}
 
       <div className="flex flex-1 w-full">
-        {view !== 'oracle' && (
+        {view === 'chamber' && (
           <CouncilSidebar
           isOpen={isSidebarOpen}
           onClose={() => setIsSidebarOpen(false)}
@@ -471,10 +471,10 @@ export default function App() {
               personas={personas}
               synthesizer={synthesizer}
               catalog={effectiveCatalog}
-              onCompleteRound={updateRoundInActiveSession}
-              activeSessionId={activeSessionId}
               costCeiling={costCeiling}
               isSignedIn={isSignedIn}
+              isSidebarOpen={isSidebarOpen}
+              onCloseSidebar={() => setIsSidebarOpen(false)}
             />
           ) : (
             <OracleView

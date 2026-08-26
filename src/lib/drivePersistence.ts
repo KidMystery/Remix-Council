@@ -832,19 +832,21 @@ export type { NexusDriveDoc, PersistedMission };
 export async function loadNexusDriveDoc(): Promise<NexusDriveDoc | null> {
   if (!isGoogleSignedIn()) return null;
   const read = await withAuthRetry((token) => readDriveJson(token, NEXUS_FILE_NAME));
-  if (read.missing) return { version: 2, updatedAt: 0, mission: null, archive: [] };
+  if (read.missing) return { version: 2, updatedAt: 0, mission: null, archive: [], deleted: [] };
   return parseNexusDriveDoc(read.raw);
 }
 
 export async function saveNexusToDrive(
   mission: PersistedMission | null,
-  archive: PersistedMission[] = []
+  archive: PersistedMission[] = [],
+  deleted: Tombstone[] = []
 ): Promise<NexusDriveDoc> {
   const local: NexusDriveDoc = {
     version: 2,
     updatedAt: Date.now(),
     mission: mission ? sanitizeMissionForStorage(mission) : null,
     archive: archive.map(sanitizeMissionForStorage),
+    deleted,
   };
 
   return withAuthRetry(async (token) => {
@@ -852,7 +854,7 @@ export async function saveNexusToDrive(
     for (let attempt = 0; attempt < 3; attempt++) {
       const read = await readDriveJson(token, NEXUS_FILE_NAME);
       const remote = read.missing
-        ? { version: 2 as const, updatedAt: 0, mission: null, archive: [] as PersistedMission[] }
+        ? { version: 2 as const, updatedAt: 0, mission: null, archive: [] as PersistedMission[], deleted: [] }
         : parseNexusDriveDoc(read.raw);
       const envelope = mergeNexusDocs(local, remote);
       envelope.updatedAt = Date.now();
