@@ -69,7 +69,7 @@ OpenRouter API  +  Google Drive API (appDataFolder)
 
 - **Sessions** → localStorage (`council-sessions-v3`) and Drive `appDataFolder/council-sessions.json` when signed in.
 - **Oracle threads/Bibles** → localStorage (`council-oracle-threads-v1`, `council-oracle-global-bible-v1`) and Drive `appDataFolder/council-oracle.json` when signed in.
-- **Attachments are not stored inline.** Exhibit metadata is in session JSON; extracted bodies live in IndexedDB on the device (`council-evidence-v1`). Drive sync is metadata-only so a 2G link is not asked to carry PDFs.
+- **Attachments are not stored inline.** Exhibit metadata is in session / Nexus / Oracle JSON. Extracted UTF-8 lives in IndexedDB on this device (`council-evidence-v1`) and, when signed in, as a hash-addressed Drive appData file (`council-blob-<evidenceId>.txt`). Original PDF/ZIP bytes are never uploaded. JSON envelopes are never sliced to fit a body.
 - No Firebase/Firestore collections are used.
 
 ---

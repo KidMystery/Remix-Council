@@ -186,4 +186,11 @@ describe('drive list URL (v3)', () => {
     expect(url).toContain('council-nexus.json');
     expect(url).not.toContain('etag');
   });
+
+  it('builds a valid search URL for a hash-addressed exhibit blob', () => {
+    const url = driveAppDataListUrl('council-blob-ev_aaaaaaaaaaaaaaaa.txt');
+    expect(url).toContain('council-blob-ev_aaaaaaaaaaaaaaaa.txt');
+    expect(url).toContain('fields=files(id,name)');
+    expect(url).not.toContain('etag');
+  });
 });

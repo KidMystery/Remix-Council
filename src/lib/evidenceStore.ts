@@ -1,9 +1,12 @@
 /**
- * Local exhibit blobs. IndexedDB, this device only.
+ * Local exhibit blobs. IndexedDB is the cache on this device.
  *
- * Why not Drive / localStorage:
+ * Why not localStorage / session JSON:
  * - localStorage was silently slicing files to 2k chars.
- * - Drive on a 2G link cannot carry PDFs; session JSON stays small metadata.
+ * - Session / Nexus / Oracle JSON stays metadata-only. Never slice a body to fit.
+ *
+ * Cross-device: extracted UTF-8 (not original PDF bytes) is also a
+ * hash-addressed Drive appData file. See evidenceDrive.ts.
  *
  * Debug: DevTools → Application → IndexedDB → council-evidence-v1 → blobs.
  * Key = evidence id (`ev_<sha prefix>`). Value = extracted UTF-8 text.

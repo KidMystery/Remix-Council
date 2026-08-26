@@ -27,6 +27,13 @@ import {
   persistTombstonesLocal,
 } from '../lib/localSessionStore';
 import { addTombstone, applyTombstones, DRIVE_UNREAD_MESSAGE, mergeTombstones } from '../lib/syncContract';
+import { collectSessionEvidenceIds, pushEvidenceBlobsToDrive } from '../lib/evidenceDrive';
+
+function pushSessionBlobs(sessions: Session[]): void {
+  void pushEvidenceBlobsToDrive(collectSessionEvidenceIds(sessions)).catch((err) => {
+    console.warn('[SessionManager] Exhibit blob Drive push failed (local copy kept):', err);
+  });
+}
 
 const LOCAL_WRITE_THROTTLE_MS = 750;
 const DRIVE_WRITE_THROTTLE_MS = 5000;
@@ -123,6 +130,7 @@ export function useSessionManager() {
             setLastSavedAt(Date.now());
             setSaveDestination('cloud');
             setSaveError(null);
+            pushSessionBlobs(payload);
           })
           .catch((err) => {
             console.warn('[SessionManager] Drive throttled write error:', err);
@@ -389,6 +397,7 @@ export function useSessionManager() {
           .then((doc) => {
             deletedRef.current = doc.deleted;
             persistTombstones(doc.deleted);
+            pushSessionBlobs(next);
           })
           .catch((err) => {
             console.warn('[SessionManager] Drive immediate write error:', err);
@@ -533,6 +542,7 @@ export function useSessionManager() {
       }
       await persistSessionsNow(merged);
       await saveSessionsToDrive(merged, deleted);
+      pushSessionBlobs(merged);
       setLastSavedAt(Date.now());
       setSaveDestination('cloud');
       setSaveError(null);

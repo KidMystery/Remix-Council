@@ -399,6 +399,12 @@ async function persistMissionToDrive(mission: PersistedMission | null): Promise<
   if (!isGoogleSignedIn()) return;
   try {
     await saveNexusToDrive(mission, cachedArchive, cachedDeleted);
+    const { collectMissionEvidenceIds, pushEvidenceBlobsToDrive } = await import('../lib/evidenceDrive');
+    const ids = new Set(collectMissionEvidenceIds(mission));
+    for (const parked of cachedArchive) {
+      for (const id of collectMissionEvidenceIds(parked)) ids.add(id);
+    }
+    await pushEvidenceBlobsToDrive(Array.from(ids));
   } catch (err) {
     console.warn('[NexusLab] Drive persist failed (local copy kept):', err);
   }
@@ -652,7 +658,13 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       if (persisted.evidence) setEvidence(persisted.evidence);
       void import('../lib/evidenceIngest').then(({ hydrateAttachedBodies }) =>
         hydrateAttachedBodies(persisted.attachedFiles || [], persisted.evidence || []).then((h) => {
-          if (!cancelled()) setAttachedFiles(h.files);
+          if (cancelled()) return;
+          setAttachedFiles(h.files);
+          if (h.driveUnread) {
+            console.warn('[NexusLab] Drive unread — exhibit bodies not hydrated.');
+          } else if (h.missingBlobIds.length) {
+            console.warn('[NexusLab] Exhibit bodies missing on this device and Drive:', h.missingBlobIds);
+          }
         })
       );
     } else {
@@ -814,7 +826,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         addLog(
           ingested.evidence.extractor === 'failed'
             ? `❌ ${file.name}: ${ingested.evidence.failDetail || 'extractor failed'}`
-            : `✓ ${file.name} — ${ingested.evidence.coverage.extractedChars.toLocaleString()} chars on docket (blob on this device).`
+            : `✓ ${file.name} — ${ingested.evidence.coverage.extractedChars.toLocaleString()} chars on docket (blob on this device${isGoogleSignedIn() ? ' + Drive' : ''}).`
         );
       } catch (err: any) {
         addLog(`❌ Error loading file ${file.name}: ${err.message}`);

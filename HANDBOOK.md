@@ -53,7 +53,7 @@ This repo (main `05adca4` + L1/L2 port) is leaps ahead, and now wired to be **as
   - *Listen:* every Oracle reply and every Chamber panelist card has a read-aloud button.
   - *Dictate:* the **Dictate** (mic) button in the Oracle and Chamber composers uses your browser's speech-to-text so you can talk instead of type (Chromium browsers: Chrome, Edge, Brave, Arc).
 - **Web grounding** — the Oracle has a "Web" toggle; the Chamber honors the Settings → Web mode (off/auto/always). Live citations come back through the server proxy.
-- **Evidence docket (Chamber + Nexus)** — attachments are exhibits, not prompt stuffing. Each file is hashed (SHA-256), extracted, and stored as a **blob on this device** (IndexedDB). Session JSON / Drive sync carry **metadata only** (name, size, coverage, hash). A round cannot be **stamped COMPLETED** while blockers are open (partial panel, unread/thin PDF, missing blob, skipped stages, unknown spend under a ceiling). The paper-form docket on each round is the cover sheet: what was uploaded vs what was actually read. Resume re-reads the blob, never a 2k stub.
+- **Evidence docket (Chamber + Nexus)** — attachments are exhibits, not prompt stuffing. Each file is hashed (SHA-256), extracted, and stored as a **blob on this device** (IndexedDB). Session / Nexus / Oracle JSON carry **metadata only** (name, size, coverage, hash) — never a body, never a slice. When you are signed in, the extracted UTF-8 is also a hash-addressed Drive file (`council-blob-<id>.txt` in appDataFolder) so a phone / home laptop / brother’s phone can hydrate on open. Original PDF bytes stay off Drive. A round cannot be **stamped COMPLETED** while blockers are open (partial panel, unread/thin PDF, missing blob, skipped stages, unknown spend under a ceiling). The paper-form docket on each round is the cover sheet: what was uploaded vs what was actually read. Resume re-reads the blob (local, then Drive), never a 2k stub.
 - **Attachments** — text/code files, PDFs, and ZIP/RAR codebases in Chamber + Nexus; the Oracle adds **images** (vision) + files. Image turns are modality-guarded: if the chosen model is text-only it's auto-routed to a vision model (see above).
 - **Nexus overnight on artifacts** — a fresh mission needs exhibits (tree / CSV / statement / PDF). Follow-up of a finished mission may carry the prior consensus without new files. Large files are **always** split into ~20-page parts (pages-per-part still tunable). Every part is read; the cycle budget cannot drop unread pages. Server launch **refuses** over 50k chars instead of slicing to 15k. Tests: `nexusExhibits.test.ts`.
 - **Self-correcting consensus (Nexus)** — from cycle 2 on, the Chair is handed the previous cycle's full consensus and instructed to **adversarially falsify** it: re-derive critical claims (preferring live web verification over memory), change the consensus only with substantive justification, and state exactly what changed, why, and the top remaining pitfalls. So pass 1 proposes, and later passes defend-or-overturn — the "I jumped the gun, here's why" behavior is now structural. The verdicts feed is **clean by default**: final verdict in full, earlier cycles as one-line summaries, with a "Full deliberation" toggle to expand. The runtime telemetry terminal is collapsed by default (auto-opens while a mission runs).
@@ -121,7 +121,7 @@ Nexus used to copy the full CSV/PDF into every cycle's `userQuery`, then write t
 
 **If you are still on the old tab:** do not refresh first. The run is still in RAM. Export the Nexus dossier if a verdict exists. Then DevTools → Application → Local Storage → delete `openrouter_models_cache_v2` and `nexus-missions-archive-v1`. In Chamber, delete old threads you don't need. The last good `council-sessions-v3` copy was not overwritten.
 
-**After this build:** Chamber sessions, Nexus missions, and Oracle threads write to IndexedDB (`council-kv-v1`). After a successful IDB write the fat localStorage keys are dropped. Persist still strips exhibit dumps from `userQuery`. A leftover localStorage quota hit drops those two cache keys and retries. Exhibit bodies stay in `council-evidence-v1` and are never sliced. Drive is still the sync target. Fail closed: last good copy stays. The new store is live after deploy + reload.
+**After this build:** Chamber sessions, Nexus missions, and Oracle threads write to IndexedDB (`council-kv-v1`). After a successful IDB write the fat localStorage keys are dropped. Persist still strips exhibit dumps from `userQuery`. A leftover localStorage quota hit drops those two cache keys and retries. Exhibit bodies stay out of JSON and are never sliced. Local cache is `council-evidence-v1`; signed-in follow is `council-blob-<id>.txt`. Drive is still the sync target. Fail closed: last good copy stays. The new store is live after deploy + reload.
 
 ### Chamber "spend cap on Highest Quality" / panel 0/3 + NOT STAMPED
 - Was bug: `DollarCostGovernor.recordUsage()` tripped at $0.00 when ceiling = 0 (Unlimited). Fixed Aug 25 to use `hasFiniteCap()` and reset per-round. If you still see `[CostGovernor] Hard Dollar Ceiling Tripped: ... limit of $0.00`, you are on stale bundle — hard refresh. Valid ceiling trip shows real limit like $0.25, not $0.00, and docket correctly blocks with `partial_panel` + banner "A Chair must not synthesize error strings into a verdict."
@@ -143,7 +143,7 @@ This is the cover sheet, not a feature. Read it like a paper form.
 
 **Rules (also the unit tests in `src/lib/__tests__/evidence.test.ts`):**
 
-1. File bodies are **never** written to localStorage or Drive. Blobs live in IndexedDB `council-evidence-v1`. A 2G Drive sync is metadata-only.
+1. File bodies are **never** written to localStorage or to the JSON envelopes (`council-sessions.json` / `council-nexus.json` / `council-oracle.json`). Local cache is IndexedDB `council-evidence-v1`. Signed-in follow is a separate hash-addressed Drive file (`council-blob-<id>.txt`) of extracted UTF-8 — not the original PDF. We never slice a body to fit.
 2. We **never slice** a body to fit storage. Quota failure is a failed write, not a 2,000-character stub. (The old 2k/5k/8k caps were three different lies.)
 3. `completed` is illegal while any blocker is open. A Chair draft may still render as **Unstamped draft — docket incomplete**.
 4. Resume / Re-run hydrates the blob. If the blob is missing (other browser, cleared site data), the docket blocks with `blob_missing` — it does not silently use leftover preview text.
@@ -157,7 +157,7 @@ This is the cover sheet, not a feature. Read it like a paper form.
 - `skipped_stages` — Stop After Stage 1, or the cost ceiling fired.
 - `cost_unknown` — a ceiling is set but a completed seat reported no token usage.
 - `legacy_truncated_inline` — an old session still contains `[Truncated for storage`. Re-attach the file.
-- `blob_missing` — metadata without the IndexedDB body.
+- `blob_missing` — metadata without the body on this device or Drive (or Drive was unread).
 
 Debug without the original author: open the round, read `stamp` and `blockers` on the docket (and in DevTools → Application → IndexedDB → `council-evidence-v1`).
 
@@ -178,7 +178,7 @@ One rule: **never PUT a device's list over Drive without reading first.** A fail
 | **Token death** | Overnight 401 → one silent GIS refresh. Fail → banner, no `select_account` picker. Lab keeps writing locally. Same-browser reopen: if `council-drive-wanted` is set, one silent restore on load. |
 | **Agent 404** | Jobs live in `data/agent-jobs.json` on the server disk. A Railway redeploy with no volume returns 404. The UI says *Mission lost on redeploy (this server has no persistent volume).* — it does not invent an empty job. |
 
-**Debug without the original author:** open DevTools → Application → IndexedDB → `council-kv-v1` → `kv` (sessions / nexus / oracle). Leftover localStorage keys are migrate-from only. Drive appData is `council-sessions.json` / `council-oracle.json` / `council-nexus.json`. Tests: `syncContract.test.ts`, `driveAuth.test.ts`, `localSessionStore.test.ts`, `nexusMission.test.ts`.
+**Debug without the original author:** open DevTools → Application → IndexedDB → `council-kv-v1` → `kv` (sessions / nexus / oracle) and `council-evidence-v1` → `blobs`. Leftover localStorage keys are migrate-from only. Drive appData is `council-sessions.json` / `council-oracle.json` / `council-nexus.json` plus `council-blob-<id>.txt` for extracted text. Tests: `syncContract.test.ts`, `driveAuth.test.ts`, `localSessionStore.test.ts`, `nexusMission.test.ts`, `evidenceDrive.test.ts`.
 
 **Not a bug:** only the `OWNER_EMAIL` Google account can open the money route. Rotating three personal accounts will look like "the app locked me out" — that is the owner gate.
 
@@ -195,8 +195,8 @@ Debug: `session.handoff` on the Chamber session in DevTools. Tests in `chamberHa
 
 ## Storage map
 
-- **Evidence blobs** → IndexedDB `council-evidence-v1` / `blobs` (this device only; not Drive).
-- **Chamber sessions + Nexus missions + Oracle threads/Bibles** → IndexedDB `council-kv-v1` / `kv` (this device). After a successful write, fat localStorage keys (`council-sessions-v3`, `nexus-missions-v1`, `council-oracle-threads-v1`, …) are dropped. Drive `appDataFolder` syncs `council-sessions.json` + `council-oracle.json` + `council-nexus.json` when signed in (v2 envelope; Chamber/Oracle carry `deleted` tombstones; Nexus is mission + archive + deleted tombstones, no exhibit bodies).
+- **Evidence blobs** → IndexedDB `council-evidence-v1` / `blobs` (this-device cache). Cross-device follow: Drive `appDataFolder/council-blob-<evidenceId>.txt` (extracted UTF-8, fetch on demand). Never inside the JSON envelopes.
+- **Chamber sessions + Nexus missions + Oracle threads/Bibles** → IndexedDB `council-kv-v1` / `kv` (this device). After a successful write, fat localStorage keys (`council-sessions-v3`, `nexus-missions-v1`, `council-oracle-threads-v1`, …) are dropped. Drive `appDataFolder` syncs `council-sessions.json` + `council-oracle.json` + `council-nexus.json` when signed in (v2 envelope; Chamber/Oracle carry `deleted` tombstones; Nexus is mission + archive + deleted tombstones, metadata only).
 - **Learned token budgets** → `council_token_governor_v1`.
 - **Fallback event log** → `council_fallback_events_v1`.
 - **Oracle custom models + Direct palette** → `council-oracle-custom-models-v1` and `council-oracle-direct-list-v1` (localStorage; included in the Oracle JSON export).
@@ -214,3 +214,4 @@ Still open (honest status):
 2. **Persistent (non-in-memory) rate limiting + cost ledger** — the rate limiter and the per-round cost ledger are in-memory (they reset on server restart). That's correct for personal use; it only matters if you go multi-user, at which point both want a small durable store.
 3. **Blind Pro Compare** — the old Phase-2 toggle was a no-op and has been removed. Its spirit (which output can you actually trust?) is now served by the opt-in **Confidence Ledger** built on your own tracked outcomes instead of benchmark tables. A separate independent adversarial critic is still a candidate — flag it if you want it.
 4. **Live production verification** — every server-side safety layer (liveness guard, vision routing, cost governor) is unit-tested, but this sandbox has no outbound HTTPS to OpenRouter, so none of it has seen a real catalog/completion yet. Deploy to Railway with the key set and watch the first live rounds.
+ live rounds.

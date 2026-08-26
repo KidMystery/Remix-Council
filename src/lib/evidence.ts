@@ -3,7 +3,9 @@
  *
  * One rule: a round cannot be stamped COMPLETED while any blocker is open.
  * Session JSON stores exhibit *metadata* only. Extracted bodies live in
- * IndexedDB (see evidenceStore.ts). Drive never receives file bytes.
+ * IndexedDB (see evidenceStore.ts) and, when signed in, as hash-addressed
+ * Drive appData files (`council-blob-<id>.txt`). JSON envelopes never
+ * receive a body. Original PDF bytes are never uploaded.
  *
  * This file is pure — no DOM, no IndexedDB — so it is the place to debug
  * “why wasn’t this stamped?” Open the round, read `stamp` + `blockers`.
@@ -184,7 +186,7 @@ export function collectRunBlockers(input: StampInput): RunBlocker[] {
     blockers.push({
       type: 'blob_missing',
       evidenceId: id,
-      detail: `${ev?.name || id}: the extracted body is not on this device. Re-attach the file before Resume.`,
+      detail: `${ev?.name || id}: the extracted body is not on this device or Drive. Re-attach the file before Resume.`,
     });
   }
 

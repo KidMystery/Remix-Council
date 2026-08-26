@@ -16,6 +16,7 @@ import {
   type NexusDriveDoc,
   type PersistedMission,
 } from './nexusMission';
+import { evidenceBlobFileName } from './evidenceDrive';
 
 export type { Tombstone };
 
@@ -822,7 +823,8 @@ export function mergeOracleDocs(local: OracleDrivePayload, remote: OracleDrivePa
 }
 
 // ---------------------------------------------------------------------------
-// Nexus Lab Drive sync — active mission + archive. Bodies stay off Drive.
+// Nexus Lab Drive sync — active mission + archive. JSON is metadata-only.
+// Extracted exhibit text is a separate hash-addressed appData file.
 // ---------------------------------------------------------------------------
 
 const NEXUS_FILE_NAME = 'council-nexus.json';
@@ -876,5 +878,89 @@ export async function saveNexusToDrive(
       }
     }
     throw lastErr || new DriveUnreadError('Nexus Drive file changed and could not be merged after 3 tries.');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Exhibit bodies — separate hash-addressed files. Never in the JSON envelope.
+// ---------------------------------------------------------------------------
+
+async function uploadPlainTextMultipart(token: string, fileName: string, text: string): Promise<void> {
+  const metadata = {
+    name: fileName,
+    mimeType: 'text/plain',
+    parents: ['appDataFolder'],
+  };
+  const boundary = `council-blob-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const body = [
+    `--${boundary}`,
+    'Content-Type: application/json; charset=UTF-8',
+    '',
+    JSON.stringify(metadata),
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    '',
+    text,
+    `--${boundary}--`,
+  ].join('\r\n');
+
+  const resp = await fetch(`${DRIVE_UPLOAD_BASE}/files?uploadType=multipart`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`,
+    },
+    body,
+  });
+
+  if (resp.status === 401) throw new AuthError('Token expired');
+  if (!resp.ok) {
+    let errorDetail = '';
+    try {
+      const errJson = await resp.json();
+      errorDetail = errJson?.error?.message || JSON.stringify(errJson);
+    } catch {
+      errorDetail = `HTTP ${resp.status}`;
+    }
+    throw new Error(`Failed to create Drive blob (${fileName}): ${errorDetail}`);
+  }
+}
+
+/**
+ * Writes extracted UTF-8 to appDataFolder/council-blob-<id>.txt.
+ * Hash-addressed: if the file already exists we do not rewrite it.
+ * Never called with original PDF bytes. No-op when signed out.
+ */
+export async function saveEvidenceBlobToDrive(id: string, body: string): Promise<void> {
+  const fileName = evidenceBlobFileName(id);
+  if (!fileName || body == null) return;
+  if (!isGoogleSignedIn()) return;
+  await withAuthRetry(async (token) => {
+    const existing = await findDriveFile(token, fileName);
+    if (existing) return;
+    await uploadPlainTextMultipart(token, fileName, body);
+  });
+}
+
+/**
+ * Fetches extracted UTF-8 for an evidence id. Missing file → null.
+ * Unreadable Drive → DriveUnreadError (fail closed; do not invent a stub).
+ */
+export async function loadEvidenceBlobFromDrive(id: string): Promise<string | null> {
+  const fileName = evidenceBlobFileName(id);
+  if (!fileName) return null;
+  if (!isGoogleSignedIn()) return null;
+  return withAuthRetry(async (token) => {
+    const file = await findDriveFile(token, fileName);
+    if (!file) return null;
+    const resp = await fetch(`${DRIVE_API_BASE}/files/${file.id}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (resp.status === 401) throw new AuthError('Token expired');
+    if (resp.status === 404) return null;
+    if (!resp.ok) {
+      throw new DriveUnreadError(`Failed to read Drive blob (${fileName}): HTTP ${resp.status}`);
+    }
+    return resp.text();
   });
 }
