@@ -102,6 +102,13 @@ This repo (main `05adca4` + L1/L2 port) is leaps ahead, and now wired to be **as
 3. `package.json` wants Node 24 (`engines.node`); Railway's Nixpacks config (`nixpacks.toml`) selects `nodejs_24`. If your build still picks an old Node, check the builder settings.
 4. ✅ `package-lock.json` is in sync with `package.json` (stale `firebase` deps dropped, engine aligned to 24.x). Nothing to do here.
 
+### `Failed to execute 'setItem' … council-sessions-v3 exceeded the quota`
+Nexus used to copy the full CSV/PDF into every cycle's `userQuery`, then write that into Chamber sessions. `stripRoundBodies` blanked the attachment field but left the dump in the query — one monarch export × 3 Night Shift cycles blows the ~5 MB origin cap.
+
+**Right now (don't refresh):** the run is still in RAM. Export the Nexus dossier if a verdict exists. Then DevTools → Application → Local Storage → delete `openrouter_models_cache_v2` and `nexus-missions-archive-v1`. In Chamber, delete old threads you don't need. That frees the write. The last good `council-sessions-v3` copy was not overwritten.
+
+**After this build:** persist strips exhibit dumps from `userQuery`, and a quota hit drops those two cache keys and retries. Exhibit bodies are still never sliced.
+
 ### Chamber "spend cap on Highest Quality" / panel 0/3 + NOT STAMPED
 - Was bug: `DollarCostGovernor.recordUsage()` tripped at $0.00 when ceiling = 0 (Unlimited). Fixed Aug 25 to use `hasFiniteCap()` and reset per-round. If you still see `[CostGovernor] Hard Dollar Ceiling Tripped: ... limit of $0.00`, you are on stale bundle — hard refresh. Valid ceiling trip shows real limit like $0.25, not $0.00, and docket correctly blocks with `partial_panel` + banner "A Chair must not synthesize error strings into a verdict."
 

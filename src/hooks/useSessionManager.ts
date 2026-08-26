@@ -13,6 +13,7 @@ import {
   type Tombstone,
 } from '../lib/drivePersistence';
 import { stripSessionsBodies } from '../lib/evidence';
+import { isQuotaExceeded, setItemOrReclaim } from '../lib/localStorageQuota';
 import { addTombstone, applyTombstones, DRIVE_UNREAD_MESSAGE, mergeTombstones } from '../lib/syncContract';
 
 const LOCAL_STORAGE_KEY = 'council-sessions-v3';
@@ -40,9 +41,15 @@ function loadFromLocalStorage(): Session[] {
 function persistToLocalStorage(sessions: Session[]): void {
   try {
     const sanitized = sanitizeForStorage(sessions);
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(sanitized));
+    setItemOrReclaim(LOCAL_STORAGE_KEY, JSON.stringify(sanitized));
   } catch (err) {
     console.warn('[SessionManager] Local storage write failed (quota?). Evidence blobs were not truncated.', err);
+    if (err instanceof Error) throw err;
+    if (isQuotaExceeded(err)) {
+      throw new Error(
+        'Local storage is full (council-sessions-v3). The last good copy is still on this device. Delete old Chamber threads or export, then retry. Exhibit bodies were not sliced.'
+      );
+    }
     throw err;
   }
 }

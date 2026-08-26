@@ -41,6 +41,7 @@ import { pickBestFromCatalog, pricingIsFree } from '../lib/modelScoring';
 import { streamPersonaWithFallback } from '../lib/fallbackManager';
 import { ingestFile } from '../lib/evidenceIngest';
 import { stripRoundBodies } from '../lib/evidence';
+import { setItemOrReclaim } from '../lib/localStorageQuota';
 import type { EvidenceRecord } from '../types';
 import { summarizeTitle } from '../lib/titleUtils';
 import type { DocumentChunkPlan } from '../lib/documentChunker';
@@ -339,7 +340,7 @@ function pushArchive(mission: PersistedMission): void {
   try {
     const list = loadArchive();
     list.unshift(mission);
-    localStorage.setItem(ARCHIVE_STORAGE_KEY, JSON.stringify(list.slice(0, 20)));
+    setItemOrReclaim(ARCHIVE_STORAGE_KEY, JSON.stringify(list.slice(0, 20)));
   } catch (err) {
     console.warn('[NexusLab] Failed to archive mission:', err);
   }
@@ -374,9 +375,9 @@ function persistMission(mission: PersistedMission | null): void {
       localStorage.removeItem(MISSIONS_STORAGE_KEY);
       return;
     }
-    localStorage.setItem(MISSIONS_STORAGE_KEY, JSON.stringify(sanitizeMissionForStorage(mission)));
+    setItemOrReclaim(MISSIONS_STORAGE_KEY, JSON.stringify(sanitizeMissionForStorage(mission)));
   } catch (err) {
-    console.warn('[NexusLab] Failed to persist mission:', err);
+    console.warn('[NexusLab] Failed to persist mission (quota?). Last good copy kept.', err);
   }
 }
 
@@ -926,13 +927,19 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       } else {
         cycleQuery = `${p.query}\nPresiding Chair: ${chair.name}`;
       }
+      // Persist the directive only. The live call still gets cycleQuery (full
+      // exhibit dump). Copying that dump into userQuery is what blew
+      // council-sessions-v3 when Nexus wrote each cycle into the Chamber session.
+      const storedQuery = p.isFinalSynthesis
+        ? `[Deep Document Mode — Final Synthesis]\nDirective: ${missionGoal}`
+        : `${p.label}\nDirective: ${missionGoal}`;
 
       setCurrentIteration(qi + 1);
       addLog(`${p.label}: generating proposals across active panel...`);
 
       const newRound: CouncilRound = {
         id: `nexus_round_${Date.now()}_${qi + 1}`,
-        userQuery: cycleQuery,
+        userQuery: storedQuery,
         timestamp: Date.now(),
         mode: 'nexus_lab',
         attachedTextFiles: [...attachedFiles],
