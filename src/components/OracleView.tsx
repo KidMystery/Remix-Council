@@ -50,7 +50,6 @@ import {
   ORACLE_DEFAULT_MODEL,
   DEFAULT_MINI_DELIBERATION_MODELS,
   DEFAULT_ROTATION_ROSTER,
-  VISION_SAFE_FALLBACK_MODEL,
   ORACLE_THREADS_UPDATED_EVENT,
 } from '../lib/oracleStore';
 import {
@@ -61,6 +60,8 @@ import {
   saveOracleDirectList,
   resolveRotationModel,
   filterVisionSafeRoster,
+  pickLiveVisionFallback,
+  ORACLE_ERROR_RETRY_MODEL,
 } from '../lib/oracleModelPool';
 import {
   detectBriefingCandidates,
@@ -699,14 +700,15 @@ export const OracleView: React.FC<OracleViewProps> = ({
           latest.miniDeliberationModels && latest.miniDeliberationModels.length > 0
             ? latest.miniDeliberationModels
             : DEFAULT_MINI_DELIBERATION_MODELS;
+        const visionFallback = pickLiveVisionFallback(catalog);
         const { safe, dropped, usedFallback } = filterVisionSafeRoster(
           roster,
           isModelVisionOk,
-          VISION_SAFE_FALLBACK_MODEL
+          visionFallback
         );
         if (usedFallback) {
           visionSafePanelModels = safe;
-          visionNote = `No vision-capable models in the panel — all routed to ${VISION_SAFE_FALLBACK_MODEL.split('/').pop()}. `;
+          visionNote = `No vision-capable models in the panel — all routed to ${visionFallback.split('/').pop()}. `;
         } else if (dropped.length > 0) {
           visionSafePanelModels = safe;
           visionNote = `Panel limited to vision-capable models: ${safe.map((m) => m.split('/').pop()).join(', ')}. `;
@@ -835,8 +837,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
 
         // Vision guard for direct/rotation: swap a text-only model when images are attached.
         if (images.length > 0 && !isModelVisionOk(answerModel)) {
-          visionNote = `${answerModel.split('/').pop()} can't read images — routed to ${VISION_SAFE_FALLBACK_MODEL.split('/').pop()} instead. `;
-          answerModel = VISION_SAFE_FALLBACK_MODEL;
+          const visionFallback = pickLiveVisionFallback(catalog);
+          visionNote = `${answerModel.split('/').pop()} can't read images — routed to ${visionFallback.split('/').pop()} instead. `;
+          answerModel = visionFallback;
         }
 
         setLiveAnswer({ id: answerId, text: '', headerNote: visionNote });
@@ -1642,11 +1645,12 @@ function MessageBubble({
                 </button>
                 <button
                   type="button"
-                  onClick={() => onRetry(message.id, 'google/gemini-2.5-flash')}
+                  onClick={() => onRetry(message.id, ORACLE_ERROR_RETRY_MODEL)}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-950/80 hover:bg-indigo-900/90 text-indigo-200 font-medium transition-colors border border-indigo-700/60 cursor-pointer"
+                  title="OpenRouter Auto seats a live model and the reply chip shows which one answered"
                 >
                   <Sparkles size={12} className="text-cyan-400" />
-                  <span>Switch to Gemini 2.5 Flash & Retry</span>
+                  <span>Retry via OpenRouter Auto</span>
                 </button>
               </>
             )}
