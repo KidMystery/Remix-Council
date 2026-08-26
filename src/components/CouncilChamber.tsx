@@ -70,6 +70,8 @@ import {
 import { hydrateAttachedBodies } from '../lib/evidenceIngest';
 import { admitInvariantsToBible, extractInvariants } from '../lib/chamberHandoff';
 import { loadGlobalBible, saveGlobalBible } from '../lib/oracleStore';
+import { playNotificationChime, sendDesktopNotification } from '../lib/notifications';
+import type { NotificationPreferences } from '../types';
 
 export interface CouncilSettings {
   enableChunking: boolean;
@@ -115,6 +117,7 @@ export interface CouncilChamberProps {
   useSingleModelForSimple?: boolean;
   /** Opt-in Confidence Ledger: track verdict outcomes (default off). */
   outcomeTrackingEnabled?: boolean;
+  notificationPreferences?: NotificationPreferences;
   autoSaveState?: AutoSaveState;
   lastSavedAt?: number | null;
   isSaving?: boolean;
@@ -251,6 +254,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   disableFallback = false,
   useSingleModelForSimple = false,
   outcomeTrackingEnabled = false,
+  notificationPreferences,
   autoSaveState,
   lastSavedAt,
   isSaving,
@@ -345,6 +349,44 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   /** Human-readable error text (AbortError => clean "Stopped" message). */
   const friendlyError = (err: any): string =>
     err?.name === 'AbortError' ? 'Stopped by user' : (err?.message || String(err));
+
+  /** Fire Alerts-tab chimes / desktop notifications when a round actually finishes. */
+  const announceRoundOutcome = (round: CouncilRound) => {
+    const prefs = notificationPreferences;
+    if (!prefs) return;
+    const stamp = round.stamp;
+    if (!stamp || stamp === 'pending' || stamp === 'running' || stamp === 'stopped') return;
+
+    const queryPreview = (round.userQuery || '').replace(/\s+/g, ' ').slice(0, 140);
+    const costHit = (round.blockers || []).some(
+      (b) => b.type === 'skipped_stages' && /ceiling/i.test(`${b.reason} ${b.detail}`)
+    );
+    const fire = (
+      kind: 'complete' | 'error',
+      enabled: boolean | undefined,
+      title: string,
+      body?: string
+    ) => {
+      if (enabled === false) return;
+      if (prefs.enableSoundAlerts) playNotificationChime(kind, prefs.soundVolume ?? 0.5);
+      if (prefs.enableBrowserNotifications) sendDesktopNotification(title, body);
+    };
+
+    if (costHit) {
+      fire('error', prefs.notifyOnCostThreshold, 'Council cost ceiling reached', queryPreview);
+      return;
+    }
+    if (stamp === 'completed') {
+      fire(
+        'complete',
+        prefs.notifyOnDeliberationComplete,
+        'Council deliberation complete',
+        queryPreview
+      );
+      return;
+    }
+    fire('error', prefs.notifyOnError, 'Council deliberation issue', queryPreview || stamp);
+  };
 
   /** Builds a per-call AbortController that follows the run signal + per-call timeout. */
   const makeCallController = (timeoutMs: number) => {
@@ -703,6 +745,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     const currentRoundState: CouncilRound = cloneRound(roundToRun);
     activeRoundRef.current = currentRoundState;
 
+    try {
     // Server-side cost governor: the server accumulates REAL per-token spend
     // for this round and refuses further calls once the ceiling is reached —
     // the money backstop behind the client-side ceiling check.
@@ -1203,6 +1246,9 @@ If the question contains code, documents, or attached files, treat them as avail
     }
     dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
     onUpdateRound(activeSessionId, { ...currentRoundState });
+    } finally {
+      announceRoundOutcome(currentRoundState);
+    }
   };
 
   /** Builds a full Markdown dossier of the active session (query, proposals, critiques, synthesis, sources). */

@@ -109,16 +109,23 @@ export default function App() {
   const [outcomeTrackingEnabled, setOutcomeTrackingEnabled] = useState(false);
   const [archivistRecentRounds, setArchivistRecentRounds] = useState(2);
   const [disableFallback, setDisableFallback] = useState(false);
-  const [disableLoadingOverlay, setDisableLoadingOverlay] = useState(false);
-  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>({
-    enableSoundAlerts: true,
-    soundVolume: 0.5,
-    enableBrowserNotifications: false,
-    notifyOnDeliberationComplete: true,
-    notifyOnError: true,
-    notifyOnCostThreshold: true,
+  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>(() => {
+    const defaults: NotificationPreferences = {
+      enableSoundAlerts: true,
+      soundVolume: 0.5,
+      enableBrowserNotifications: false,
+      notifyOnDeliberationComplete: true,
+      notifyOnError: true,
+      notifyOnCostThreshold: true,
+    };
+    try {
+      const saved = localStorage.getItem('council_notification_preferences');
+      if (saved) return { ...defaults, ...JSON.parse(saved) };
+    } catch {
+      /* ignore */
+    }
+    return defaults;
   });
-  const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
 
   const [costCeiling, setCostCeiling] = useState<CostCeilingConfig>({
     maxSpendPerMissionDollars: 2.0,
@@ -457,6 +464,7 @@ export default function App() {
               disableFallback={disableFallback}
               useSingleModelForSimple={useSingleModelForSimple}
               outcomeTrackingEnabled={outcomeTrackingEnabled}
+              notificationPreferences={notificationPreferences}
               autoSaveState={autoSaveState}
               lastSavedAt={lastSavedAt}
               isSaving={isSaving}
@@ -482,6 +490,7 @@ export default function App() {
               catalog={effectiveCatalog}
               availableModels={effectiveCatalog.map((m) => ({ id: m.id, name: m.name || m.id }))}
               onOpenSettings={handleOpenSettingsTab}
+              onHandoffToChamber={handleOracleHandoff}
             />
           )}
         </main>
@@ -510,7 +519,6 @@ export default function App() {
         setSynthesisMaxTokens={setSynthesisMaxTokens}
         panelTimeoutSeconds={panelTimeoutSeconds}
         setPanelTimeoutSeconds={setPanelTimeoutSeconds}
-        setIsAuditModalOpen={setIsAuditModalOpen}
         onRefreshModels={hookRecs.refreshModelRecommendations}
         activePresetId={activePresetId}
         setActivePresetId={setActivePresetId}
@@ -535,8 +543,6 @@ export default function App() {
         setArchivistRecentRounds={setArchivistRecentRounds}
         disableFallback={disableFallback}
         setDisableFallback={setDisableFallback}
-        disableLoadingOverlay={disableLoadingOverlay}
-        setDisableLoadingOverlay={setDisableLoadingOverlay}
         notificationPreferences={notificationPreferences}
         onUpdateNotifications={setNotificationPreferences}
         onExportSessions={handleExportSessions}

@@ -251,6 +251,26 @@ export const SettingsNotificationsTab: React.FC<SettingsNotificationsTabProps> =
               className="accent-indigo-600 h-4 w-4 rounded cursor-pointer"
             />
           </label>
+
+          <label className="flex items-center justify-between p-3 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 dark:bg-slate-800/40 hover:bg-slate-100 dark:hover:bg-slate-800/70 transition-colors cursor-pointer">
+            <div className="flex items-center gap-2.5">
+              <AlertTriangle size={14} className="text-amber-500" />
+              <div>
+                <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 block">
+                  Per-round cost ceiling
+                </span>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Alert when Stage 2 and synthesis are skipped because the round hit the Advanced cost ceiling
+                </span>
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={prefs.notifyOnCostThreshold ?? true}
+              onChange={(e) => updatePreference('notifyOnCostThreshold', e.target.checked)}
+              className="accent-indigo-600 h-4 w-4 rounded cursor-pointer"
+            />
+          </label>
         </div>
       </section>
     </div>

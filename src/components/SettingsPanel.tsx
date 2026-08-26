@@ -38,7 +38,6 @@ interface SettingsPanelProps {
   setSynthesisMaxTokens?: (val: number) => void;
   panelTimeoutSeconds?: number;
   setPanelTimeoutSeconds?: (val: number) => void;
-  setIsAuditModalOpen?: (val: boolean) => void;
   onRefreshModels?: (options?: { force?: boolean; applyToPersonas?: boolean }) => Promise<any>;
   activePresetId?: PresetId;
   setActivePresetId?: (id: PresetId) => void;
@@ -64,8 +63,6 @@ interface SettingsPanelProps {
   setArchivistRecentRounds?: (val: number) => void;
   disableFallback?: boolean;
   setDisableFallback?: (val: boolean) => void;
-  disableLoadingOverlay?: boolean;
-  setDisableLoadingOverlay?: (val: boolean) => void;
   notificationPreferences?: NotificationPreferences;
   onUpdateNotifications?: (prefs: NotificationPreferences) => void;
   onExportSessions?: () => void;
@@ -104,7 +101,6 @@ export function SettingsPanel({
   setSynthesisMaxTokens,
   panelTimeoutSeconds = 120,
   setPanelTimeoutSeconds,
-  setIsAuditModalOpen,
   onRefreshModels,
   activePresetId: propActivePresetId,
   setActivePresetId: propSetActivePresetId,
@@ -129,8 +125,6 @@ export function SettingsPanel({
   setArchivistRecentRounds,
   disableFallback = false,
   setDisableFallback,
-  disableLoadingOverlay = false,
-  setDisableLoadingOverlay,
   notificationPreferences,
   onUpdateNotifications,
   onExportSessions,
@@ -336,7 +330,6 @@ export function SettingsPanel({
               setSynthesisMaxTokens={setSynthesisMaxTokens}
               panelTimeoutSeconds={panelTimeoutSeconds}
               setPanelTimeoutSeconds={setPanelTimeoutSeconds}
-              setIsAuditModalOpen={setIsAuditModalOpen}
               maxRoundCostCeiling={maxRoundCostCeiling}
               setMaxRoundCostCeiling={setMaxRoundCostCeiling}
               stopAfterStage1={stopAfterStage1}
@@ -349,9 +342,6 @@ export function SettingsPanel({
               setArchivistRecentRounds={setArchivistRecentRounds}
               disableFallback={disableFallback}
               setDisableFallback={setDisableFallback}
-              disableLoadingOverlay={disableLoadingOverlay}
-              setDisableLoadingOverlay={setDisableLoadingOverlay}
-              availableModels={propAvailableModels}
               onExportSessions={onExportSessions}
               onImportSessions={onImportSessions}
               sessionsCount={sessionsCount}
