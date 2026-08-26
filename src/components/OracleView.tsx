@@ -44,6 +44,7 @@ import {
   saveOracleTombstones,
   loadGlobalBible,
   saveGlobalBible,
+  hydrateOracleFromIdb,
   exportOracleThreads,
   importOracleThreads,
   ORACLE_DEFAULT_MODEL,
@@ -87,6 +88,7 @@ import {
   loadOracleFromDrive,
   mergeOracleThreads,
   DriveUnreadError,
+  DriveAuthRequiredError,
 } from '../lib/drivePersistence';
 import { addTombstone, AGENT_LOST_ON_REDEPLOY, DRIVE_UNREAD_MESSAGE, mergeTombstones } from '../lib/syncContract';
 import { copyToClipboard } from '../lib/clipboard';
@@ -176,6 +178,16 @@ export const OracleView: React.FC<OracleViewProps> = ({
     const handleBriefingsUpdated = () => setBriefingStoreVersion((v) => v + 1);
     window.addEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
     window.addEventListener(ORACLE_BRIEFINGS_UPDATED_EVENT, handleBriefingsUpdated);
+    void hydrateOracleFromIdb().then(() => {
+      const loaded = loadOracleThreads();
+      threadsRef.current = loaded;
+      setThreads(loaded);
+      setActiveId((prev) => (loaded.some((t) => t.id === prev) ? prev : loaded[0]?.id || null));
+      const gb = loadGlobalBible();
+      globalBibleRef.current = gb;
+      setGlobalBible(gb);
+      deletedRef.current = loadOracleTombstones();
+    });
     return () => {
       window.removeEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
       window.removeEventListener(ORACLE_BRIEFINGS_UPDATED_EVENT, handleBriefingsUpdated);
@@ -263,6 +275,8 @@ export const OracleView: React.FC<OracleViewProps> = ({
         setDriveSyncState('error');
         if (err instanceof DriveUnreadError) {
           setPersistError(DRIVE_UNREAD_MESSAGE);
+        } else if (err instanceof DriveAuthRequiredError) {
+          setPersistError(err.message);
         }
       }
     })();
@@ -292,6 +306,8 @@ export const OracleView: React.FC<OracleViewProps> = ({
           setDriveSyncState('error');
           if (err instanceof DriveUnreadError) {
             setPersistError(DRIVE_UNREAD_MESSAGE);
+          } else if (err instanceof DriveAuthRequiredError) {
+            setPersistError(err.message);
           }
         });
     }, 4000);

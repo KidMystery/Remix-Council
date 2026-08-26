@@ -102,11 +102,11 @@ export const AutoSaveIndicator: React.FC<AutoSaveIndicatorProps> = ({
   const isActionable = Boolean(onClick || onSaveNow);
   const { label, full } = formatRelativeTime(lastSavedAt, now);
 
-  const destinationLabel = destination === 'cloud' ? 'Google Drive' : 'LocalStorage';
+  const destinationLabel = destination === 'cloud' ? 'Google Drive' : 'This device';
   const tooltipText = isBusy
     ? isSyncing
       ? 'Syncing changes to Google Drive cloud...'
-      : 'Saving changes to local storage...'
+      : 'Saving changes on this device...'
     : error
     ? `Save notice: ${error}. Click to retry.`
     : `${full} (${destinationLabel})${onClick ? ' • Click for storage & sync options' : onSaveNow ? ' • Click to sync now' : ''}`;

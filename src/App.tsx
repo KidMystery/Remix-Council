@@ -28,6 +28,7 @@ import { StorageSyncModal } from './components/StorageSyncModal';
 import { UnifiedToast } from './components/UnifiedToast';
 import type { ChamberHandoff } from './lib/chamberHandoff';
 import { summarizeTitle } from './lib/titleUtils';
+import { hydrateOracleFromIdb } from './lib/oracleStore';
 
 const SETTINGS_KEYS = {
   enableChunking: 'council_enable_chunking',
@@ -160,7 +161,12 @@ export default function App() {
     autoSaveState,
     flushNow,
     isLoading,
+    driveNeedsReauth,
   } = useSessionManager();
+
+  useEffect(() => {
+    void hydrateOracleFromIdb();
+  }, []);
 
   // Load the model catalog on mount.
   useEffect(() => {
@@ -365,6 +371,23 @@ export default function App() {
         onSignIn={handleSignIn}
         onSignOut={handleSignOut}
       />
+
+      {driveNeedsReauth && (
+        <div className="px-3 sm:px-4 pt-2">
+          <div className="flex flex-wrap items-center gap-3 px-3.5 py-2.5 rounded-xl bg-amber-950/80 border border-amber-600/50 text-amber-100 text-sm">
+            <span className="flex-1 min-w-[200px]">
+              Drive signed out overnight. Local copy is still saving on this device. Reconnect when you are at the keyboard.
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleSignIn()}
+              className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold cursor-pointer"
+            >
+              Reconnect Drive
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-1 w-full">
         {view !== 'oracle' && (

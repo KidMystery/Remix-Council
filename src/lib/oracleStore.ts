@@ -8,6 +8,7 @@
 
 import type { OracleCustomModel } from './oracleModelPool';
 import { hydrateBible, type OracleBible } from './bibleClaims';
+import { dropLocalStorageKey, kvGet, kvSet, KV_KEYS, readLocalStorageJson } from './kvStore';
 export type { BibleClaim } from './bibleClaims';
 export type { OracleBible };
 
@@ -61,6 +62,72 @@ const THREADS_KEY = 'council-oracle-threads-v1';
 const GLOBAL_BIBLE_KEY = 'council-oracle-global-bible-v1';
 const TOMBSTONE_KEY = 'council-oracle-tombstones-v1';
 const MAX_MESSAGES = 200;
+
+let memoryThreads: OracleThread[] | null = null;
+let memoryBible: OracleBible | null = null;
+let memoryTombstones: { id: string; deletedAt: number }[] | null = null;
+let oracleHydrated = false;
+
+function hydrateThreadList(raw: unknown): OracleThread[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((t) => ({
+    ...t,
+    bible: hydrateBible(t?.bible),
+  }));
+}
+
+/** Load IndexedDB first, then leftover localStorage. Safe to call more than once. */
+export async function hydrateOracleFromIdb(): Promise<void> {
+  if (oracleHydrated) return;
+  try {
+    const [threads, bible, stones] = await Promise.all([
+      kvGet<unknown>(KV_KEYS.oracleThreads),
+      kvGet<unknown>(KV_KEYS.oracleBible),
+      kvGet<unknown>(KV_KEYS.oracleTombstones),
+    ]);
+    if (threads !== undefined) {
+      memoryThreads = hydrateThreadList(threads);
+    } else {
+      const ls = readLocalStorageJson<unknown>(THREADS_KEY);
+      memoryThreads = hydrateThreadList(ls);
+      if (memoryThreads.length > 0) {
+        await kvSet(KV_KEYS.oracleThreads, memoryThreads);
+        dropLocalStorageKey(THREADS_KEY);
+      }
+    }
+    if (bible !== undefined) {
+      memoryBible = hydrateBible(bible);
+    } else {
+      const ls = readLocalStorageJson<unknown>(GLOBAL_BIBLE_KEY);
+      if (ls) {
+        memoryBible = hydrateBible(ls);
+        await kvSet(KV_KEYS.oracleBible, memoryBible);
+        dropLocalStorageKey(GLOBAL_BIBLE_KEY);
+      }
+    }
+    if (Array.isArray(stones)) {
+      memoryTombstones = stones as { id: string; deletedAt: number }[];
+    } else {
+      const ls = readLocalStorageJson<unknown>(TOMBSTONE_KEY);
+      if (Array.isArray(ls)) {
+        memoryTombstones = ls as { id: string; deletedAt: number }[];
+        await kvSet(KV_KEYS.oracleTombstones, memoryTombstones);
+        dropLocalStorageKey(TOMBSTONE_KEY);
+      }
+    }
+  } catch (err) {
+    console.warn('[OracleStore] IndexedDB hydrate failed:', err);
+  }
+  oracleHydrated = true;
+}
+
+/** Test seam. */
+export function _resetOracleMemoryForTests(): void {
+  memoryThreads = null;
+  memoryBible = null;
+  memoryTombstones = null;
+  oracleHydrated = false;
+}
 
 export const ORACLE_DEFAULT_MODEL = 'google/gemini-2.5-flash';
 
@@ -147,76 +214,94 @@ export function newOracleThread(model: string = ORACLE_DEFAULT_MODEL): OracleThr
 }
 
 export function loadOracleThreads(): OracleThread[] {
-  try {
-    const raw = localStorage.getItem(THREADS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map((t) => ({
-      ...t,
-      bible: hydrateBible(t?.bible),
-    }));
-  } catch (err) {
-    console.warn('[OracleStore] Failed to load threads:', err);
-    return [];
-  }
+  if (memoryThreads) return memoryThreads;
+  const ls = readLocalStorageJson<unknown>(THREADS_KEY);
+  memoryThreads = hydrateThreadList(ls);
+  return memoryThreads;
 }
 
 export function saveOracleThreads(threads: OracleThread[]): void {
-  try {
-    // Cap message history by count to stay within localStorage quota.
-    const sanitized = threads.map((t) => ({
-      ...t,
-      messages: (t.messages || []).slice(-MAX_MESSAGES),
-    }));
-    localStorage.setItem(THREADS_KEY, JSON.stringify(sanitized));
-  } catch (err) {
-    console.warn('[OracleStore] Failed to save threads (quota?):', err);
-    throw err instanceof Error
-      ? err
-      : new Error('Could not save this turn locally (storage full). Last good copy is still on this device.');
+  const sanitized = threads.map((t) => ({
+    ...t,
+    messages: (t.messages || []).slice(-MAX_MESSAGES),
+  }));
+  memoryThreads = sanitized;
+  if (typeof indexedDB === 'undefined') {
+    try {
+      localStorage.setItem(THREADS_KEY, JSON.stringify(sanitized));
+    } catch (err) {
+      console.warn('[OracleStore] Failed to save threads (quota?):', err);
+      throw err instanceof Error
+        ? err
+        : new Error('Could not save this turn locally (storage full). Last good copy is still on this device.');
+    }
+    return;
   }
+  void kvSet(KV_KEYS.oracleThreads, sanitized)
+    .then(() => dropLocalStorageKey(THREADS_KEY))
+    .catch((err) => {
+      console.warn('[OracleStore] IndexedDB thread save failed. Last good copy stays.', err);
+      try {
+        localStorage.setItem(THREADS_KEY, JSON.stringify(sanitized));
+      } catch (lsErr) {
+        console.warn('[OracleStore] localStorage fallback also failed:', lsErr);
+      }
+    });
 }
 
 export function loadOracleTombstones(): { id: string; deletedAt: number }[] {
-  try {
-    const raw = localStorage.getItem(TOMBSTONE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  if (memoryTombstones) return memoryTombstones;
+  const ls = readLocalStorageJson<unknown>(TOMBSTONE_KEY);
+  memoryTombstones = Array.isArray(ls) ? (ls as { id: string; deletedAt: number }[]) : [];
+  return memoryTombstones;
 }
 
 export function saveOracleTombstones(stones: { id: string; deletedAt: number }[]): void {
-  try {
-    localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(stones));
-  } catch (err) {
-    console.warn('[OracleStore] Could not persist delete marks:', err);
-  }
+  memoryTombstones = stones;
+  void kvSet(KV_KEYS.oracleTombstones, stones)
+    .then(() => dropLocalStorageKey(TOMBSTONE_KEY))
+    .catch((err) => {
+      console.warn('[OracleStore] Could not persist delete marks:', err);
+      try {
+        localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(stones));
+      } catch {
+        // last good copy stays
+      }
+    });
 }
 
 export function loadGlobalBible(): OracleBible {
-  try {
-    const raw = localStorage.getItem(GLOBAL_BIBLE_KEY);
-    if (!raw) return hydrateBible({ content: '', updatedAt: Date.now() });
-    return hydrateBible(JSON.parse(raw));
-  } catch (err) {
-    console.warn('[OracleStore] Failed to load global Bible:', err);
-    return hydrateBible({ content: '', updatedAt: Date.now() });
-  }
+  if (memoryBible) return memoryBible;
+  const ls = readLocalStorageJson<unknown>(GLOBAL_BIBLE_KEY);
+  memoryBible = ls ? hydrateBible(ls) : hydrateBible({ content: '', updatedAt: Date.now() });
+  return memoryBible;
 }
 
 export function saveGlobalBible(bible: OracleBible): void {
   const normalized = hydrateBible(bible);
-  try {
-    localStorage.setItem(GLOBAL_BIBLE_KEY, JSON.stringify(normalized));
-  } catch (err) {
-    throw err instanceof Error
-      ? err
-      : new Error('Could not save the Bible locally (storage full). Sealed claims were not dropped.');
+  memoryBible = normalized;
+  if (typeof indexedDB === 'undefined') {
+    try {
+      localStorage.setItem(GLOBAL_BIBLE_KEY, JSON.stringify(normalized));
+    } catch (err) {
+      throw err instanceof Error
+        ? err
+        : new Error('Could not save the Bible locally (storage full). Sealed claims were not dropped.');
+    }
+    return;
   }
+  void kvSet(KV_KEYS.oracleBible, normalized)
+    .then(() => dropLocalStorageKey(GLOBAL_BIBLE_KEY))
+    .catch((err) => {
+      console.warn('[OracleStore] IndexedDB Bible save failed. Last good copy stays.', err);
+      try {
+        localStorage.setItem(GLOBAL_BIBLE_KEY, JSON.stringify(normalized));
+      } catch (lsErr) {
+        throw lsErr instanceof Error
+          ? lsErr
+          : new Error('Could not save the Bible locally (storage full). Sealed claims were not dropped.');
+      }
+    });
 }
 
 export function exportOracleThreads(

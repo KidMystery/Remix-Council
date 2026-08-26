@@ -41,7 +41,7 @@ import { pickBestFromCatalog, pricingIsFree } from '../lib/modelScoring';
 import { streamPersonaWithFallback } from '../lib/fallbackManager';
 import { ingestFile } from '../lib/evidenceIngest';
 import { stripRoundBodies } from '../lib/evidence';
-import { setItemOrReclaim } from '../lib/localStorageQuota';
+import { dropLocalStorageKey, kvDel, kvGet, kvSet, KV_KEYS, readLocalStorageJson } from '../lib/kvStore';
 import type { EvidenceRecord } from '../types';
 import { summarizeTitle } from '../lib/titleUtils';
 import type { DocumentChunkPlan } from '../lib/documentChunker';
@@ -325,25 +325,32 @@ interface PersistedMission {
   executionMode?: string | null;
 }
 
-function loadArchive(): PersistedMission[] {
+function isPersistedMission(raw: unknown): raw is PersistedMission {
+  return Boolean(raw && typeof raw === 'object' && Array.isArray((raw as PersistedMission).rounds));
+}
+
+async function loadArchive(): Promise<PersistedMission[]> {
   try {
-    const raw = localStorage.getItem(ARCHIVE_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+    const fromIdb = await kvGet<unknown>(KV_KEYS.nexusArchive);
+    if (Array.isArray(fromIdb)) return fromIdb as PersistedMission[];
+  } catch (err) {
+    console.warn('[NexusLab] IndexedDB archive read failed:', err);
   }
+  const fromLs = readLocalStorageJson<unknown>(ARCHIVE_STORAGE_KEY);
+  return Array.isArray(fromLs) ? (fromLs as PersistedMission[]) : [];
 }
 
 function pushArchive(mission: PersistedMission): void {
-  try {
-    const list = loadArchive();
-    list.unshift(mission);
-    setItemOrReclaim(ARCHIVE_STORAGE_KEY, JSON.stringify(list.slice(0, 20)));
-  } catch (err) {
-    console.warn('[NexusLab] Failed to archive mission:', err);
-  }
+  void (async () => {
+    try {
+      const list = await loadArchive();
+      list.unshift(sanitizeMissionForStorage(mission));
+      await kvSet(KV_KEYS.nexusArchive, list.slice(0, 20));
+      dropLocalStorageKey(ARCHIVE_STORAGE_KEY);
+    } catch (err) {
+      console.warn('[NexusLab] Failed to archive mission:', err);
+    }
+  })();
 }
 
 function sanitizeMissionForStorage(mission: PersistedMission): PersistedMission {
@@ -354,31 +361,31 @@ function sanitizeMissionForStorage(mission: PersistedMission): PersistedMission 
   };
 }
 
-function loadPersistedMission(): PersistedMission | null {
+async function loadPersistedMission(): Promise<PersistedMission | null> {
   try {
-    const raw = localStorage.getItem(MISSIONS_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.rounds)) {
-      return parsed as PersistedMission;
-    }
-    return null;
+    const fromIdb = await kvGet<unknown>(KV_KEYS.nexusMission);
+    if (isPersistedMission(fromIdb)) return fromIdb;
   } catch (err) {
-    console.warn('[NexusLab] Failed to load persisted mission:', err);
-    return null;
+    console.warn('[NexusLab] IndexedDB mission read failed:', err);
   }
+  const fromLs = readLocalStorageJson<unknown>(MISSIONS_STORAGE_KEY);
+  return isPersistedMission(fromLs) ? fromLs : null;
 }
 
 function persistMission(mission: PersistedMission | null): void {
-  try {
-    if (!mission) {
-      localStorage.removeItem(MISSIONS_STORAGE_KEY);
-      return;
+  void (async () => {
+    try {
+      if (!mission) {
+        await kvDel(KV_KEYS.nexusMission);
+        dropLocalStorageKey(MISSIONS_STORAGE_KEY);
+        return;
+      }
+      await kvSet(KV_KEYS.nexusMission, sanitizeMissionForStorage(mission));
+      dropLocalStorageKey(MISSIONS_STORAGE_KEY);
+    } catch (err) {
+      console.warn('[NexusLab] Failed to persist mission. Last good copy kept.', err);
     }
-    setItemOrReclaim(MISSIONS_STORAGE_KEY, JSON.stringify(sanitizeMissionForStorage(mission)));
-  } catch (err) {
-    console.warn('[NexusLab] Failed to persist mission (quota?). Last good copy kept.', err);
-  }
+  })();
 }
 
 function stripJsonBlocks(text: string): string {
@@ -502,10 +509,11 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
   const pauseRequestedRef = useRef(false);
 
-  // Restore the last persisted mission on mount.
+  // Restore the last persisted mission on mount (IndexedDB, then leftover LS).
   useEffect(() => {
-    const persisted = loadPersistedMission();
-    if (persisted) {
+    let cancelled = false;
+    void loadPersistedMission().then((persisted) => {
+      if (cancelled || !persisted) return;
       setMissionGoal(persisted.goal);
       setMissionTitle(persisted.title || summarizeTitle(persisted.goal));
       setMaxIterations(persisted.maxIterations);
@@ -534,11 +542,14 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         if (persisted.evidence) setEvidence(persisted.evidence);
         void import('../lib/evidenceIngest').then(({ hydrateAttachedBodies }) =>
           hydrateAttachedBodies(persisted.attachedFiles || [], persisted.evidence || []).then((h) => {
-            setAttachedFiles(h.files);
+            if (!cancelled) setAttachedFiles(h.files);
           })
         );
       }
-    }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Poll an in-flight server agent job. Re-attaches after a reload or tab

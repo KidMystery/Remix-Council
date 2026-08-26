@@ -7,6 +7,7 @@ import {
   saveOracleThreads,
   loadGlobalBible,
   saveGlobalBible,
+  hydrateOracleFromIdb,
   patchOracleThread,
   ORACLE_MODEL_OPTIONS,
   DEFAULT_MINI_DELIBERATION_MODELS,
@@ -58,6 +59,23 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
   const [isSavedNotice, setIsSavedNotice] = useState(false);
 
   const selectedThread = threads.find((t) => t.id === selectedThreadId) || threads[0] || null;
+
+  useEffect(() => {
+    let cancelled = false;
+    void hydrateOracleFromIdb().then(() => {
+      if (cancelled) return;
+      const loadedThreads = loadOracleThreads();
+      const loadedGlobal = loadGlobalBible();
+      setThreads(loadedThreads);
+      setGlobalBible(loadedGlobal);
+      setSelectedThreadId((prev) =>
+        loadedThreads.some((t) => t.id === prev) ? prev : loadedThreads[0]?.id || ''
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ---- Oracle model pool: custom models + Direct palette (global) ----
   const [customModels, setCustomModels] = useState<OracleCustomModel[]>(() => loadCustomOracleModels());

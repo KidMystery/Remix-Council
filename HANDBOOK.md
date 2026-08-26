@@ -94,7 +94,12 @@ This repo (main `05adca4` + L1/L2 port) is leaps ahead, and now wired to be **as
 1. You need a Google OAuth Client ID. Set `VITE_GOOGLE_CLIENT_ID` in your env, **or** the app falls back to the one in `firebase-applet-config.json` (its `oAuthClientId`), **or** you can paste one in **Storage & Cloud Sync → Settings**.
 2. The Client ID must have the app's origin (including the AI Studio / Railway domain) in its **Authorized JavaScript origins**.
 3. AI Studio injects its own environment — make sure `VITE_GOOGLE_CLIENT_ID` isn't being overwritten by the placeholder value `YOUR_GOOGLE_OAUTH_CLIENT_ID` (the app explicitly rejects that placeholder).
-4. Without Drive, everything still **works and saves locally** (localStorage) + JSON export/import.
+4. Without Drive, everything still **works and saves on this device** (IndexedDB) + JSON export/import.
+
+### Google login popped 4× while you slept
+The GIS access token lives in RAM only (~1 hour). A 401 used to call `signInWithGoogle()` with `prompt: 'select_account'`, which is an account picker. Chrome blocked the unattended popups, so Drive never saved; the tab kept running in RAM.
+
+**After this build:** a 401 tries **one silent refresh** (`prompt: ''`). If that fails, a morning banner says *Drive signed out overnight* and the lab keeps writing locally. The picker only opens when you click **Reconnect Drive**.
 
 ### Railway "won't deploy"
 1. The server already binds `0.0.0.0` and honors `PORT`, and `railway.json` points the healthcheck at `/api/health` — that part is solid.
@@ -103,11 +108,11 @@ This repo (main `05adca4` + L1/L2 port) is leaps ahead, and now wired to be **as
 4. ✅ `package-lock.json` is in sync with `package.json` (stale `firebase` deps dropped, engine aligned to 24.x). Nothing to do here.
 
 ### `Failed to execute 'setItem' … council-sessions-v3 exceeded the quota`
-Nexus used to copy the full CSV/PDF into every cycle's `userQuery`, then write that into Chamber sessions. `stripRoundBodies` blanked the attachment field but left the dump in the query — one monarch export × 3 Night Shift cycles blows the ~5 MB origin cap.
+Nexus used to copy the full CSV/PDF into every cycle's `userQuery`, then write that into Chamber sessions. `stripRoundBodies` blanked the attachment field but left the dump in the query — one monarch export × 3 Night Shift cycles blows the ~5 MB origin cap. Drive is 15 GB+ — that was never the local ceiling.
 
-**Right now (don't refresh):** the run is still in RAM. Export the Nexus dossier if a verdict exists. Then DevTools → Application → Local Storage → delete `openrouter_models_cache_v2` and `nexus-missions-archive-v1`. In Chamber, delete old threads you don't need. That frees the write. The last good `council-sessions-v3` copy was not overwritten.
+**If you are still on the old tab:** do not refresh first. The run is still in RAM. Export the Nexus dossier if a verdict exists. Then DevTools → Application → Local Storage → delete `openrouter_models_cache_v2` and `nexus-missions-archive-v1`. In Chamber, delete old threads you don't need. The last good `council-sessions-v3` copy was not overwritten.
 
-**After this build:** persist strips exhibit dumps from `userQuery`, and a quota hit drops those two cache keys and retries. Exhibit bodies are still never sliced.
+**After this build:** Chamber sessions, Nexus missions, and Oracle threads write to IndexedDB (`council-kv-v1`). After a successful IDB write the fat localStorage keys are dropped. Persist still strips exhibit dumps from `userQuery`. A leftover localStorage quota hit drops those two cache keys and retries. Exhibit bodies stay in `council-evidence-v1` and are never sliced. Drive is still the sync target. Fail closed: last good copy stays. The new store is live after deploy + reload.
 
 ### Chamber "spend cap on Highest Quality" / panel 0/3 + NOT STAMPED
 - Was bug: `DollarCostGovernor.recordUsage()` tripped at $0.00 when ceiling = 0 (Unlimited). Fixed Aug 25 to use `hasFiniteCap()` and reset per-round. If you still see `[CostGovernor] Hard Dollar Ceiling Tripped: ... limit of $0.00`, you are on stale bundle — hard refresh. Valid ceiling trip shows real limit like $0.25, not $0.00, and docket correctly blocks with `partial_panel` + banner "A Chair must not synthesize error strings into a verdict."
@@ -160,10 +165,11 @@ One rule: **never PUT a device's list over Drive without reading first.** A fail
 | **Tombstone** | Delete writes `{ id, deletedAt }` into the same JSON. A later edit (newer `updatedAt`) undeletes. Local copies of the marks live in `council-session-tombstones-v1` / `council-oracle-tombstones-v1`. |
 | **Fail closed** | If Drive cannot be read, we do not upload. Chamber shows the amber auto-save notice; Oracle shows a paper-form banner: *Drive unread — local copy was not uploaded, so the other device is safe.* |
 | **List fields** | Drive v3 `files.list` on `appDataFolder` must be `fields=files(id,name)` **never** etag. v3 `File` has no etag field in list; that extra field 400s. ETag for `If-Match` comes from the **GET media header**, not the list body. Helper `driveAppDataListUrl()` enforces this. |
-| **Quota** | localStorage quota is a failed write, not a silent drop. The last good copy stays on the device. |
+| **Quota** | IndexedDB is the local ceiling. A failed write is not a silent drop. The last good copy stays on the device. |
+| **Token death** | Overnight 401 → one silent GIS refresh. Fail → banner, no `select_account` picker. Lab keeps writing locally. |
 | **Agent 404** | Jobs live in `data/agent-jobs.json` on the server disk. A Railway redeploy with no volume returns 404. The UI says *Mission lost on redeploy (this server has no persistent volume).* — it does not invent an empty job. |
 
-**Debug without the original author:** open DevTools → Application → Local Storage for the tombstone keys, and inspect the Drive appData file (`council-sessions.json` / `council-oracle.json`). The merge tests live in `src/lib/__tests__/syncContract.test.ts`.
+**Debug without the original author:** open DevTools → Application → IndexedDB → `council-kv-v1` → `kv` (sessions / nexus / oracle). Leftover localStorage keys are migrate-from only. Drive appData is still `council-sessions.json` / `council-oracle.json`. Tests: `syncContract.test.ts`, `driveAuth.test.ts`, `localSessionStore.test.ts`.
 
 **Not a bug:** only the `OWNER_EMAIL` Google account can open the money route. Rotating three personal accounts will look like "the app locked me out" — that is the owner gate.
 
@@ -181,8 +187,7 @@ Debug: `session.handoff` on the Chamber session in DevTools. Tests in `chamberHa
 ## Storage map
 
 - **Evidence blobs** → IndexedDB `council-evidence-v1` / `blobs` (this device only; not Drive).
-- **Chamber/Nexus sessions** → `council-sessions-v3` (localStorage, exhibit metadata only) + Google Drive `appDataFolder/council-sessions.json` when signed in (v2 envelope + `deleted` tombstones).
-- **Oracle threads + Bibles** → `council-oracle-threads-v1` and `council-oracle-global-bible-v1` (localStorage; Bible is `{ content, updatedAt, claims[] }`), JSON export/import, **and** Drive `council-oracle.json` (claim merge, not blob LWW).
+- **Chamber sessions + Nexus missions + Oracle threads/Bibles** → IndexedDB `council-kv-v1` / `kv` (this device). After a successful write, fat localStorage keys (`council-sessions-v3`, `nexus-missions-v1`, `council-oracle-threads-v1`, …) are dropped. Drive `appDataFolder/council-sessions.json` + `council-oracle.json` remain the sync target when signed in (v2 envelope + `deleted` tombstones).
 - **Learned token budgets** → `council_token_governor_v1`.
 - **Fallback event log** → `council_fallback_events_v1`.
 - **Oracle custom models + Direct palette** → `council-oracle-custom-models-v1` and `council-oracle-direct-list-v1` (localStorage; included in the Oracle JSON export).

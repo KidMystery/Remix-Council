@@ -71,14 +71,23 @@ function getGisClientAsync(): Promise<any> {
 
 /**
  * Signs in with Google via GIS token client and resolves with the access token.
- * Explicitly uses prompt: 'select_account' so the user is presented with the Google
- * account selector and login screen rather than silently picking a predetermined profile.
+ * Default prompt is the account picker — only for a user click. Overnight
+ * recovery must pass prompt: '' so GIS does not open a popup.
  */
 export async function signInWithGoogle(options: SignInOptions = { prompt: 'select_account' }): Promise<string> {
   const clientId = getClientId();
   const oauth2 = await getGisClientAsync();
+  const silent = options.prompt === '';
 
   return new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error(silent ? 'Silent Drive refresh timed out.' : 'Google sign-in timed out.')),
+      silent ? 8000 : 120000
+    );
+    const finish = (fn: () => void) => {
+      clearTimeout(timeout);
+      fn();
+    };
     try {
       const tokenClient = oauth2.initTokenClient({
         client_id: clientId,
@@ -86,10 +95,12 @@ export async function signInWithGoogle(options: SignInOptions = { prompt: 'selec
         callback: async (response: any) => {
           if (response?.error) {
             if (response.error === 'popup_closed_by_user') {
-              reject(new Error('Google sign-in popup was closed before completing.'));
+              finish(() => reject(new Error('Google sign-in popup was closed before completing.')));
               return;
             }
-            reject(new Error(response.error_description || response.error || 'Google sign-in failed.'));
+            finish(() =>
+              reject(new Error(response.error_description || response.error || 'Google sign-in failed.'))
+            );
             return;
           }
 
@@ -113,20 +124,20 @@ export async function signInWithGoogle(options: SignInOptions = { prompt: 'selec
               console.warn('[DrivePersistence] Could not fetch user profile details:', err);
             }
 
-            resolve(response.access_token);
+            finish(() => resolve(response.access_token));
             return;
           }
 
-          reject(new Error('Google sign-in did not return an access token.'));
+          finish(() => reject(new Error('Google sign-in did not return an access token.')));
         },
       });
 
-      // Always request with prompt: 'select_account' so the user gets the Google account picker
+      // prompt: '' is silent (no picker). select_account is only for a click.
       tokenClient.requestAccessToken({
         prompt: options.prompt !== undefined ? options.prompt : 'select_account',
       });
     } catch (err: any) {
-      reject(err instanceof Error ? err : new Error(err?.message || 'Google sign-in failed.'));
+      finish(() => reject(err instanceof Error ? err : new Error(err?.message || 'Google sign-in failed.')));
     }
   });
 }
@@ -228,6 +239,40 @@ export class DriveUnreadError extends Error {
     super(message);
     this.name = 'DriveUnreadError';
   }
+}
+
+/** Token died. Local save is fine. Do not pop a Google picker while the owner sleeps. */
+export class DriveAuthRequiredError extends Error {
+  constructor(
+    message: string = 'Drive sign-in expired. Local copy is still saving. Reconnect when you are at the keyboard.'
+  ) {
+    super(message);
+    this.name = 'DriveAuthRequiredError';
+  }
+}
+
+export const DRIVE_AUTH_REQUIRED_EVENT = 'council-drive-auth-required';
+export const DRIVE_AUTH_RESTORED_EVENT = 'council-drive-auth-restored';
+
+export function notifyDriveNeedsReauth(): void {
+  try {
+    window.dispatchEvent(new CustomEvent(DRIVE_AUTH_REQUIRED_EVENT));
+  } catch {
+    // non-browser
+  }
+}
+
+export function notifyDriveAuthRestored(): void {
+  try {
+    window.dispatchEvent(new CustomEvent(DRIVE_AUTH_RESTORED_EVENT));
+  } catch {
+    // non-browser
+  }
+}
+
+/** Silent first. Interactive picker is only for a click. */
+export function authRecoveryStep(silentAlreadyTried: boolean): 'silent' | 'banner' {
+  return silentAlreadyTried ? 'banner' : 'silent';
 }
 
 class PreconditionError extends Error {
@@ -349,11 +394,15 @@ async function withAuthRetry<T>(op: (token: string) => Promise<T>): Promise<T> {
   try {
     return await op(requireToken());
   } catch (err: any) {
-    if (err instanceof AuthError) {
-      await signInWithGoogle();
-      return op(requireToken());
+    if (!(err instanceof AuthError)) throw err;
+    try {
+      await signInWithGoogle({ prompt: '' });
+      notifyDriveAuthRestored();
+      return await op(requireToken());
+    } catch {
+      notifyDriveNeedsReauth();
+      throw new DriveAuthRequiredError();
     }
-    throw err;
   }
 }
 
