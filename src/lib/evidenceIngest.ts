@@ -7,7 +7,7 @@
  * hash-addressed Drive appData file. Session JSON still never carries a body.
  */
 
-import type { AttachedTextFile, EvidenceRecord } from '../types';
+import type { AttachedTextFile, EvidenceRecord, ZipArchiveResult } from '../types';
 import { makeEvidenceRecord, sha256Hex } from './evidence';
 import { putEvidenceBlob } from './evidenceStore';
 import { pushEvidenceBlobsToDrive } from './evidenceDrive';
@@ -22,6 +22,8 @@ export interface IngestedFile {
   attached: AttachedTextFile;
   /** Full extracted text for this live session. Not written to session JSON. */
   body: string;
+  /** Structured zip/rar tree for the inspect modal. Live session only. */
+  archive?: ZipArchiveResult;
 }
 
 function isArchiveName(name: string): boolean {
@@ -47,11 +49,13 @@ export async function ingestFile(file: File): Promise<IngestedFile> {
   let filesInArchive: number | undefined;
   let filesExtracted: number | undefined;
   let failDetail: string | undefined;
+  let archive: ZipArchiveResult | undefined;
 
   try {
     if (isArchiveName(file.name)) {
       extractor = 'zip-code';
       const result = await extractCodeFromArchive(file);
+      archive = result;
       body = result.formattedContext || '';
       filesInArchive = result.totalFiles;
       filesExtracted = result.extractedCodeFilesCount;

@@ -1,4 +1,4 @@
-import type { ArchiveManifestEntry, ExtractedZipFile } from '../types';
+import type { ArchiveManifestEntry, AttachedTextFile, ExtractedZipFile, ZipArchiveResult } from '../types';
 
 export const MAX_EXTRACTED_FILES = 200;
 export const MAX_FILE_CHARS = 150_000;
@@ -120,4 +120,82 @@ export function buildCodebaseContext(
   context += `================================================================================\n`;
 
   return context;
+}
+
+const FILE_SPLIT = /\n-{20,}\nFILE: /;
+
+/** Rebuild the per-file list from a formatted archive dump (after hydrate). */
+export function parseCodebaseContext(formatted: string): ExtractedZipFile[] {
+  if (!formatted) return [];
+  const parts = formatted.split(FILE_SPLIT);
+  if (parts.length < 2) return [];
+  const files: ExtractedZipFile[] = [];
+  for (let i = 1; i < parts.length; i++) {
+    const m = parts[i].match(/^(.+?) \((\d+) chars\)( \[TRUNCATED\])?\n-{20,}\n([\s\S]*)$/);
+    if (!m) continue;
+    const content = (m[4] || '')
+      .replace(/\n={10,}[\s\S]*$/, '')
+      .replace(/\n$/, '');
+    files.push({
+      path: m[1],
+      name: m[1].split('/').pop() || m[1],
+      size: content.length,
+      content,
+      isCode: true,
+      truncated: Boolean(m[3]),
+    });
+  }
+  return files;
+}
+
+export function isArchiveAttachment(file: Pick<AttachedTextFile, 'name' | 'type'>): boolean {
+  const name = (file.name || '').toLowerCase();
+  const type = (file.type || '').toLowerCase();
+  return type === 'zip' || type === 'rar' || name.endsWith('.zip') || name.endsWith('.rar');
+}
+
+/**
+ * Structured inspect payload for the zip modal. Prefers FILE: sections in the
+ * dump; otherwise shows the dump as one file so the eye still works after hydrate.
+ */
+export function zipResultFromAttached(file: AttachedTextFile): ZipArchiveResult | null {
+  if (!isArchiveAttachment(file)) return null;
+  const name = file.name || 'archive.zip';
+  const archiveType: 'zip' | 'rar' =
+    file.type === 'rar' || name.toLowerCase().endsWith('.rar') ? 'rar' : 'zip';
+  const parsed = parseCodebaseContext(file.content || '');
+  const files =
+    parsed.length > 0
+      ? parsed
+      : file.content
+        ? [
+            {
+              path: name,
+              name: name.split('/').pop() || name,
+              size: file.content.length,
+              content: file.content,
+              isCode: true,
+            },
+          ]
+        : [];
+  if (files.length === 0) return null;
+  return {
+    filename: name,
+    archiveType,
+    files,
+    totalFiles: files.length,
+    extractedCodeFilesCount: files.length,
+    wasTruncated: (file.content || '').includes('PARTIAL CONTEXT'),
+    warnings: [],
+    formattedContext: file.content || '',
+  };
+}
+
+export function archivesFromFiles(files: AttachedTextFile[]): Record<string, ZipArchiveResult> {
+  const out: Record<string, ZipArchiveResult> = {};
+  for (const f of files) {
+    const z = zipResultFromAttached(f);
+    if (z) out[f.name] = z;
+  }
+  return out;
 }

@@ -68,6 +68,8 @@ import {
   canLaunchNexus,
   packExhibitsForServer,
 } from '../lib/nexusExhibits';
+import { archivesFromFiles, isArchiveAttachment, zipResultFromAttached } from '../lib/zipUtils';
+import { formatSandboxReport, verifyMissionCode } from '../lib/codeSandbox';
 import { ZipFilesModal } from './ZipFilesModal';
 import { MessageMarkdown } from './MessageMarkdown';
 import {
@@ -532,6 +534,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [activeZipResult, setActiveZipResult] = useState<ZipArchiveResult | null>(null);
+  const [zipArchives, setZipArchives] = useState<Record<string, ZipArchiveResult>>({});
   const [isZipModalOpen, setIsZipModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -610,6 +613,9 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setTerminalLogs([]);
     setAttachedFiles([]);
     setEvidence([]);
+    setZipArchives({});
+    setActiveZipResult(null);
+    setIsZipModalOpen(false);
     setMissionStatus('idle');
     setMissionGoal('');
     setMissionTitle('Nexus Mission');
@@ -655,11 +661,13 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     }
     if (persisted.attachedFiles && Array.isArray(persisted.attachedFiles)) {
       setAttachedFiles(persisted.attachedFiles);
+      setZipArchives(archivesFromFiles(persisted.attachedFiles));
       if (persisted.evidence) setEvidence(persisted.evidence);
       void import('../lib/evidenceIngest').then(({ hydrateAttachedBodies }) =>
         hydrateAttachedBodies(persisted.attachedFiles || [], persisted.evidence || []).then((h) => {
           if (cancelled()) return;
           setAttachedFiles(h.files);
+          setZipArchives((prev) => ({ ...archivesFromFiles(h.files), ...prev }));
           if (h.driveUnread) {
             console.warn('[NexusLab] Drive unread — exhibit bodies not hydrated.');
           } else if (h.missingBlobIds.length) {
@@ -670,6 +678,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     } else {
       setAttachedFiles([]);
       setEvidence(persisted.evidence || []);
+      setZipArchives({});
     }
     setParentMissionId(persisted.parentMissionId || null);
     setFollowUpContext(persisted.followUpContext || null);
@@ -823,10 +832,17 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         const ingested = await ingestFile(file);
         newAttachments.push(ingested.attached);
         newEvidence.push(ingested.evidence);
+        const zip = ingested.archive || zipResultFromAttached(ingested.attached);
+        if (zip) {
+          setZipArchives((prev) => ({ ...prev, [file.name]: zip }));
+        }
+        const extracted = ingested.evidence.coverage.filesExtracted;
         addLog(
           ingested.evidence.extractor === 'failed'
             ? `❌ ${file.name}: ${ingested.evidence.failDetail || 'extractor failed'}`
-            : `✓ ${file.name} — ${ingested.evidence.coverage.extractedChars.toLocaleString()} chars on docket (blob on this device${isGoogleSignedIn() ? ' + Drive' : ''}).`
+            : extracted != null
+              ? `✓ ${file.name} — ${extracted} file${extracted === 1 ? '' : 's'} extracted (${ingested.evidence.coverage.extractedChars.toLocaleString()} chars). Eye to inspect.`
+              : `✓ ${file.name} — ${ingested.evidence.coverage.extractedChars.toLocaleString()} chars on docket (blob on this device${isGoogleSignedIn() ? ' + Drive' : ''}).`
         );
       } catch (err: any) {
         addLog(`❌ Error loading file ${file.name}: ${err.message}`);
@@ -872,7 +888,18 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   };
 
   const handleRemoveFile = (index: number) => {
-    setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
+    setAttachedFiles((prev) => {
+      const removed = prev[index];
+      if (removed) {
+        setZipArchives((z) => {
+          const next = { ...z };
+          delete next[removed.name];
+          return next;
+        });
+        setActiveZipResult((cur) => (cur?.filename === removed.name ? null : cur));
+      }
+      return prev.filter((_, i) => i !== index);
+    });
   };
 
   const getEstimatedCost = (): number => {
@@ -1209,6 +1236,23 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         .map(([id, r]) => `Persona (${id}):\n${r.content}`)
         .join('\n\n');
 
+      let sandboxBlock = '';
+      if (enableCodeSandbox) {
+        const checks = verifyMissionCode({
+          texts: Object.values(newRound.deliberation.stage1).map((r) => r.content || ''),
+          files: attachedFiles.map((f) => ({ name: f.name, content: f.content || '' })),
+        });
+        sandboxBlock = formatSandboxReport(checks);
+        if (checks.length === 0) {
+          addLog('🔬 Code verifier: no fences or .js/.json files to check.');
+        } else {
+          const ok = checks.filter((c) => c.status === 'ok').length;
+          const bad = checks.filter((c) => c.status === 'error').length;
+          const skipped = checks.filter((c) => c.status === 'skipped').length;
+          addLog(`🔬 Code verifier: ${ok} ok, ${bad} error, ${skipped} skipped (compile only).`);
+        }
+      }
+
       let synthesis = '';
       let consensusMetric: ConsensusMetric | undefined;
       try {
@@ -1244,7 +1288,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
           persona: chairPersona,
           messages: [
             { role: 'system', content: 'You are the Presiding Nexus Chair. Synthesize decisive consensus, list immutable invariants, and calculate convergence alignment. After your synthesis append exactly one fenced JSON block with keys: agreementScore (integer 0-100), keyConsensusPoints (array), keyDisagreements (array), panelistAlignment (object of persona id -> integer 0-100).' },
-            { role: 'user', content: `Synthesize ${p.label} findings:\n\n${s1Text}${reconsiderBlock}` },
+            { role: 'user', content: `Synthesize ${p.label} findings:\n\n${s1Text}${sandboxBlock ? `\n\n${sandboxBlock}` : ''}${reconsiderBlock}` },
           ],
           policy,
           rawModels: catalog,
@@ -1852,7 +1896,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                       </span>
                     </div>
                     {attachedFiles.map((file, idx) => {
-                      const isArchive = file.type === 'zip' || file.type === 'rar' || file.name.endsWith('.zip') || file.name.endsWith('.rar');
+                      const isArchive = isArchiveAttachment(file);
+                      const zip = zipArchives[file.name] || zipResultFromAttached(file);
                       const isPdf = file.type === 'pdf' || file.name.endsWith('.pdf');
                       return (
                         <div
@@ -1880,10 +1925,13 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                           </div>
 
                           <div className="flex items-center gap-1">
-                            {isArchive && activeZipResult && (
+                            {isArchive && zip && (
                               <button
                                 type="button"
-                                onClick={() => setIsZipModalOpen(true)}
+                                onClick={() => {
+                                  setActiveZipResult(zip);
+                                  setIsZipModalOpen(true);
+                                }}
                                 className="p-1.5 text-slate-400 hover:text-purple-300 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer min-w-[28px] min-h-[28px] flex items-center justify-center"
                                 title="Inspect extracted archive files"
                               >
@@ -2127,7 +2175,12 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 <label className="flex items-center justify-between p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer hover:border-slate-700">
                   <div className="flex items-center gap-2 text-xs text-slate-300">
                     <Code2 size={14} className="text-purple-400" />
-                    <span>Sandboxed Code Verifier</span>
+                    <div>
+                      <div>Sandboxed Code Verifier</div>
+                      <div className="text-[10px] text-slate-500 font-normal">
+                        Parse JSON / compile JS from fences and exhibits. Never executed.
+                      </div>
+                    </div>
                   </div>
                   <input
                     type="checkbox"
