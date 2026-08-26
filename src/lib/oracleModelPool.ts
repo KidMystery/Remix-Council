@@ -319,10 +319,14 @@ export function restoreDefaultOracleDirectList(): string[] {
 export function resolveRotationModel(
   turnCount: number,
   roster: string[] | null | undefined,
-  fallbackRoster: string[] = DEFAULT_ROTATION_ROSTER
+  fallbackRoster: string[] = DEFAULT_ROTATION_ROSTER,
+  isUsable?: (id: string) => boolean
 ): string {
   const list = Array.isArray(roster) && roster.length > 0 ? roster : fallbackRoster;
   const safe = list.length > 0 ? list : DEFAULT_ROTATION_ROSTER;
+  const usable = isUsable ? safe.filter(isUsable) : safe;
+  if (usable.length > 0) return usable[(turnCount || 0) % usable.length];
+  if (isUsable) return ORACLE_ERROR_RETRY_MODEL;
   return safe[(turnCount || 0) % safe.length];
 }
 

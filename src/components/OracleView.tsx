@@ -345,9 +345,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
   const handleNewThread = () => {
     const t = newOracleThread(activeThread?.model);
     if (activeThread) {
-      // New threads inherit the active thread's mode, rosters, and toggles —
-      // the models you added to Auto-Rotate are the ones that rotate.
-      t.mode = activeThread.mode || 'direct';
+      // Rosters and toggles copy over. Mode always starts Direct so a
+      // failing Auto-Rotate thread does not follow you into a fresh chat.
+      t.mode = 'direct';
       t.miniDeliberationModels = [
         ...(activeThread.miniDeliberationModels && activeThread.miniDeliberationModels.length > 0
           ? activeThread.miniDeliberationModels
@@ -557,16 +557,27 @@ export const OracleView: React.FC<OracleViewProps> = ({
 
     // Remove the error message from the thread
     const cleaned = thread.messages.filter((m) => m.id !== failedMsgId);
-    const targetModel = fallbackModel || thread.model;
-    const updatedThread: OracleThread = { ...thread, model: targetModel, messages: cleaned, updatedAt: Date.now() };
+    const unstickToAuto = fallbackModel === ORACLE_ERROR_RETRY_MODEL;
+    const updatedThread: OracleThread = {
+      ...thread,
+      model: unstickToAuto ? fallbackModel : thread.model,
+      mode: unstickToAuto ? 'direct' : thread.mode,
+      turnCount:
+        !unstickToAuto && thread.mode === 'rotation'
+          ? (thread.turnCount || 0) + 1
+          : thread.turnCount,
+      messages: cleaned,
+      updatedAt: Date.now(),
+    };
     commitThread(updatedThread);
 
-    // Call handleSend with previous user message content without duplicating userMsg
+    // Auto retry is an escape hatch: Direct + openrouter/auto.
+    // Regular retry in rotation advances the roster so we don't re-hit the dead id.
     await handleSend(
       precedingUserMsg.content,
       precedingUserMsg.images || [],
       precedingUserMsg.files || [],
-      targetModel,
+      unstickToAuto ? fallbackModel : undefined,
       true
     );
   };
@@ -646,6 +657,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
     const contextBlock = `[Your Living Memory (Thread Bible)]:\n${renderBiblePrompt(latest.bible) || '(empty)'}\n\n[Global Bible]:\n${renderBiblePrompt(globalBibleRef.current) || '(empty)'}`;
 
     const mode = latest.mode || 'direct';
+    let attemptedModel = effectiveModel;
 
     try {
       // 1. Reflect (internal plan + Bible facts to update).
@@ -812,14 +824,20 @@ export const OracleView: React.FC<OracleViewProps> = ({
       } else {
         // --- DIRECT OR ROTATION MODE ---
         let selectedModel = effectiveModel;
-        if (mode === 'rotation') {
-          // Deterministic cycling through the thread's roster (wrap-around).
+        if (mode === 'rotation' && !modelOverride) {
+          // Skip ids the live catalog no longer has. All-dead roster → Auto.
+          const isLive = (id: string) =>
+            !Array.isArray(catalog) || catalog.length === 0
+              ? true
+              : catalog.some((m) => m?.id?.toLowerCase() === id.toLowerCase());
           selectedModel = resolveRotationModel(
             latest.turnCount || 0,
             latest.rotationModels,
-            DEFAULT_ROTATION_ROSTER
+            DEFAULT_ROTATION_ROSTER,
+            isLive
           );
         }
+        attemptedModel = selectedModel;
 
         const voice = latest.rotateVoices ? pickVoice(latest.turnCount || 0) : null;
         if (voice) {
@@ -968,7 +986,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
           content: rawErr.startsWith('[Error:') ? rawErr : `[Error: ${rawErr}]`,
           timestamp: Date.now(),
           error: true,
-          model: effectiveModel,
+          model: attemptedModel,
         };
         commitThread({ ...latest, messages: [...latest.messages, errMsg], updatedAt: Date.now() });
       }

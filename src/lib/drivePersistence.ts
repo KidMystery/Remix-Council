@@ -789,9 +789,16 @@ export function mergeOracleThreads(
       const incomingTitle = incoming.title && incoming.title !== 'New Consultation' && incoming.title !== 'New Conversation';
       const existingTitle = existing.title && existing.title !== 'New Consultation' && existing.title !== 'New Conversation';
 
+      // Mode / model / rosters belong to whoever edited last. Spreading incoming
+      // unconditionally was snapping a live Direct click back to a stale
+      // Auto-Rotate copy on every Drive save.
+      const incomingNewer = (incoming.updatedAt || 0) > (existing.updatedAt || 0);
+      const newer = incomingNewer ? incoming : existing;
+      const older = incomingNewer ? existing : incoming;
+
       const mergedThread = {
-        ...existing,
-        ...incoming,
+        ...older,
+        ...newer,
         title: incomingTitle ? incoming.title : existingTitle ? existing.title : incoming.title || existing.title,
         messages: mergedMessages,
         bible: mergeBibles(existing.bible, incoming.bible),

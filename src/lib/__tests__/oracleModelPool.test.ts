@@ -234,6 +234,18 @@ describe('resolveRotationModel (Auto-Rotate)', () => {
     const n = DEFAULT_ROTATION_ROSTER.length;
     expect(resolveRotationModel(n, DEFAULT_ROTATION_ROSTER)).toBe(DEFAULT_ROTATION_ROSTER[0]);
   });
+
+  it('skips dead roster ids when a liveness predicate is provided', () => {
+    const roster = ['dead/one', 'live/two', 'dead/three'];
+    const isLive = (id: string) => id.startsWith('live/');
+    expect(resolveRotationModel(0, roster, roster, isLive)).toBe('live/two');
+    expect(resolveRotationModel(1, roster, roster, isLive)).toBe('live/two');
+  });
+
+  it('falls back to OpenRouter Auto when every roster id is dead', () => {
+    const roster = ['dead/one', 'dead/two'];
+    expect(resolveRotationModel(0, roster, roster, () => false)).toBe(OPENROUTER_AUTO);
+  });
 });
 
 describe('filterVisionSafeRoster (vision guard)', () => {

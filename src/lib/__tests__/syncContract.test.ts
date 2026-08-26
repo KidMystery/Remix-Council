@@ -120,6 +120,41 @@ describe('merge-before-put (two devices)', () => {
 });
 
 describe('oracle merge + envelopes', () => {
+  it('does not let a stale Drive copy snap mode back to Auto-Rotate', () => {
+    const { merged } = mergeOracleThreads(
+      [
+        {
+          id: 't1',
+          title: 'Hal',
+          updatedAt: 200,
+          mode: 'direct',
+          model: 'z-ai/glm-5.3',
+          messages: [],
+        },
+      ],
+      [
+        {
+          id: 't1',
+          title: 'Hal',
+          updatedAt: 50,
+          mode: 'rotation',
+          model: 'google/gemini-3.7-flash',
+          messages: [],
+        },
+      ]
+    );
+    expect(merged[0].mode).toBe('direct');
+    expect(merged[0].model).toBe('z-ai/glm-5.3');
+  });
+
+  it('lets a newer remote mode win', () => {
+    const { merged } = mergeOracleThreads(
+      [{ id: 't1', title: 'Hal', updatedAt: 10, mode: 'direct', messages: [] }],
+      [{ id: 't1', title: 'Hal', updatedAt: 80, mode: 'mini_deliberation', messages: [] }]
+    );
+    expect(merged[0].mode).toBe('mini_deliberation');
+  });
+
   it('unions messages from both devices and honors thread tombstones', () => {
     const { merged, deleted } = mergeOracleThreads(
       [{ id: 't1', title: 'Hal', updatedAt: 10, messages: [{ id: 'm1', content: 'hi', timestamp: 1 }] }],
