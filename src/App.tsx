@@ -28,6 +28,7 @@ import { StorageSyncModal } from './components/StorageSyncModal';
 import { UnifiedToast } from './components/UnifiedToast';
 import type { ChamberHandoff } from './lib/chamberHandoff';
 import { summarizeTitle } from './lib/titleUtils';
+import { hydrateOracleFromIdb } from './lib/oracleStore';
 
 const SETTINGS_KEYS = {
   enableChunking: 'council_enable_chunking',
@@ -108,16 +109,23 @@ export default function App() {
   const [outcomeTrackingEnabled, setOutcomeTrackingEnabled] = useState(false);
   const [archivistRecentRounds, setArchivistRecentRounds] = useState(2);
   const [disableFallback, setDisableFallback] = useState(false);
-  const [disableLoadingOverlay, setDisableLoadingOverlay] = useState(false);
-  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>({
-    enableSoundAlerts: true,
-    soundVolume: 0.5,
-    enableBrowserNotifications: false,
-    notifyOnDeliberationComplete: true,
-    notifyOnError: true,
-    notifyOnCostThreshold: true,
+  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>(() => {
+    const defaults: NotificationPreferences = {
+      enableSoundAlerts: true,
+      soundVolume: 0.5,
+      enableBrowserNotifications: false,
+      notifyOnDeliberationComplete: true,
+      notifyOnError: true,
+      notifyOnCostThreshold: true,
+    };
+    try {
+      const saved = localStorage.getItem('council_notification_preferences');
+      if (saved) return { ...defaults, ...JSON.parse(saved) };
+    } catch {
+      /* ignore */
+    }
+    return defaults;
   });
-  const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
 
   const [costCeiling, setCostCeiling] = useState<CostCeilingConfig>({
     maxSpendPerMissionDollars: 2.0,
@@ -160,7 +168,12 @@ export default function App() {
     autoSaveState,
     flushNow,
     isLoading,
+    driveNeedsReauth,
   } = useSessionManager();
+
+  useEffect(() => {
+    void hydrateOracleFromIdb();
+  }, []);
 
   // Load the model catalog on mount.
   useEffect(() => {
@@ -366,8 +379,25 @@ export default function App() {
         onSignOut={handleSignOut}
       />
 
+      {driveNeedsReauth && (
+        <div className="px-3 sm:px-4 pt-2">
+          <div className="flex flex-wrap items-center gap-3 px-3.5 py-2.5 rounded-xl bg-amber-950/80 border border-amber-600/50 text-amber-100 text-sm">
+            <span className="flex-1 min-w-[200px]">
+              Drive signed out overnight. Local copy is still saving on this device. Reconnect when you are at the keyboard.
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleSignIn()}
+              className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold cursor-pointer"
+            >
+              Reconnect Drive
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-1 w-full">
-        {view !== 'oracle' && (
+        {view === 'chamber' && (
           <CouncilSidebar
           isOpen={isSidebarOpen}
           onClose={() => setIsSidebarOpen(false)}
@@ -434,6 +464,7 @@ export default function App() {
               disableFallback={disableFallback}
               useSingleModelForSimple={useSingleModelForSimple}
               outcomeTrackingEnabled={outcomeTrackingEnabled}
+              notificationPreferences={notificationPreferences}
               autoSaveState={autoSaveState}
               lastSavedAt={lastSavedAt}
               isSaving={isSaving}
@@ -448,9 +479,10 @@ export default function App() {
               personas={personas}
               synthesizer={synthesizer}
               catalog={effectiveCatalog}
-              onCompleteRound={updateRoundInActiveSession}
-              activeSessionId={activeSessionId}
               costCeiling={costCeiling}
+              isSignedIn={isSignedIn}
+              isSidebarOpen={isSidebarOpen}
+              onCloseSidebar={() => setIsSidebarOpen(false)}
             />
           ) : (
             <OracleView
@@ -458,6 +490,7 @@ export default function App() {
               catalog={effectiveCatalog}
               availableModels={effectiveCatalog.map((m) => ({ id: m.id, name: m.name || m.id }))}
               onOpenSettings={handleOpenSettingsTab}
+              onHandoffToChamber={handleOracleHandoff}
             />
           )}
         </main>
@@ -486,7 +519,6 @@ export default function App() {
         setSynthesisMaxTokens={setSynthesisMaxTokens}
         panelTimeoutSeconds={panelTimeoutSeconds}
         setPanelTimeoutSeconds={setPanelTimeoutSeconds}
-        setIsAuditModalOpen={setIsAuditModalOpen}
         onRefreshModels={hookRecs.refreshModelRecommendations}
         activePresetId={activePresetId}
         setActivePresetId={setActivePresetId}
@@ -511,8 +543,6 @@ export default function App() {
         setArchivistRecentRounds={setArchivistRecentRounds}
         disableFallback={disableFallback}
         setDisableFallback={setDisableFallback}
-        disableLoadingOverlay={disableLoadingOverlay}
-        setDisableLoadingOverlay={setDisableLoadingOverlay}
         notificationPreferences={notificationPreferences}
         onUpdateNotifications={setNotificationPreferences}
         onExportSessions={handleExportSessions}

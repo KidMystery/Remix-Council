@@ -3,7 +3,9 @@
  *
  * One rule: a round cannot be stamped COMPLETED while any blocker is open.
  * Session JSON stores exhibit *metadata* only. Extracted bodies live in
- * IndexedDB (see evidenceStore.ts). Drive never receives file bytes.
+ * IndexedDB (see evidenceStore.ts) and, when signed in, as hash-addressed
+ * Drive appData files (`council-blob-<id>.txt`). JSON envelopes never
+ * receive a body. Original PDF bytes are never uploaded.
  *
  * This file is pure — no DOM, no IndexedDB — so it is the place to debug
  * “why wasn’t this stamped?” Open the round, read `stamp` + `blockers`.
@@ -184,7 +186,7 @@ export function collectRunBlockers(input: StampInput): RunBlocker[] {
     blockers.push({
       type: 'blob_missing',
       evidenceId: id,
-      detail: `${ev?.name || id}: the extracted body is not on this device. Re-attach the file before Resume.`,
+      detail: `${ev?.name || id}: the extracted body is not on this device or Drive. Re-attach the file before Resume.`,
     });
   }
 
@@ -279,17 +281,55 @@ export function resolveCostCeilingUSD(uiValue: number | undefined | null): numbe
 }
 
 /**
- * Persistence shape: keep exhibit metadata, drop file bodies.
- * If a writer would have to slice a body to fit storage, it is a failed write
- * — this function never slices.
+ * Nexus (and Chamber attach-in-prompt paths) used to persist the full exhibit
+ * dump inside `userQuery`. That copy is what blows the ~5 MB localStorage
+ * quota — stripRoundBodies already blanked attachedTextFiles.content, but
+ * left the same bytes sitting in the query string.
+ *
+ * Only our injected dump markers are cut. A user-typed question is left alone.
  */
-export function stripRoundBodies<T extends Pick<CouncilRound, 'attachedTextFiles' | 'evidence'>>(round: T): T {
+const EXHIBIT_DUMP_MARKERS = [
+  '[Attached exhibits]:',
+  '[Exhibit part ',
+  '[Document: ',
+  '\n--- File: ',
+  '<council_attachment ',
+];
+
+export const STORED_QUERY_OMITTED =
+  '[Exhibits omitted from session storage — bodies live in IndexedDB.]';
+
+export function compactStoredUserQuery(query: string | undefined): string {
+  const q = String(query || '');
+  if (!q) return q;
+  let cut = -1;
+  for (const marker of EXHIBIT_DUMP_MARKERS) {
+    const i = q.indexOf(marker);
+    if (i >= 0 && (cut < 0 || i < cut)) cut = i;
+  }
+  if (cut < 0) return q;
+  const head = q.slice(0, cut).trimEnd();
+  return head ? `${head}\n\n${STORED_QUERY_OMITTED}` : STORED_QUERY_OMITTED;
+}
+
+/**
+ * Persistence shape: keep exhibit metadata, drop file bodies, drop exhibit
+ * dumps that were copied into userQuery. Never slice a body to fit.
+ */
+export function stripRoundBodies<T extends Pick<CouncilRound, 'attachedTextFiles' | 'evidence' | 'userQuery'>>(
+  round: T
+): T {
   const attached = (round.attachedTextFiles || []).map((f) => ({
     ...f,
     content: '',
     evidenceId: f.evidenceId,
   }));
-  return { ...round, attachedTextFiles: attached, evidence: round.evidence || [] };
+  return {
+    ...round,
+    userQuery: compactStoredUserQuery(round.userQuery),
+    attachedTextFiles: attached,
+    evidence: round.evidence || [],
+  };
 }
 
 export function stripSessionBodies<T extends { rounds?: CouncilRound[] }>(session: T): T {

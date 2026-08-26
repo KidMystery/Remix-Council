@@ -40,15 +40,36 @@ import { policyForPreset, type ExecutionPolicy } from '../lib/executionPolicy';
 import { pickBestFromCatalog, pricingIsFree } from '../lib/modelScoring';
 import { streamPersonaWithFallback } from '../lib/fallbackManager';
 import { ingestFile } from '../lib/evidenceIngest';
-import { stripRoundBodies } from '../lib/evidence';
+import { dropLocalStorageKey, kvDel, kvGet, kvSet, KV_KEYS, readLocalStorageJson } from '../lib/kvStore';
 import type { EvidenceRecord } from '../types';
 import { summarizeTitle } from '../lib/titleUtils';
+import {
+  deleteNexusMission,
+  isPersistedMission,
+  listNexusMissions,
+  mergeNexusDocs,
+  openNexusMission,
+  parkActiveMission,
+  renameNexusMission,
+  sanitizeMissionForStorage,
+  type PersistedMission,
+  type Tombstone,
+} from '../lib/nexusMission';
+import { NexusSidebar } from './NexusSidebar';
+import {
+  DRIVE_AUTH_RESTORED_EVENT,
+  isGoogleSignedIn,
+  loadNexusDriveDoc,
+  saveNexusToDrive,
+} from '../lib/drivePersistence';
 import type { DocumentChunkPlan } from '../lib/documentChunker';
 import {
   buildOvernightPlan,
   canLaunchNexus,
   packExhibitsForServer,
 } from '../lib/nexusExhibits';
+import { archivesFromFiles, isArchiveAttachment, zipResultFromAttached } from '../lib/zipUtils';
+import { formatSandboxReport, verifyMissionCode } from '../lib/codeSandbox';
 import { ZipFilesModal } from './ZipFilesModal';
 import { MessageMarkdown } from './MessageMarkdown';
 import {
@@ -64,9 +85,10 @@ export interface NexusLabViewProps {
   personas: Persona[];
   synthesizer: Persona;
   catalog: RawOpenRouterModel[];
-  onCompleteRound: (sessionId: string, round: CouncilRound) => void;
-  activeSessionId?: string | null;
   costCeiling: CostCeilingConfig;
+  isSignedIn?: boolean;
+  isSidebarOpen?: boolean;
+  onCloseSidebar?: () => void;
 }
 
 export type NexusExecutionMode = 'agent' | 'autonomous' | 'mini_deliberation' | 'model_rotation';
@@ -299,85 +321,122 @@ function sourceHost(url: string): string {
 
 const MISSIONS_STORAGE_KEY = 'nexus-missions-v1';
 const ARCHIVE_STORAGE_KEY = 'nexus-missions-archive-v1';
+const NEXUS_DRIVE_THROTTLE_MS = 4000;
 
-
-interface PersistedMission {
-  id: string;
-  goal: string;
-  title?: string;
-  presetId: string;
-  maxIterations: number;
-  currentIteration: number;
-  status: 'idle' | 'running' | 'paused' | 'converged' | 'max_reached' | 'awaiting_approval' | 'error';
-  rounds: CouncilRound[];
-  consensusMetrics: ConsensusMetric[];
-  estimatedCost: number;
-  attachedFiles?: AttachedTextFile[];
-  evidence?: EvidenceRecord[];
-  updatedAt: number;
-  /** Night Shift morning-brief changelog (what changed overnight). */
-  morningBrief?: string | null;
-  nightShift?: { cycles: number; paceMinutes: number } | null;
-  /** Server-run agent job (re-attachable after a reload or tab close). */
-  serverJobId?: string | null;
-  /** Which execution mode produced this mission. */
-  executionMode?: string | null;
+function newMissionId(): string {
+  return `nexus_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function loadArchive(): PersistedMission[] {
+async function loadArchive(): Promise<PersistedMission[]> {
   try {
-    const raw = localStorage.getItem(ARCHIVE_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function pushArchive(mission: PersistedMission): void {
-  try {
-    const list = loadArchive();
-    list.unshift(mission);
-    localStorage.setItem(ARCHIVE_STORAGE_KEY, JSON.stringify(list.slice(0, 20)));
+    const fromIdb = await kvGet<unknown>(KV_KEYS.nexusArchive);
+    if (Array.isArray(fromIdb)) return fromIdb as PersistedMission[];
   } catch (err) {
-    console.warn('[NexusLab] Failed to archive mission:', err);
+    console.warn('[NexusLab] IndexedDB archive read failed:', err);
   }
+  const fromLs = readLocalStorageJson<unknown>(ARCHIVE_STORAGE_KEY);
+  return Array.isArray(fromLs) ? (fromLs as PersistedMission[]) : [];
 }
 
-function sanitizeMissionForStorage(mission: PersistedMission): PersistedMission {
-  return {
-    ...mission,
-    attachedFiles: (mission.attachedFiles || []).map((f) => ({ ...f, content: '' })),
-    rounds: mission.rounds.map((r) => stripRoundBodies(r)),
-  };
+let cachedArchive: PersistedMission[] = [];
+let cachedDeleted: Tombstone[] = [];
+
+function rememberNexusList(archive: PersistedMission[], deleted?: Tombstone[]): void {
+  cachedArchive = archive;
+  if (deleted) cachedDeleted = deleted;
 }
 
-function loadPersistedMission(): PersistedMission | null {
+async function loadDeleted(): Promise<Tombstone[]> {
   try {
-    const raw = localStorage.getItem(MISSIONS_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.rounds)) {
-      return parsed as PersistedMission;
+    const fromIdb = await kvGet<unknown>(KV_KEYS.nexusDeleted);
+    if (Array.isArray(fromIdb)) return fromIdb as Tombstone[];
+  } catch (err) {
+    console.warn('[NexusLab] IndexedDB tombstone read failed:', err);
+  }
+  return [];
+}
+
+function persistNexusList(archive: PersistedMission[], deleted: Tombstone[] = cachedDeleted): void {
+  rememberNexusList(archive, deleted);
+  void (async () => {
+    try {
+      await kvSet(KV_KEYS.nexusArchive, archive);
+      await kvSet(KV_KEYS.nexusDeleted, deleted);
+      dropLocalStorageKey(ARCHIVE_STORAGE_KEY);
+    } catch (err) {
+      console.warn('[NexusLab] Failed to persist mission list. Last good copy kept.', err);
     }
-    return null;
-  } catch (err) {
-    console.warn('[NexusLab] Failed to load persisted mission:', err);
-    return null;
-  }
+  })();
 }
 
-function persistMission(mission: PersistedMission | null): void {
+async function loadPersistedMission(): Promise<PersistedMission | null> {
+  try {
+    const fromIdb = await kvGet<unknown>(KV_KEYS.nexusMission);
+    if (isPersistedMission(fromIdb)) return fromIdb;
+  } catch (err) {
+    console.warn('[NexusLab] IndexedDB mission read failed:', err);
+  }
+  const fromLs = readLocalStorageJson<unknown>(MISSIONS_STORAGE_KEY);
+  return isPersistedMission(fromLs) ? fromLs : null;
+}
+
+let pendingDriveMission: PersistedMission | null | undefined;
+let drivePersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function persistMissionLocal(mission: PersistedMission | null): Promise<void> {
   try {
     if (!mission) {
-      localStorage.removeItem(MISSIONS_STORAGE_KEY);
+      await kvDel(KV_KEYS.nexusMission);
+      dropLocalStorageKey(MISSIONS_STORAGE_KEY);
       return;
     }
-    localStorage.setItem(MISSIONS_STORAGE_KEY, JSON.stringify(sanitizeMissionForStorage(mission)));
+    await kvSet(KV_KEYS.nexusMission, sanitizeMissionForStorage(mission));
+    dropLocalStorageKey(MISSIONS_STORAGE_KEY);
   } catch (err) {
-    console.warn('[NexusLab] Failed to persist mission:', err);
+    console.warn('[NexusLab] Failed to persist mission. Last good copy kept.', err);
   }
+}
+
+async function persistMissionToDrive(mission: PersistedMission | null): Promise<void> {
+  if (!isGoogleSignedIn()) return;
+  try {
+    await saveNexusToDrive(mission, cachedArchive, cachedDeleted);
+    const { collectMissionEvidenceIds, pushEvidenceBlobsToDrive } = await import('../lib/evidenceDrive');
+    const ids = new Set(collectMissionEvidenceIds(mission));
+    for (const parked of cachedArchive) {
+      for (const id of collectMissionEvidenceIds(parked)) ids.add(id);
+    }
+    await pushEvidenceBlobsToDrive(Array.from(ids));
+  } catch (err) {
+    console.warn('[NexusLab] Drive persist failed (local copy kept):', err);
+  }
+}
+
+function flushNexusDrive(mission: PersistedMission | null): void {
+  pendingDriveMission = undefined;
+  if (drivePersistTimer) {
+    clearTimeout(drivePersistTimer);
+    drivePersistTimer = null;
+  }
+  void persistMissionToDrive(mission);
+}
+
+function scheduleNexusDrive(mission: PersistedMission | null): void {
+  pendingDriveMission = mission;
+  if (drivePersistTimer) return;
+  drivePersistTimer = setTimeout(() => {
+    drivePersistTimer = null;
+    const next = pendingDriveMission;
+    pendingDriveMission = undefined;
+    if (next === undefined) return;
+    void persistMissionToDrive(next);
+  }, NEXUS_DRIVE_THROTTLE_MS);
+}
+
+function persistMission(mission: PersistedMission | null, immediate = false): void {
+  void persistMissionLocal(mission);
+  if (immediate) flushNexusDrive(mission);
+  else scheduleNexusDrive(mission);
 }
 
 function stripJsonBlocks(text: string): string {
@@ -410,14 +469,18 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   personas,
   synthesizer,
   catalog,
-  onCompleteRound,
-  activeSessionId,
   costCeiling,
+  isSignedIn = false,
+  isSidebarOpen = true,
+  onCloseSidebar,
 }) => {
   const [missionGoal, setMissionGoal] = useState('');
   const [missionTitle, setMissionTitle] = useState('Nexus Mission');
   const [followUpDirective, setFollowUpDirective] = useState('');
   const [followUpContext, setFollowUpContext] = useState<string | null>(null);
+  const [parentMissionId, setParentMissionId] = useState<string | null>(null);
+  const [archive, setArchive] = useState<PersistedMission[]>([]);
+  const [deletedMissions, setDeletedMissions] = useState<Tombstone[]>([]);
   const [maxIterations, setMaxIterations] = useState(3);
   // Overnight on artifacts is the job. Agent Mode (web theater) is explicit.
   const [executionMode, setExecutionMode] = useState<NexusExecutionMode>('autonomous');
@@ -471,6 +534,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [activeZipResult, setActiveZipResult] = useState<ZipArchiveResult | null>(null);
+  const [zipArchives, setZipArchives] = useState<Record<string, ZipArchiveResult>>({});
   const [isZipModalOpen, setIsZipModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -490,7 +554,11 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   // Auto-open the telemetry terminal while a mission runs; collapse it when the
   // run finishes so the results view stays clean.
   const wasRunningRef = useRef(false);
+  const isRunningRef = useRef(false);
+  const missionIdRef = useRef<string>(newMissionId());
+  const [driveTick, setDriveTick] = useState(0);
   useEffect(() => {
+    isRunningRef.current = isRunning;
     if (isRunning && !wasRunningRef.current) setShowTerminal(true);
     if (!isRunning && wasRunningRef.current) setShowTerminal(false);
     wasRunningRef.current = isRunning;
@@ -501,44 +569,203 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
   const pauseRequestedRef = useRef(false);
 
-  // Restore the last persisted mission on mount.
-  useEffect(() => {
-    const persisted = loadPersistedMission();
-    if (persisted) {
-      setMissionGoal(persisted.goal);
-      setMissionTitle(persisted.title || summarizeTitle(persisted.goal));
-      setMaxIterations(persisted.maxIterations);
-      setActivePreset(persisted.presetId === 'deep_council' ? 'deep_council' : 'fast_and_free');
-      setCurrentIteration(persisted.currentIteration);
-      setRounds(persisted.rounds);
-      setConsensusMetrics(persisted.consensusMetrics);
-      setMissionStatus(persisted.status);
-      setEstimatedMissionCost(persisted.estimatedCost);
-      setMorningBrief(persisted.morningBrief || null);
-      if (persisted.nightShift) {
-        setNightShiftEnabled(true);
-        setNightShiftCycles(persisted.nightShift.cycles || 5);
-        setNightShiftPaceMinutes(persisted.nightShift.paceMinutes || 0);
-      }
-      if (persisted.serverJobId) {
-        setServerMode(true);
-        setServerJobId(persisted.serverJobId);
-        setExecutionMode('agent');
-      }
-      if (persisted.executionMode && ['agent', 'autonomous', 'mini_deliberation', 'model_rotation'].includes(persisted.executionMode)) {
-        setExecutionMode(persisted.executionMode as NexusExecutionMode);
-      }
-      if (persisted.attachedFiles && Array.isArray(persisted.attachedFiles)) {
-        setAttachedFiles(persisted.attachedFiles);
-        if (persisted.evidence) setEvidence(persisted.evidence);
-        void import('../lib/evidenceIngest').then(({ hydrateAttachedBodies }) =>
-          hydrateAttachedBodies(persisted.attachedFiles || [], persisted.evidence || []).then((h) => {
-            setAttachedFiles(h.files);
-          })
-        );
-      }
+  const snapshotCurrentMission = (overrides: Partial<PersistedMission> = {}): PersistedMission => ({
+    id: missionIdRef.current,
+    goal: missionGoal,
+    title: missionTitle,
+    presetId: activePreset,
+    maxIterations,
+    currentIteration,
+    status: missionStatus,
+    rounds,
+    consensusMetrics,
+    estimatedCost: getEstimatedCost(),
+    attachedFiles,
+    evidence,
+    morningBrief,
+    nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
+    serverJobId,
+    executionMode,
+    parentMissionId: parentMissionId || undefined,
+    followUpContext,
+    updatedAt: Date.now(),
+    ...overrides,
+  });
+
+  const commitList = (nextArchive: PersistedMission[], nextDeleted: Tombstone[] = deletedMissions) => {
+    setArchive(nextArchive);
+    setDeletedMissions(nextDeleted);
+    persistNexusList(nextArchive, nextDeleted);
+  };
+
+  const blankLab = (opts?: { park?: boolean; tombstone?: boolean }) => {
+    if (opts?.tombstone) {
+      const gone = deleteNexusMission(missionIdRef.current, snapshotCurrentMission(), archive, deletedMissions);
+      commitList(gone.archive, gone.deleted);
+    } else if (opts?.park) {
+      commitList(parkActiveMission(snapshotCurrentMission(), archive), deletedMissions);
     }
+    setIsRunning(false);
+    pauseRequestedRef.current = false;
+    setCurrentIteration(0);
+    setRounds([]);
+    setConsensusMetrics([]);
+    setTerminalLogs([]);
+    setAttachedFiles([]);
+    setEvidence([]);
+    setZipArchives({});
+    setActiveZipResult(null);
+    setIsZipModalOpen(false);
+    setMissionStatus('idle');
+    setMissionGoal('');
+    setMissionTitle('Nexus Mission');
+    setFollowUpContext(null);
+    setFollowUpDirective('');
+    setParentMissionId(null);
+    setDocumentPlan(null);
+    setShowDossier(false);
+    setMorningBrief(null);
+    setNightShiftEnabled(true);
+    setServerJobId(null);
+    setServerJob(null);
+    setServerMode(false);
+    missionIdRef.current = newMissionId();
+    persistMission(null, true);
+  };
+
+  const applyPersistedMission = (persisted: PersistedMission, cancelled: () => boolean) => {
+    if (cancelled()) return;
+    missionIdRef.current = persisted.id || missionIdRef.current;
+    setMissionGoal(persisted.goal);
+    setMissionTitle(persisted.title || summarizeTitle(persisted.goal));
+    setMaxIterations(persisted.maxIterations);
+    setActivePreset(persisted.presetId === 'deep_council' ? 'deep_council' : 'fast_and_free');
+    setCurrentIteration(persisted.currentIteration);
+    setRounds(persisted.rounds);
+    setConsensusMetrics(persisted.consensusMetrics);
+    setMissionStatus(persisted.status);
+    setEstimatedMissionCost(persisted.estimatedCost);
+    setMorningBrief(persisted.morningBrief || null);
+    if (persisted.nightShift) {
+      setNightShiftEnabled(true);
+      setNightShiftCycles(persisted.nightShift.cycles || 5);
+      setNightShiftPaceMinutes(persisted.nightShift.paceMinutes || 0);
+    }
+    if (persisted.serverJobId) {
+      setServerMode(true);
+      setServerJobId(persisted.serverJobId);
+      setExecutionMode('agent');
+    }
+    if (persisted.executionMode && ['agent', 'autonomous', 'mini_deliberation', 'model_rotation'].includes(persisted.executionMode)) {
+      setExecutionMode(persisted.executionMode as NexusExecutionMode);
+    }
+    if (persisted.attachedFiles && Array.isArray(persisted.attachedFiles)) {
+      setAttachedFiles(persisted.attachedFiles);
+      setZipArchives(archivesFromFiles(persisted.attachedFiles));
+      if (persisted.evidence) setEvidence(persisted.evidence);
+      void import('../lib/evidenceIngest').then(({ hydrateAttachedBodies }) =>
+        hydrateAttachedBodies(persisted.attachedFiles || [], persisted.evidence || []).then((h) => {
+          if (cancelled()) return;
+          setAttachedFiles(h.files);
+          setZipArchives((prev) => ({ ...archivesFromFiles(h.files), ...prev }));
+          if (h.driveUnread) {
+            console.warn('[NexusLab] Drive unread — exhibit bodies not hydrated.');
+          } else if (h.missingBlobIds.length) {
+            console.warn('[NexusLab] Exhibit bodies missing on this device and Drive:', h.missingBlobIds);
+          }
+        })
+      );
+    } else {
+      setAttachedFiles([]);
+      setEvidence(persisted.evidence || []);
+      setZipArchives({});
+    }
+    setParentMissionId(persisted.parentMissionId || null);
+    setFollowUpContext(persisted.followUpContext || null);
+    setFollowUpDirective('');
+    setDocumentPlan(null);
+    setShowDossier(false);
+    setTerminalLogs([]);
+    if (!persisted.serverJobId) {
+      setServerJobId(null);
+      setServerJob(null);
+    }
+  };
+
+  // Restore the last persisted mission + archive on mount (IndexedDB, then leftover LS).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const [persisted, localArchive, localDeleted] = await Promise.all([
+        loadPersistedMission(),
+        loadArchive(),
+        loadDeleted(),
+      ]);
+      if (cancelled) return;
+      rememberNexusList(localArchive, localDeleted);
+      setArchive(localArchive);
+      setDeletedMissions(localDeleted);
+      if (persisted) applyPersistedMission(persisted, () => cancelled);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const onRestored = () => setDriveTick((n) => n + 1);
+    window.addEventListener(DRIVE_AUTH_RESTORED_EVENT, onRestored);
+    return () => window.removeEventListener(DRIVE_AUTH_RESTORED_EVENT, onRestored);
+  }, []);
+
+  // Pull council-nexus.json on sign-in and after a silent token restore.
+  useEffect(() => {
+    if (!isSignedIn || !isGoogleSignedIn()) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const remote = await loadNexusDriveDoc();
+        if (cancelled || !remote) return;
+        const localMission = await loadPersistedMission();
+        const localArchive = await loadArchive();
+        const localDeleted = await loadDeleted();
+        const merged = mergeNexusDocs(
+          {
+            version: 2,
+            updatedAt: localMission?.updatedAt || 0,
+            mission: localMission,
+            archive: localArchive,
+            deleted: localDeleted,
+          },
+          remote
+        );
+        rememberNexusList(merged.archive, merged.deleted);
+        setArchive(merged.archive);
+        setDeletedMissions(merged.deleted);
+        try {
+          if (merged.mission) await kvSet(KV_KEYS.nexusMission, merged.mission);
+          else await kvDel(KV_KEYS.nexusMission);
+          await kvSet(KV_KEYS.nexusArchive, merged.archive);
+          await kvSet(KV_KEYS.nexusDeleted, merged.deleted);
+        } catch (err) {
+          console.warn('[NexusLab] Could not write merged Drive mission locally:', err);
+        }
+        if (isRunningRef.current) return;
+        if (merged.mission) {
+          applyPersistedMission(merged.mission, () => cancelled);
+        } else if (localMission && (merged.updatedAt || 0) >= (localMission.updatedAt || 0)) {
+          blankLab();
+        }
+      } catch (err) {
+        console.warn('[NexusLab] Drive hydrate failed (local mission kept):', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSignedIn, driveTick]);
 
   // Poll an in-flight server agent job. Re-attaches after a reload or tab
   // close; the job lives on the server, not in this component.
@@ -605,10 +832,17 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         const ingested = await ingestFile(file);
         newAttachments.push(ingested.attached);
         newEvidence.push(ingested.evidence);
+        const zip = ingested.archive || zipResultFromAttached(ingested.attached);
+        if (zip) {
+          setZipArchives((prev) => ({ ...prev, [file.name]: zip }));
+        }
+        const extracted = ingested.evidence.coverage.filesExtracted;
         addLog(
           ingested.evidence.extractor === 'failed'
             ? `❌ ${file.name}: ${ingested.evidence.failDetail || 'extractor failed'}`
-            : `✓ ${file.name} — ${ingested.evidence.coverage.extractedChars.toLocaleString()} chars on docket (blob on this device).`
+            : extracted != null
+              ? `✓ ${file.name} — ${extracted} file${extracted === 1 ? '' : 's'} extracted (${ingested.evidence.coverage.extractedChars.toLocaleString()} chars). Eye to inspect.`
+              : `✓ ${file.name} — ${ingested.evidence.coverage.extractedChars.toLocaleString()} chars on docket (blob on this device${isGoogleSignedIn() ? ' + Drive' : ''}).`
         );
       } catch (err: any) {
         addLog(`❌ Error loading file ${file.name}: ${err.message}`);
@@ -654,7 +888,18 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   };
 
   const handleRemoveFile = (index: number) => {
-    setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
+    setAttachedFiles((prev) => {
+      const removed = prev[index];
+      if (removed) {
+        setZipArchives((z) => {
+          const next = { ...z };
+          delete next[removed.name];
+          return next;
+        });
+        setActiveZipResult((cur) => (cur?.filename === removed.name ? null : cur));
+      }
+      return prev.filter((_, i) => i !== index);
+    });
   };
 
   const getEstimatedCost = (): number => {
@@ -746,7 +991,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       });
       setServerJobId(id);
       persistMission({
-        id: `nexus_${Date.now()}`,
+        id: missionIdRef.current,
         goal: missionGoal,
         title,
         presetId: activePreset,
@@ -761,6 +1006,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
         serverJobId: id,
         executionMode,
+        parentMissionId: parentMissionId || undefined,
+        followUpContext,
         updatedAt: Date.now(),
       });
       addLog(`📡 Server mission ${id} accepted — you can close this tab; it keeps working.`);
@@ -830,7 +1077,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setIsRunning(false);
     setMissionStatus(job.status === 'done' ? (lastScore >= 85 ? 'converged' : 'max_reached') : 'max_reached');
     persistMission({
-      id: `nexus_${Date.now()}`,
+      id: missionIdRef.current,
       goal: missionGoal,
       title: missionTitle,
       presetId: activePreset,
@@ -845,6 +1092,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
       serverJobId: job.id,
       executionMode,
+      parentMissionId: parentMissionId || undefined,
+      followUpContext,
       updatedAt: Date.now(),
     });
     addLog(`✨ Server mission complete — ${job.passes.length} pass(es), ${job.research.length} research item(s), ${(job.citationsList || []).length} source(s).`);
@@ -926,13 +1175,19 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       } else {
         cycleQuery = `${p.query}\nPresiding Chair: ${chair.name}`;
       }
+      // Persist the directive only. The live call still gets cycleQuery (full
+      // exhibit dump). Copying that dump into userQuery is what blew
+      // council-sessions-v3 when Nexus wrote each cycle into the Chamber session.
+      const storedQuery = p.isFinalSynthesis
+        ? `[Deep Document Mode — Final Synthesis]\nDirective: ${missionGoal}`
+        : `${p.label}\nDirective: ${missionGoal}`;
 
       setCurrentIteration(qi + 1);
       addLog(`${p.label}: generating proposals across active panel...`);
 
       const newRound: CouncilRound = {
         id: `nexus_round_${Date.now()}_${qi + 1}`,
-        userQuery: cycleQuery,
+        userQuery: storedQuery,
         timestamp: Date.now(),
         mode: 'nexus_lab',
         attachedTextFiles: [...attachedFiles],
@@ -952,7 +1207,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
             ],
             policy,
             rawModels: catalog,
-            sessionId: activeSessionId ?? undefined,
+            sessionId: missionIdRef.current,
           });
           newRound.deliberation.stage1[pers.id] = {
             personaId: pers.id,
@@ -980,6 +1235,23 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       const s1Text = Object.entries(newRound.deliberation.stage1)
         .map(([id, r]) => `Persona (${id}):\n${r.content}`)
         .join('\n\n');
+
+      let sandboxBlock = '';
+      if (enableCodeSandbox) {
+        const checks = verifyMissionCode({
+          texts: Object.values(newRound.deliberation.stage1).map((r) => r.content || ''),
+          files: attachedFiles.map((f) => ({ name: f.name, content: f.content || '' })),
+        });
+        sandboxBlock = formatSandboxReport(checks);
+        if (checks.length === 0) {
+          addLog('🔬 Code verifier: no fences or .js/.json files to check.');
+        } else {
+          const ok = checks.filter((c) => c.status === 'ok').length;
+          const bad = checks.filter((c) => c.status === 'error').length;
+          const skipped = checks.filter((c) => c.status === 'skipped').length;
+          addLog(`🔬 Code verifier: ${ok} ok, ${bad} error, ${skipped} skipped (compile only).`);
+        }
+      }
 
       let synthesis = '';
       let consensusMetric: ConsensusMetric | undefined;
@@ -1016,11 +1288,11 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
           persona: chairPersona,
           messages: [
             { role: 'system', content: 'You are the Presiding Nexus Chair. Synthesize decisive consensus, list immutable invariants, and calculate convergence alignment. After your synthesis append exactly one fenced JSON block with keys: agreementScore (integer 0-100), keyConsensusPoints (array), keyDisagreements (array), panelistAlignment (object of persona id -> integer 0-100).' },
-            { role: 'user', content: `Synthesize ${p.label} findings:\n\n${s1Text}${reconsiderBlock}` },
+            { role: 'user', content: `Synthesize ${p.label} findings:\n\n${s1Text}${sandboxBlock ? `\n\n${sandboxBlock}` : ''}${reconsiderBlock}` },
           ],
           policy,
           rawModels: catalog,
-          sessionId: activeSessionId ?? undefined,
+          sessionId: missionIdRef.current,
         });
 
         // Real consensus parser from the Chair output.
@@ -1087,13 +1359,10 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
       accumulatedRounds = [...accumulatedRounds, newRound];
       setRounds(accumulatedRounds);
-      if (activeSessionId) {
-        onCompleteRound(activeSessionId, newRound);
-      }
 
       // Persist mission progress (truncated for storage).
       persistMission({
-        id: `nexus_${Date.now()}`,
+        id: missionIdRef.current,
         goal: missionGoal,
         title,
         presetId: activePreset,
@@ -1107,6 +1376,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         morningBrief,
         nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
         executionMode,
+        parentMissionId: parentMissionId || undefined,
+        followUpContext,
         updatedAt: Date.now(),
       });
 
@@ -1162,7 +1433,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
           ],
           policy,
           rawModels: catalog,
-          sessionId: activeSessionId ?? undefined,
+          sessionId: missionIdRef.current,
         });
         finalMorningBrief = briefRes.content || '';
       } catch (err: any) {
@@ -1188,7 +1459,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     );
 
     persistMission({
-      id: `nexus_${Date.now()}`,
+      id: missionIdRef.current,
       goal: missionGoal,
       title,
       presetId: activePreset,
@@ -1202,6 +1473,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       morningBrief: finalMorningBrief || morningBrief,
       nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
         executionMode,
+      parentMissionId: parentMissionId || undefined,
+      followUpContext,
       updatedAt: Date.now(),
     });
   };
@@ -1219,60 +1492,84 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   };
 
   const handleReset = () => {
-    setIsRunning(false);
-    pauseRequestedRef.current = false;
-    setCurrentIteration(0);
-    setRounds([]);
-    setConsensusMetrics([]);
-    setTerminalLogs([]);
-    setAttachedFiles([]);
-    setEvidence([]);
-    setMissionStatus('idle');
-    setMissionTitle('Nexus Mission');
-    setFollowUpContext(null);
-    setFollowUpDirective('');
-    setDocumentPlan(null);
-    setShowDossier(false);
-    setMorningBrief(null);
-    setNightShiftEnabled(true);
     if (serverJobId) void cancelAgentJob(serverJobId).catch(() => {});
-    setServerJobId(null);
-    setServerJob(null);
-    setServerMode(false);
-    persistMission(null);
-    addLog(`🔄 Nexus Lab reset to standby.`);
+    blankLab({ tombstone: true });
+    addLog(`🔄 Nexus Lab reset — this mission was removed from the list.`);
+  };
+
+  const handleNewMission = () => {
+    if (isRunning) return;
+    blankLab({ park: true });
+    addLog(`📄 New mission. Previous job stayed in the list.`);
+    onCloseSidebar?.();
+  };
+
+  const handleSelectMission = (id: string) => {
+    if (isRunning) {
+      addLog('⏸️ Pause the running mission before switching.');
+      return;
+    }
+    if (id === missionIdRef.current) {
+      onCloseSidebar?.();
+      return;
+    }
+    const opened = openNexusMission(id, snapshotCurrentMission(), archive);
+    if (!opened.active) {
+      addLog('⛔ That mission is not in the list.');
+      return;
+    }
+    commitList(opened.archive, deletedMissions);
+    applyPersistedMission(opened.active, () => false);
+    persistMission(sanitizeMissionForStorage(opened.active), true);
+    addLog(`📂 Opened mission: ${opened.active.title || opened.active.goal || opened.active.id}`);
+    onCloseSidebar?.();
+  };
+
+  const handleDeleteMission = (id: string) => {
+    if (isRunning && id === missionIdRef.current) return;
+    const next = deleteNexusMission(id, snapshotCurrentMission(), archive, deletedMissions);
+    commitList(next.archive, next.deleted);
+    if (id === missionIdRef.current) {
+      if (next.active) {
+        applyPersistedMission(next.active, () => false);
+        persistMission(sanitizeMissionForStorage(next.active), true);
+      } else {
+        blankLab();
+      }
+    } else {
+      persistMission(snapshotCurrentMission(), true);
+    }
+    addLog('🗑️ Mission removed from the list.');
+  };
+
+  const handleRenameMission = (id: string, title: string) => {
+    const next = renameNexusMission(id, title, snapshotCurrentMission(), archive);
+    commitList(next.archive, deletedMissions);
+    if (id === missionIdRef.current) {
+      setMissionTitle(title.trim());
+      persistMission({ ...snapshotCurrentMission(), title: title.trim() }, true);
+    } else {
+      persistMission(snapshotCurrentMission(), true);
+    }
   };
 
   const handleFollowUp = () => {
     const directive = followUpDirective.trim();
     if (!directive) return;
 
-    // Snapshot + archive the finished mission before starting the follow-up.
     const lastRound = rounds[rounds.length - 1];
     const finalSynthesis = stripJsonBlocks(lastRound?.synthesis?.content || lastRound?.deliberation?.stage3?.content || '');
     const priorConsensus = `Goal: ${missionGoal}\nFinal Consensus:\n${finalSynthesis.slice(0, 4000) || 'No synthesis recorded.'}`;
+    const parentId = missionIdRef.current;
+    const parked = parkActiveMission(snapshotCurrentMission(), archive);
+    commitList(parked, deletedMissions);
 
-    const finishedMission: PersistedMission = {
-      id: `nexus_${Date.now()}`,
-      goal: missionGoal,
-      title: missionTitle,
-      presetId: activePreset,
-      maxIterations,
-      currentIteration,
-      status: missionStatus,
-      rounds,
-      consensusMetrics,
-      estimatedCost: getEstimatedCost(),
-      attachedFiles,
-      morningBrief,
-      nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
-      updatedAt: Date.now(),
-    };
-    pushArchive(finishedMission);
-
-    // Carry the prior consensus forward into the new mission's context.
+    const childId = newMissionId();
+    missionIdRef.current = childId;
+    setParentMissionId(parentId);
     setFollowUpContext(priorConsensus);
     setMissionGoal(directive);
+    setMissionTitle(summarizeTitle(directive) || 'Follow-up');
     setFollowUpDirective('');
     setCurrentIteration(0);
     setRounds([]);
@@ -1282,12 +1579,30 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setTerminalLogs([]);
     setMorningBrief(null);
     setNightShiftEnabled(true);
-    if (serverJobId) void cancelAgentJob(serverJobId).catch(() => {});
     setServerJobId(null);
     setServerJob(null);
     setServerMode(false);
-    persistMission(null);
-    addLog(`🔁 Follow-up directive set. Prior mission consensus carried forward.`);
+    persistMission({
+      id: childId,
+      goal: directive,
+      title: summarizeTitle(directive) || 'Follow-up',
+      presetId: activePreset,
+      maxIterations,
+      currentIteration: 0,
+      status: 'idle',
+      rounds: [],
+      consensusMetrics: [],
+      estimatedCost: 0,
+      attachedFiles,
+      evidence,
+      morningBrief: null,
+      nightShift: nightShiftEnabled ? { cycles: nightShiftCycles, paceMinutes: nightShiftPaceMinutes } : null,
+      parentMissionId: parentId,
+      followUpContext: priorConsensus,
+      executionMode,
+      updatedAt: Date.now(),
+    }, true);
+    addLog(`🔁 Follow-up is its own mission. Last job stayed in the list.`);
   };
 
   const canExport = missionStatus === 'converged' || missionStatus === 'max_reached';
@@ -1376,9 +1691,22 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   };
 
   const latestMetric = consensusMetrics[consensusMetrics.length - 1];
+  const listedMissions = listNexusMissions(snapshotCurrentMission(), archive);
 
   return (
-    <div className="min-h-[calc(100vh-65px)] bg-slate-950 text-slate-100 p-3 sm:p-6 font-sans">
+    <div className="flex flex-1 w-full min-w-0">
+      <NexusSidebar
+        isOpen={isSidebarOpen}
+        onClose={() => onCloseSidebar?.()}
+        missions={listedMissions}
+        activeMissionId={missionIdRef.current}
+        isRunning={isRunning}
+        onCreateNew={handleNewMission}
+        onSelect={handleSelectMission}
+        onRename={handleRenameMission}
+        onDelete={handleDeleteMission}
+      />
+      <div className="min-h-[calc(100vh-65px)] flex-1 min-w-0 bg-slate-950 text-slate-100 p-3 sm:p-6 font-sans">
       {/* Nexus Lab Header */}
       <header className="mb-6 flex flex-wrap items-center justify-between gap-4 p-4 bg-gradient-to-r from-emerald-950/60 via-slate-900 to-indigo-950/60 border border-emerald-500/30 rounded-3xl shadow-2xl backdrop-blur-xl">
         <div className="flex items-center gap-3">
@@ -1499,6 +1827,18 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 className="w-full bg-slate-950 text-slate-100 text-xs sm:text-sm p-3.5 rounded-2xl border border-slate-800 focus:outline-none focus:border-emerald-500 transition-all resize-none shadow-inner leading-relaxed"
               />
 
+              {followUpContext && (
+                <div className="text-[11px] text-emerald-300/90 bg-emerald-950/40 border border-emerald-700/40 rounded-xl px-3 py-2 flex items-start gap-2">
+                  <ArrowRight size={12} className="mt-0.5 shrink-0" />
+                  <div>
+                    <div className="font-bold uppercase tracking-wider text-emerald-400">Follow-up mission</div>
+                    <div className="text-slate-400 font-mono mt-0.5">
+                      Prior consensus is carried. Last night&apos;s job stayed in the list.
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Prominent File Attachment Dropzone */}
               <div className="space-y-2">
                 <input
@@ -1556,7 +1896,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                       </span>
                     </div>
                     {attachedFiles.map((file, idx) => {
-                      const isArchive = file.type === 'zip' || file.type === 'rar' || file.name.endsWith('.zip') || file.name.endsWith('.rar');
+                      const isArchive = isArchiveAttachment(file);
+                      const zip = zipArchives[file.name] || zipResultFromAttached(file);
                       const isPdf = file.type === 'pdf' || file.name.endsWith('.pdf');
                       return (
                         <div
@@ -1584,10 +1925,13 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                           </div>
 
                           <div className="flex items-center gap-1">
-                            {isArchive && activeZipResult && (
+                            {isArchive && zip && (
                               <button
                                 type="button"
-                                onClick={() => setIsZipModalOpen(true)}
+                                onClick={() => {
+                                  setActiveZipResult(zip);
+                                  setIsZipModalOpen(true);
+                                }}
                                 className="p-1.5 text-slate-400 hover:text-purple-300 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer min-w-[28px] min-h-[28px] flex items-center justify-center"
                                 title="Inspect extracted archive files"
                               >
@@ -1831,7 +2175,12 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 <label className="flex items-center justify-between p-2.5 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer hover:border-slate-700">
                   <div className="flex items-center gap-2 text-xs text-slate-300">
                     <Code2 size={14} className="text-purple-400" />
-                    <span>Sandboxed Code Verifier</span>
+                    <div>
+                      <div>Sandboxed Code Verifier</div>
+                      <div className="text-[10px] text-slate-500 font-normal">
+                        Parse JSON / compile JS from fences and exhibits. Never executed.
+                      </div>
+                    </div>
                   </div>
                   <input
                     type="checkbox"
@@ -2409,6 +2758,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         isOpen={isZipModalOpen}
         onClose={() => setIsZipModalOpen(false)}
       />
+      </div>
     </div>
   );
 };

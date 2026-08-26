@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Download, Upload, Database, Search } from 'lucide-react';
+import { Download, Upload, Database } from 'lucide-react';
 import { Persona } from '../../types';
 
 interface SettingsAdvancedTabProps {
@@ -19,7 +19,6 @@ interface SettingsAdvancedTabProps {
   setSynthesisMaxTokens?: (val: number) => void;
   panelTimeoutSeconds: number;
   setPanelTimeoutSeconds?: (val: number) => void;
-  setIsAuditModalOpen?: (val: boolean) => void;
   maxRoundCostCeiling: number;
   setMaxRoundCostCeiling?: (val: number) => void;
   stopAfterStage1: boolean;
@@ -32,9 +31,6 @@ interface SettingsAdvancedTabProps {
   setArchivistRecentRounds?: (val: number) => void;
   disableFallback?: boolean;
   setDisableFallback?: (val: boolean) => void;
-  disableLoadingOverlay?: boolean;
-  setDisableLoadingOverlay?: (val: boolean) => void;
-  availableModels?: { id: string; name: string }[];
   onExportSessions?: () => void;
   onImportSessions?: (file: File) => void;
   sessionsCount?: number;
@@ -63,7 +59,6 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
   setSynthesisMaxTokens,
   panelTimeoutSeconds,
   setPanelTimeoutSeconds,
-  setIsAuditModalOpen,
   maxRoundCostCeiling,
   setMaxRoundCostCeiling,
   stopAfterStage1,
@@ -76,9 +71,6 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
   setArchivistRecentRounds,
   disableFallback = false,
   setDisableFallback,
-  disableLoadingOverlay = false,
-  setDisableLoadingOverlay,
-  availableModels = [],
   onExportSessions,
   onImportSessions,
   sessionsCount,
@@ -208,23 +200,6 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
           )}
         </div>
 
-        {/* Features & Logs */}
-        <div className="pt-3 space-y-3 border-t border-slate-200/60 dark:border-slate-800/60">
-          <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Features & Logs</h3>
-          <div className="flex items-center justify-between">
-            <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-              Telemetry & Audit Logs
-            </label>
-            <button
-              type="button"
-              onClick={() => setIsAuditModalOpen?.(true)}
-              className="px-3 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-md text-xs font-semibold text-slate-700 dark:text-slate-300 transition-colors"
-            >
-              View Logs
-            </button>
-          </div>
-        </div>
-
         {/* Execution Mode Configs */}
         <div className="pt-3 space-y-3 border-t border-slate-200/60 dark:border-slate-800/60">
           <div className="space-y-1">
@@ -247,6 +222,31 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
                 </button>
               ))}
             </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block">
+              Web Search
+            </label>
+            <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-100 dark:bg-slate-950 rounded-lg text-xs font-medium">
+              {(['off', 'auto', 'always'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setWebMode?.(m)}
+                  className={`py-1.5 px-2 rounded-md transition-all text-center ${
+                    webMode === m
+                      ? 'bg-indigo-600 text-white font-bold shadow-sm'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  {m === 'off' ? 'Off' : m === 'auto' ? 'Auto' : 'Always'}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-slate-500">
+              Chamber Stage 1 uses OpenRouter web search when this is Always, or Auto on time-sensitive questions. Off never searches. Strict Free budgets ignore this and stay offline.
+            </p>
           </div>
 
           <div className="space-y-2">
@@ -377,21 +377,6 @@ export const SettingsAdvancedTab: React.FC<SettingsAdvancedTabProps> = ({
             </label>
             <p className="text-[11px] text-slate-500">
               Disables silent fallback to alternative or free models. If your chosen model fails or errors, the raw error will be reported directly so you can diagnose and fix it.
-            </p>
-          </div>
-
-          <div className="pt-2 space-y-2 border-t border-slate-200/60 dark:border-slate-800/60">
-            <label className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
-              <span>Show Deliberation Screen Overlay</span>
-              <input
-                type="checkbox"
-                checked={!disableLoadingOverlay}
-                onChange={(e) => setDisableLoadingOverlay?.(!e.target.checked)}
-                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-              />
-            </label>
-            <p className="text-[11px] text-slate-500">
-              When turned off, disables the full-screen "Council Deliberating" overlay so you can observe live model streaming and persona interactions directly in the feed without interruption.
             </p>
           </div>
 

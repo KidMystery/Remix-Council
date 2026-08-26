@@ -74,7 +74,8 @@ export interface EvidenceCoverage {
 
 /**
  * Immutable exhibit metadata. The extracted body lives in IndexedDB (keyed by
- * `id`), never in session JSON. Drive sync sends this record, not the blob.
+ * `id`) and, when signed in, as `council-blob-<id>.txt` in Drive appData.
+ * Session / Nexus / Oracle JSON never carries the body.
  */
 export interface EvidenceRecord {
   id: string;

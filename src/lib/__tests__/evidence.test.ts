@@ -8,6 +8,8 @@ import {
   resolveCostCeilingUSD,
   stripRoundBodies,
   stripSessionsBodies,
+  compactStoredUserQuery,
+  STORED_QUERY_OMITTED,
   preferIncomingRound,
   makeEvidenceRecord,
   coverageLabel,
@@ -197,6 +199,28 @@ describe('stripRoundBodies', () => {
       },
     ]);
     expect(sessions[0].rounds[0].attachedTextFiles?.[0].content).toBe('');
+  });
+
+  it('drops a Nexus exhibit dump from userQuery and leaves a typed question alone', () => {
+    const csv = 'date,amt\n' + '2026-01-01,40\n'.repeat(2000);
+    const dumped =
+      `[Nexus Lab Cycle 1/3]:\nDirective: pay the cruise, keep TQQQ.\n\n[Attached exhibits]:\n--- File: monarch.csv ---\n${csv}`;
+    expect(compactStoredUserQuery(dumped)).toBe(
+      `[Nexus Lab Cycle 1/3]:\nDirective: pay the cruise, keep TQQQ.\n\n${STORED_QUERY_OMITTED}`
+    );
+    expect(compactStoredUserQuery('What bills do I pay this week?')).toBe(
+      'What bills do I pay this week?'
+    );
+
+    const stripped = stripRoundBodies(
+      baseRound({
+        userQuery: dumped,
+        attachedTextFiles: [{ name: 'monarch.csv', content: csv, evidenceId: 'ev_1' }],
+      })
+    );
+    expect(stripped.attachedTextFiles?.[0].content).toBe('');
+    expect(stripped.userQuery).not.toContain('2026-01-01,40');
+    expect(stripped.userQuery).toContain(STORED_QUERY_OMITTED);
   });
 });
 

@@ -44,12 +44,12 @@ import {
   saveOracleTombstones,
   loadGlobalBible,
   saveGlobalBible,
+  hydrateOracleFromIdb,
   exportOracleThreads,
   importOracleThreads,
   ORACLE_DEFAULT_MODEL,
   DEFAULT_MINI_DELIBERATION_MODELS,
   DEFAULT_ROTATION_ROSTER,
-  VISION_SAFE_FALLBACK_MODEL,
   ORACLE_THREADS_UPDATED_EVENT,
 } from '../lib/oracleStore';
 import {
@@ -60,6 +60,8 @@ import {
   saveOracleDirectList,
   resolveRotationModel,
   filterVisionSafeRoster,
+  pickLiveVisionFallback,
+  ORACLE_ERROR_RETRY_MODEL,
 } from '../lib/oracleModelPool';
 import {
   detectBriefingCandidates,
@@ -87,6 +89,8 @@ import {
   loadOracleFromDrive,
   mergeOracleThreads,
   DriveUnreadError,
+  DriveAuthRequiredError,
+  DRIVE_AUTH_RESTORED_EVENT,
 } from '../lib/drivePersistence';
 import { addTombstone, AGENT_LOST_ON_REDEPLOY, DRIVE_UNREAD_MESSAGE, mergeTombstones } from '../lib/syncContract';
 import { copyToClipboard } from '../lib/clipboard';
@@ -176,6 +180,16 @@ export const OracleView: React.FC<OracleViewProps> = ({
     const handleBriefingsUpdated = () => setBriefingStoreVersion((v) => v + 1);
     window.addEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
     window.addEventListener(ORACLE_BRIEFINGS_UPDATED_EVENT, handleBriefingsUpdated);
+    void hydrateOracleFromIdb().then(() => {
+      const loaded = loadOracleThreads();
+      threadsRef.current = loaded;
+      setThreads(loaded);
+      setActiveId((prev) => (loaded.some((t) => t.id === prev) ? prev : loaded[0]?.id || null));
+      const gb = loadGlobalBible();
+      globalBibleRef.current = gb;
+      setGlobalBible(gb);
+      deletedRef.current = loadOracleTombstones();
+    });
     return () => {
       window.removeEventListener(ORACLE_THREADS_UPDATED_EVENT, handleUpdated);
       window.removeEventListener(ORACLE_BRIEFINGS_UPDATED_EVENT, handleBriefingsUpdated);
@@ -224,6 +238,13 @@ export const OracleView: React.FC<OracleViewProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threads, briefingStoreVersion]);
 
+  const [driveEpoch, setDriveEpoch] = useState(0);
+  useEffect(() => {
+    const bump = () => setDriveEpoch((n) => n + 1);
+    window.addEventListener(DRIVE_AUTH_RESTORED_EVENT, bump);
+    return () => window.removeEventListener(DRIVE_AUTH_RESTORED_EVENT, bump);
+  }, []);
+
   // Drive sync
   useEffect(() => {
     if (!isSignedIn) return;
@@ -263,13 +284,15 @@ export const OracleView: React.FC<OracleViewProps> = ({
         setDriveSyncState('error');
         if (err instanceof DriveUnreadError) {
           setPersistError(DRIVE_UNREAD_MESSAGE);
+        } else if (err instanceof DriveAuthRequiredError) {
+          setPersistError(err.message);
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [isSignedIn]);
+  }, [isSignedIn, driveEpoch]);
 
   // Debounced save to Drive
   const driveSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -292,6 +315,8 @@ export const OracleView: React.FC<OracleViewProps> = ({
           setDriveSyncState('error');
           if (err instanceof DriveUnreadError) {
             setPersistError(DRIVE_UNREAD_MESSAGE);
+          } else if (err instanceof DriveAuthRequiredError) {
+            setPersistError(err.message);
           }
         });
     }, 4000);
@@ -320,9 +345,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
   const handleNewThread = () => {
     const t = newOracleThread(activeThread?.model);
     if (activeThread) {
-      // New threads inherit the active thread's mode, rosters, and toggles —
-      // the models you added to Auto-Rotate are the ones that rotate.
-      t.mode = activeThread.mode || 'direct';
+      // Rosters and toggles copy over. Mode always starts Direct so a
+      // failing Auto-Rotate thread does not follow you into a fresh chat.
+      t.mode = 'direct';
       t.miniDeliberationModels = [
         ...(activeThread.miniDeliberationModels && activeThread.miniDeliberationModels.length > 0
           ? activeThread.miniDeliberationModels
@@ -532,16 +557,27 @@ export const OracleView: React.FC<OracleViewProps> = ({
 
     // Remove the error message from the thread
     const cleaned = thread.messages.filter((m) => m.id !== failedMsgId);
-    const targetModel = fallbackModel || thread.model;
-    const updatedThread: OracleThread = { ...thread, model: targetModel, messages: cleaned, updatedAt: Date.now() };
+    const unstickToAuto = fallbackModel === ORACLE_ERROR_RETRY_MODEL;
+    const updatedThread: OracleThread = {
+      ...thread,
+      model: unstickToAuto ? fallbackModel : thread.model,
+      mode: unstickToAuto ? 'direct' : thread.mode,
+      turnCount:
+        !unstickToAuto && thread.mode === 'rotation'
+          ? (thread.turnCount || 0) + 1
+          : thread.turnCount,
+      messages: cleaned,
+      updatedAt: Date.now(),
+    };
     commitThread(updatedThread);
 
-    // Call handleSend with previous user message content without duplicating userMsg
+    // Auto retry is an escape hatch: Direct + openrouter/auto.
+    // Regular retry in rotation advances the roster so we don't re-hit the dead id.
     await handleSend(
       precedingUserMsg.content,
       precedingUserMsg.images || [],
       precedingUserMsg.files || [],
-      targetModel,
+      unstickToAuto ? fallbackModel : undefined,
       true
     );
   };
@@ -621,6 +657,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
     const contextBlock = `[Your Living Memory (Thread Bible)]:\n${renderBiblePrompt(latest.bible) || '(empty)'}\n\n[Global Bible]:\n${renderBiblePrompt(globalBibleRef.current) || '(empty)'}`;
 
     const mode = latest.mode || 'direct';
+    let attemptedModel = effectiveModel;
 
     try {
       // 1. Reflect (internal plan + Bible facts to update).
@@ -675,14 +712,15 @@ export const OracleView: React.FC<OracleViewProps> = ({
           latest.miniDeliberationModels && latest.miniDeliberationModels.length > 0
             ? latest.miniDeliberationModels
             : DEFAULT_MINI_DELIBERATION_MODELS;
+        const visionFallback = pickLiveVisionFallback(catalog);
         const { safe, dropped, usedFallback } = filterVisionSafeRoster(
           roster,
           isModelVisionOk,
-          VISION_SAFE_FALLBACK_MODEL
+          visionFallback
         );
         if (usedFallback) {
           visionSafePanelModels = safe;
-          visionNote = `No vision-capable models in the panel — all routed to ${VISION_SAFE_FALLBACK_MODEL.split('/').pop()}. `;
+          visionNote = `No vision-capable models in the panel — all routed to ${visionFallback.split('/').pop()}. `;
         } else if (dropped.length > 0) {
           visionSafePanelModels = safe;
           visionNote = `Panel limited to vision-capable models: ${safe.map((m) => m.split('/').pop()).join(', ')}. `;
@@ -786,14 +824,20 @@ export const OracleView: React.FC<OracleViewProps> = ({
       } else {
         // --- DIRECT OR ROTATION MODE ---
         let selectedModel = effectiveModel;
-        if (mode === 'rotation') {
-          // Deterministic cycling through the thread's roster (wrap-around).
+        if (mode === 'rotation' && !modelOverride) {
+          // Skip ids the live catalog no longer has. All-dead roster → Auto.
+          const isLive = (id: string) =>
+            !Array.isArray(catalog) || catalog.length === 0
+              ? true
+              : catalog.some((m) => m?.id?.toLowerCase() === id.toLowerCase());
           selectedModel = resolveRotationModel(
             latest.turnCount || 0,
             latest.rotationModels,
-            DEFAULT_ROTATION_ROSTER
+            DEFAULT_ROTATION_ROSTER,
+            isLive
           );
         }
+        attemptedModel = selectedModel;
 
         const voice = latest.rotateVoices ? pickVoice(latest.turnCount || 0) : null;
         if (voice) {
@@ -811,8 +855,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
 
         // Vision guard for direct/rotation: swap a text-only model when images are attached.
         if (images.length > 0 && !isModelVisionOk(answerModel)) {
-          visionNote = `${answerModel.split('/').pop()} can't read images — routed to ${VISION_SAFE_FALLBACK_MODEL.split('/').pop()} instead. `;
-          answerModel = VISION_SAFE_FALLBACK_MODEL;
+          const visionFallback = pickLiveVisionFallback(catalog);
+          visionNote = `${answerModel.split('/').pop()} can't read images — routed to ${visionFallback.split('/').pop()} instead. `;
+          answerModel = visionFallback;
         }
 
         setLiveAnswer({ id: answerId, text: '', headerNote: visionNote });
@@ -831,9 +876,6 @@ export const OracleView: React.FC<OracleViewProps> = ({
           governorKey: latest.id,
           onToken: (chunk) =>
             setLiveAnswer((prev) => (prev ? { ...prev, text: prev.text + chunk } : prev)),
-          onBudgetAdjust: (_budget, direction) => {
-            govNote = direction === 'up' ? 'auto-expanded tokens' : 'tokens trimmed to fit';
-          },
         });
 
         if (res.expansions > 0) govNote = `auto-expanded tokens ×${res.expansions}`;
@@ -941,7 +983,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
           content: rawErr.startsWith('[Error:') ? rawErr : `[Error: ${rawErr}]`,
           timestamp: Date.now(),
           error: true,
-          model: effectiveModel,
+          model: attemptedModel,
         };
         commitThread({ ...latest, messages: [...latest.messages, errMsg], updatedAt: Date.now() });
       }
@@ -1618,11 +1660,12 @@ function MessageBubble({
                 </button>
                 <button
                   type="button"
-                  onClick={() => onRetry(message.id, 'google/gemini-2.5-flash')}
+                  onClick={() => onRetry(message.id, ORACLE_ERROR_RETRY_MODEL)}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-950/80 hover:bg-indigo-900/90 text-indigo-200 font-medium transition-colors border border-indigo-700/60 cursor-pointer"
+                  title="OpenRouter Auto seats a live model and the reply chip shows which one answered"
                 >
                   <Sparkles size={12} className="text-cyan-400" />
-                  <span>Switch to Gemini 2.5 Flash & Retry</span>
+                  <span>Retry via OpenRouter Auto</span>
                 </button>
               </>
             )}

@@ -6,10 +6,10 @@
  *  - If a response comes back truncated (`finish_reason: 'length'`), it
  *    automatically continues ("pick up exactly where you left off") with a
  *    larger budget, up to `maxExpansions` times.
- *  - If a response finishes well under its budget, it shrinks the learned
- *    budget so subsequent calls spend less.
+ *  - It never shrinks the budget after a short answer. Oracle answers stay
+ *    raw; a cheap previous turn must not starve the next one.
  *
- * Learned budgets persist in localStorage and are clamped to [floor, cap].
+ * Learned (expanded) budgets persist in localStorage and are clamped to [floor, cap].
  */
 import { streamOpenRouterCompletion } from './openrouter';
 import type { GroundingData } from '../types';
@@ -166,14 +166,6 @@ export async function streamWithTokenGovernor(
       continue;
     }
 
-    // Completed cleanly: if we only used a fraction of the budget, learn down.
-    const used = res.usage?.completionTokens;
-    if (expansions === 0 && used !== undefined && used < current * 0.4) {
-      const next = clamp(Math.max(FLOOR, Math.floor(current * 0.7)), FLOOR, cap);
-      budgets[governorKey] = next;
-      saveBudgets(budgets);
-      onBudgetAdjust?.(next, 'down');
-    }
     break;
   }
 

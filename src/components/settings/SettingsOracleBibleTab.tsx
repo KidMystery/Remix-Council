@@ -7,11 +7,11 @@ import {
   saveOracleThreads,
   loadGlobalBible,
   saveGlobalBible,
+  hydrateOracleFromIdb,
   patchOracleThread,
   ORACLE_MODEL_OPTIONS,
   DEFAULT_MINI_DELIBERATION_MODELS,
   DEFAULT_ROTATION_ROSTER,
-  VISION_SAFE_FALLBACK_MODEL,
 } from '../../lib/oracleStore';
 import {
   buildOracleModelOptions,
@@ -26,6 +26,7 @@ import {
   removeFromOracleDirectList,
   restoreDefaultOracleDirectList,
   defaultOracleDirectList,
+  suggestCatalogModels,
 } from '../../lib/oracleModelPool';
 import {
   loadBriefingStore,
@@ -59,6 +60,23 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
 
   const selectedThread = threads.find((t) => t.id === selectedThreadId) || threads[0] || null;
 
+  useEffect(() => {
+    let cancelled = false;
+    void hydrateOracleFromIdb().then(() => {
+      if (cancelled) return;
+      const loadedThreads = loadOracleThreads();
+      const loadedGlobal = loadGlobalBible();
+      setThreads(loadedThreads);
+      setGlobalBible(loadedGlobal);
+      setSelectedThreadId((prev) =>
+        loadedThreads.some((t) => t.id === prev) ? prev : loadedThreads[0]?.id || ''
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // ---- Oracle model pool: custom models + Direct palette (global) ----
   const [customModels, setCustomModels] = useState<OracleCustomModel[]>(() => loadCustomOracleModels());
   const [directList, setDirectList] = useState<string[]>(() => loadOracleDirectList());
@@ -69,6 +87,8 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
     vision: boolean | null;
   } | null>(null);
   const [customInputError, setCustomInputError] = useState<string | null>(null);
+  const [customHighlight, setCustomHighlight] = useState(0);
+  const [customSuggestOpen, setCustomSuggestOpen] = useState(false);
   const [briefingSettings, setBriefingSettings] = useState<BriefingSettings>(
     () => loadBriefingStore().settings
   );
@@ -150,6 +170,8 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
   const handleCustomInput = (value: string) => {
     setCustomInput(value);
     setCustomInputError(null);
+    setCustomSuggestOpen(true);
+    setCustomHighlight(0);
     const normalized = normalizeModelId(value);
     if (!normalized) {
       setCustomInputInfo(null);
@@ -159,8 +181,26 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
     setCustomInputInfo({ id: normalized, status: cls.status, vision: cls.vision });
   };
 
+  const catalogSuggestions = useMemo(
+    () =>
+      suggestCatalogModels(customInput, catalog, {
+        limit: 8,
+        exclude: customModels.map((m) => m.id),
+      }),
+    [customInput, catalog, customModels]
+  );
+
+  const pickCatalogSuggestion = (id: string) => {
+    handleCustomInput(id);
+    setCustomSuggestOpen(false);
+  };
+
   const handleAddCustomModel = () => {
-    const res = addCustomOracleModel(customInput, catalog);
+    const chosen =
+      customSuggestOpen && catalogSuggestions[customHighlight]
+        ? catalogSuggestions[customHighlight].id
+        : customInput;
+    const res = addCustomOracleModel(chosen, catalog);
     if (!res.ok) {
       setCustomInputError(res.reason || 'Could not add that model.');
       return;
@@ -170,6 +210,8 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
     setCustomInput('');
     setCustomInputInfo(null);
     setCustomInputError(null);
+    setCustomSuggestOpen(false);
+    setCustomHighlight(0);
   };
 
   const handleRemoveCustomModel = (id: string) => {
@@ -439,8 +481,8 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
         </div>
         <p className="text-[11px] text-slate-500 dark:text-slate-400">
           Which model The Oracle uses and how it works are configured here instead of on the main page.
-          Images are always safe: if a chosen model can't read pictures, the turn is automatically
-          routed to <span className="font-mono">{VISION_SAFE_FALLBACK_MODEL.split('/').pop()}</span> (vision) and noted.
+          Images are always safe: if a chosen model can't read pictures, the turn is routed to a
+          live catalog vision model (or OpenRouter Auto if the catalog is empty) and noted.
         </p>
 
         {/* Mode picker */}
@@ -660,23 +702,81 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
         {/* Custom models: any OpenRouter id, validated against the live catalog */}
         <div className="space-y-1.5 border-t border-slate-200 dark:border-slate-800 pt-3">
           <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
-            Add a custom model (any OpenRouter id):
+            Add a custom model — type a name, it completes from the live catalog:
           </label>
           <div className="flex items-center gap-1.5 flex-wrap">
-            <input
-              type="text"
-              value={customInput}
-              onChange={(e) => handleCustomInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  handleAddCustomModel();
-                }
-              }}
-              placeholder="e.g. z-ai/glm-5.3"
-              spellCheck={false}
-              className="flex-1 min-w-[180px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs rounded-lg px-3 py-2 focus:ring-1 focus:ring-fuchsia-500 outline-none font-mono"
-            />
+            <div className="relative flex-1 min-w-[180px]">
+              <input
+                type="text"
+                value={customInput}
+                onChange={(e) => handleCustomInput(e.target.value)}
+                onFocus={() => setCustomSuggestOpen(true)}
+                onBlur={() => {
+                  window.setTimeout(() => setCustomSuggestOpen(false), 120);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowDown' && catalogSuggestions.length > 0) {
+                    e.preventDefault();
+                    setCustomSuggestOpen(true);
+                    setCustomHighlight((i) => (i + 1) % catalogSuggestions.length);
+                    return;
+                  }
+                  if (e.key === 'ArrowUp' && catalogSuggestions.length > 0) {
+                    e.preventDefault();
+                    setCustomSuggestOpen(true);
+                    setCustomHighlight((i) => (i - 1 + catalogSuggestions.length) % catalogSuggestions.length);
+                    return;
+                  }
+                  if (e.key === 'Escape') {
+                    setCustomSuggestOpen(false);
+                    return;
+                  }
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (customSuggestOpen && catalogSuggestions[customHighlight]) {
+                      pickCatalogSuggestion(catalogSuggestions[customHighlight].id);
+                      return;
+                    }
+                    handleAddCustomModel();
+                  }
+                }}
+                placeholder="e.g. glm, claude, muse spark"
+                spellCheck={false}
+                autoComplete="off"
+                className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs rounded-lg px-3 py-2 focus:ring-1 focus:ring-fuchsia-500 outline-none font-mono"
+              />
+              {customSuggestOpen && catalogSuggestions.length > 0 && (
+                <ul
+                  role="listbox"
+                  className="absolute z-20 left-0 right-0 mt-1 max-h-52 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg"
+                >
+                  {catalogSuggestions.map((s, i) => (
+                    <li key={s.id}>
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={i === customHighlight}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          pickCatalogSuggestion(s.id);
+                        }}
+                        className={`w-full text-left px-3 py-2 text-[11px] cursor-pointer ${
+                          i === customHighlight
+                            ? 'bg-fuchsia-50 dark:bg-fuchsia-950/50 text-fuchsia-800 dark:text-fuchsia-200'
+                            : 'text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        <span className="font-semibold">{s.name}</span>
+                        <span className="block font-mono text-[10px] text-slate-500">{s.id}</span>
+                        <span className="text-[10px] text-slate-400">
+                          {s.vision ? 'Vision' : 'Text only'}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
             {customInputInfo && (
               <span
                 className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[10px] font-semibold ${
@@ -723,9 +823,9 @@ export const SettingsOracleBibleTab: React.FC<{ catalog?: RawOpenRouterModel[] |
             <div className="text-[11px] text-red-500">{customInputError}</div>
           )}
           <p className="text-[10px] text-slate-500 dark:text-slate-400">
-            Custom models join this list and every roster picker, rotate like any other model, and obey the
-            vision guard (text-only models are never sent images). The live catalog is the source of truth:
-            a delisted id is always shown as Delisted — never silently dropped.
+            Type part of a name — the live catalog completes it. Custom models join this list and every
+            roster picker. Text-only models are never sent images. A delisted id is shown as Delisted,
+            never silently dropped.
           </p>
           {customModels.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-0.5">

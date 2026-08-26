@@ -23,4 +23,11 @@ describe('summarizeTitle utility', () => {
     expect(title.endsWith('...')).toBe(true);
     expect(title.length).toBeLessThanOrEqual(45);
   });
+
+  it('titles a long rant from the ask at the end, not the first five words', () => {
+    const rant = `So yesterday I took the Honda in and the guy behind the counter started talking about a solenoid and fluid flushes and how the transmission is slipping on the highway. I sat there for forty minutes. Anyway I need a plan to fix my car without going broke.`;
+    const title = summarizeTitle(rant);
+    expect(title.toLowerCase()).toMatch(/car|plan|fix|transmission/);
+    expect(title.toLowerCase()).not.toMatch(/^so yesterday/);
+  });
 });

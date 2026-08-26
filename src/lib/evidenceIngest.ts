@@ -2,24 +2,39 @@
  * Turn a user File into an EvidenceRecord + in-memory body.
  * Failures are recorded on the exhibit (extractor: 'failed') — we never
  * invent a truncated stub so Resume cannot pretend the file was read.
+ *
+ * Local cache is IndexedDB. When signed in, extracted UTF-8 is also a
+ * hash-addressed Drive appData file. Session JSON still never carries a body.
  */
 
-import type { AttachedTextFile, EvidenceRecord } from '../types';
+import type { AttachedTextFile, EvidenceRecord, ZipArchiveResult } from '../types';
 import { makeEvidenceRecord, sha256Hex } from './evidence';
 import { putEvidenceBlob } from './evidenceStore';
+import { pushEvidenceBlobsToDrive } from './evidenceDrive';
 import { extractPdfEvidence } from './pdfUtils';
 import { extractCodeFromArchive } from './zipReader';
+
+export { hydrateAttachedBodies, _setDriveBlobIOForTests } from './evidenceDrive';
+export type { DriveBlobIO } from './evidenceDrive';
 
 export interface IngestedFile {
   evidence: EvidenceRecord;
   attached: AttachedTextFile;
   /** Full extracted text for this live session. Not written to session JSON. */
   body: string;
+  /** Structured zip/rar tree for the inspect modal. Live session only. */
+  archive?: ZipArchiveResult;
 }
 
 function isArchiveName(name: string): boolean {
   const lower = name.toLowerCase();
   return lower.endsWith('.zip') || lower.endsWith('.rar') || lower.endsWith('.tar') || lower.endsWith('.gz');
+}
+
+function scheduleDrivePush(id: string): void {
+  void pushEvidenceBlobsToDrive([id]).catch((err) => {
+    console.warn('[EvidenceIngest] Drive blob push failed (local copy kept):', id, err);
+  });
 }
 
 export async function ingestFile(file: File): Promise<IngestedFile> {
@@ -34,11 +49,13 @@ export async function ingestFile(file: File): Promise<IngestedFile> {
   let filesInArchive: number | undefined;
   let filesExtracted: number | undefined;
   let failDetail: string | undefined;
+  let archive: ZipArchiveResult | undefined;
 
   try {
     if (isArchiveName(file.name)) {
       extractor = 'zip-code';
       const result = await extractCodeFromArchive(file);
+      archive = result;
       body = result.formattedContext || '';
       filesInArchive = result.totalFiles;
       filesExtracted = result.extractedCodeFilesCount;
@@ -78,6 +95,7 @@ export async function ingestFile(file: File): Promise<IngestedFile> {
   if (extractor !== 'failed') {
     try {
       await putEvidenceBlob(evidence.id, body);
+      scheduleDrivePush(evidence.id);
     } catch (err: any) {
       // Quota / private mode: do not keep a silent stub. Surface as failed exhibit.
       evidence.extractor = 'failed';
@@ -108,34 +126,4 @@ export async function ingestFile(file: File): Promise<IngestedFile> {
       evidenceId: evidence.id,
     },
   };
-}
-
-export async function hydrateAttachedBodies(
-  files: AttachedTextFile[],
-  evidence: EvidenceRecord[] = []
-): Promise<{ files: AttachedTextFile[]; missingBlobIds: string[] }> {
-  const { getEvidenceBlob } = await import('./evidenceStore');
-  const missingBlobIds: string[] = [];
-  const out: AttachedTextFile[] = [];
-
-  for (const f of files || []) {
-    const id = f.evidenceId || evidence.find((e) => e.name === f.name)?.id;
-    if (f.content && f.content.length > 0) {
-      out.push(f);
-      continue;
-    }
-    if (!id) {
-      out.push(f);
-      continue;
-    }
-    const body = await getEvidenceBlob(id).catch(() => null);
-    if (body == null) {
-      missingBlobIds.push(id);
-      out.push(f);
-    } else {
-      out.push({ ...f, content: body, evidenceId: id });
-    }
-  }
-
-  return { files: out, missingBlobIds };
 }

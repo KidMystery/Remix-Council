@@ -156,7 +156,7 @@ export const StorageSyncModal: React.FC<StorageSyncModalProps> = ({
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                 <HardDrive size={14} className="text-cyan-400" />
-                <span>Active Local Storage Engine</span>
+                <span>This Device</span>
               </span>
               <span className="inline-flex items-center gap-1 text-[11px] font-mono text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-md border border-emerald-500/20">
                 <CheckCircle2 size={11} />
@@ -165,7 +165,7 @@ export const StorageSyncModal: React.FC<StorageSyncModalProps> = ({
             </div>
 
             <p className="text-slate-400 text-xs leading-relaxed">
-              Every council deliberation, synthesis, and attached reference is <strong>automatically persisted</strong> to your browser&apos;s local storage immediately as you type and stream.
+              Every council deliberation, synthesis, and attached reference is <strong>automatically persisted</strong> on this device (IndexedDB). Google Drive is the sync target, not the 5&nbsp;MB browser bucket.
             </p>
 
             <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800/80 font-mono text-center">

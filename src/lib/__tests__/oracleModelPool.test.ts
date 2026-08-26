@@ -15,9 +15,13 @@ import {
   resolveRotationModel,
   filterVisionSafeRoster,
   buildOracleModelOptions,
+  suggestCatalogModels,
+  pickLiveVisionFallback,
+  ORACLE_ERROR_RETRY_MODEL,
   CUSTOM_ORACLE_MODELS_KEY,
   ORACLE_DIRECT_LIST_KEY,
 } from '../oracleModelPool';
+import { OPENROUTER_AUTO } from '../autoRouter';
 import { ORACLE_MODEL_OPTIONS, DEFAULT_ROTATION_ROSTER, exportOracleThreads, importOracleThreads } from '../oracleStore';
 
 // ---- localStorage mock (node env has no localStorage) ---------------------
@@ -230,6 +234,18 @@ describe('resolveRotationModel (Auto-Rotate)', () => {
     const n = DEFAULT_ROTATION_ROSTER.length;
     expect(resolveRotationModel(n, DEFAULT_ROTATION_ROSTER)).toBe(DEFAULT_ROTATION_ROSTER[0]);
   });
+
+  it('skips dead roster ids when a liveness predicate is provided', () => {
+    const roster = ['dead/one', 'live/two', 'dead/three'];
+    const isLive = (id: string) => id.startsWith('live/');
+    expect(resolveRotationModel(0, roster, roster, isLive)).toBe('live/two');
+    expect(resolveRotationModel(1, roster, roster, isLive)).toBe('live/two');
+  });
+
+  it('falls back to OpenRouter Auto when every roster id is dead', () => {
+    const roster = ['dead/one', 'dead/two'];
+    expect(resolveRotationModel(0, roster, roster, () => false)).toBe(OPENROUTER_AUTO);
+  });
 });
 
 describe('filterVisionSafeRoster (vision guard)', () => {
@@ -298,6 +314,53 @@ describe('export/import round-trip (custom pool + direct palette)', () => {
     expect(imported.success).toBe(true);
     expect(imported.extras?.customModels).toEqual([]);
     expect(imported.extras?.directList).toEqual(['ok/id']);
+  });
+});
+
+describe('suggestCatalogModels (typeahead)', () => {
+  it('returns nothing for a blank query — does not dump the catalog', () => {
+    expect(suggestCatalogModels('', CATALOG)).toEqual([]);
+    expect(suggestCatalogModels('   ', CATALOG)).toEqual([]);
+  });
+
+  it('completes a partial name without requiring the exact provider/slug', () => {
+    const hits = suggestCatalogModels('glm', CATALOG);
+    expect(hits.map((h) => h.id)).toContain('z-ai/glm-5.3');
+    const muse = suggestCatalogModels('muse spark', CATALOG);
+    expect(muse[0]?.id).toBe('meta/muse-spark-1.2');
+  });
+
+  it('never invents an id that is not in the catalog and honors exclude + limit', () => {
+    const hits = suggestCatalogModels('a', CATALOG, { limit: 2, exclude: ['z-ai/glm-5.3'] });
+    expect(hits.length).toBeLessThanOrEqual(2);
+    expect(hits.every((h) => CATALOG.some((c) => c.id === h.id))).toBe(true);
+    expect(hits.map((h) => h.id)).not.toContain('z-ai/glm-5.3');
+  });
+});
+
+describe('Oracle error / vision fallbacks are not a shrine to Gemini', () => {
+  it('retries provider errors through OpenRouter Auto', () => {
+    expect(ORACLE_ERROR_RETRY_MODEL).toBe(OPENROUTER_AUTO);
+  });
+
+  it('picks a live vision model from the catalog, Auto when the catalog is empty', () => {
+    expect(pickLiveVisionFallback([])).toBe(OPENROUTER_AUTO);
+    expect(pickLiveVisionFallback(null)).toBe(OPENROUTER_AUTO);
+    const picked = pickLiveVisionFallback(CATALOG);
+    expect(picked).toBe('meta/muse-spark-1.2');
+    expect(CATALOG.find((m) => m.id === picked)).toBeTruthy();
+  });
+
+  it('prefers a live Gemini Flash when the catalog still has one, never invents it', () => {
+    const withFlash = [
+      mk('z-ai/glm-5.3', ['text']),
+      mk('google/gemini-2.5-flash', ['text', 'image']),
+      mk('meta/muse-spark-1.2', ['text', 'image']),
+    ];
+    expect(pickLiveVisionFallback(withFlash)).toBe('google/gemini-2.5-flash');
+    expect(pickLiveVisionFallback(withFlash.filter((m) => m.id !== 'google/gemini-2.5-flash'))).toBe(
+      'meta/muse-spark-1.2'
+    );
   });
 });
 

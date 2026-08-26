@@ -16,11 +16,15 @@
 
 import type { RawOpenRouterModel } from '../types';
 import { modelHasVision, isOpenRouterRouterId } from './modelScoring';
+import { OPENROUTER_AUTO } from './autoRouter';
 import {
   ORACLE_MODEL_OPTIONS,
   DEFAULT_ROTATION_ROSTER,
   VISION_SAFE_FALLBACK_MODEL,
 } from './oracleStore';
+
+/** Provider-error retry: Auto, never a hardcoded Gemini that can delist. */
+export const ORACLE_ERROR_RETRY_MODEL = OPENROUTER_AUTO;
 
 export const CUSTOM_ORACLE_MODELS_KEY = 'council-oracle-custom-models-v1';
 export const ORACLE_DIRECT_LIST_KEY = 'council-oracle-direct-list-v1';
@@ -77,6 +81,78 @@ export function isValidOpenRouterModelId(id: string): boolean {
  * curated list (offline preference). Vision comes from the catalog's
  * architecture data when present; otherwise from the curated snapshot.
  */
+export interface CatalogModelSuggestion {
+  id: string;
+  name: string;
+  vision: boolean | null;
+}
+
+function suggestionScore(query: string, id: string, name: string): number {
+  const q = query.trim().toLowerCase();
+  if (!q) return 0;
+  const nid = id.toLowerCase();
+  const nn = (name || '').toLowerCase();
+  const slash = nid.indexOf('/');
+  const provider = slash > 0 ? nid.slice(0, slash) : '';
+  const slug = slash >= 0 ? nid.slice(slash + 1) : nid;
+  if (nid === q) return 1000;
+  if (slug === q) return 900;
+  if (slug.startsWith(q)) return 800;
+  if (nid.startsWith(q)) return 750;
+  if (nn.startsWith(q)) return 700;
+  if (slug.includes(q)) return 500;
+  if (nid.includes(q)) return 400;
+  if (nn.includes(q)) return 300;
+  if (provider.startsWith(q) || provider.includes(q)) return 250;
+  const tokens = q.split(/[\s/]+/).filter(Boolean);
+  if (tokens.length > 1 && tokens.every((t) => nid.includes(t) || nn.includes(t))) return 350;
+  return 0;
+}
+
+/**
+ * Typeahead against the live catalog. Empty query → no dump.
+ * Rank by id / slug / name / provider. Never invent an id that is not in the catalog.
+ */
+export function suggestCatalogModels(
+  query: string,
+  catalog: RawOpenRouterModel[] | null | undefined,
+  opts: { limit?: number; exclude?: string[] } = {}
+): CatalogModelSuggestion[] {
+  const q = String(query || '').trim();
+  if (!q || !Array.isArray(catalog) || catalog.length === 0) return [];
+  const exclude = new Set((opts.exclude || []).map((id) => id.toLowerCase()));
+  const limit = Math.max(1, opts.limit ?? 8);
+  const scored: Array<CatalogModelSuggestion & { score: number }> = [];
+  for (const m of catalog) {
+    const id = String(m?.id || '').trim();
+    if (!id || exclude.has(id.toLowerCase())) continue;
+    const name = String(m.name || id.split('/').pop() || id);
+    const score = suggestionScore(q, id, name);
+    if (score <= 0) continue;
+    scored.push({
+      id,
+      name,
+      vision: modelHasVision(m),
+      score,
+    });
+  }
+  scored.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  return scored.slice(0, limit).map(({ id, name, vision }) => ({ id, name, vision }));
+}
+
+/**
+ * Image turns need a model that can see. Prefer a live catalog vision id.
+ * If the catalog is empty, Auto — never a hardcoded Gemini that can delist.
+ */
+export function pickLiveVisionFallback(
+  catalog: RawOpenRouterModel[] | null | undefined
+): string {
+  const live = (catalog || []).filter((m) => m?.id && modelHasVision(m));
+  if (live.length === 0) return OPENROUTER_AUTO;
+  const prefer = live.find((m) => /flash/i.test(m.id) && /gemini|google/i.test(m.id)) || live[0];
+  return prefer.id;
+}
+
 export function classifyOracleModel(
   id: string,
   catalog: RawOpenRouterModel[] | null | undefined
@@ -243,10 +319,14 @@ export function restoreDefaultOracleDirectList(): string[] {
 export function resolveRotationModel(
   turnCount: number,
   roster: string[] | null | undefined,
-  fallbackRoster: string[] = DEFAULT_ROTATION_ROSTER
+  fallbackRoster: string[] = DEFAULT_ROTATION_ROSTER,
+  isUsable?: (id: string) => boolean
 ): string {
   const list = Array.isArray(roster) && roster.length > 0 ? roster : fallbackRoster;
   const safe = list.length > 0 ? list : DEFAULT_ROTATION_ROSTER;
+  const usable = isUsable ? safe.filter(isUsable) : safe;
+  if (usable.length > 0) return usable[(turnCount || 0) % usable.length];
+  if (isUsable) return ORACLE_ERROR_RETRY_MODEL;
   return safe[(turnCount || 0) % safe.length];
 }
 

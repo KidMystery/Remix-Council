@@ -9,6 +9,14 @@ import {
   type Tombstone,
 } from './syncContract';
 import { mergeBibles } from './bibleClaims';
+import {
+  mergeNexusDocs,
+  parseNexusDriveDoc,
+  sanitizeMissionForStorage,
+  type NexusDriveDoc,
+  type PersistedMission,
+} from './nexusMission';
+import { evidenceBlobFileName } from './evidenceDrive';
 
 export type { Tombstone };
 
@@ -71,14 +79,23 @@ function getGisClientAsync(): Promise<any> {
 
 /**
  * Signs in with Google via GIS token client and resolves with the access token.
- * Explicitly uses prompt: 'select_account' so the user is presented with the Google
- * account selector and login screen rather than silently picking a predetermined profile.
+ * Default prompt is the account picker — only for a user click. Overnight
+ * recovery must pass prompt: '' so GIS does not open a popup.
  */
 export async function signInWithGoogle(options: SignInOptions = { prompt: 'select_account' }): Promise<string> {
   const clientId = getClientId();
   const oauth2 = await getGisClientAsync();
+  const silent = options.prompt === '';
 
   return new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error(silent ? 'Silent Drive refresh timed out.' : 'Google sign-in timed out.')),
+      silent ? 8000 : 120000
+    );
+    const finish = (fn: () => void) => {
+      clearTimeout(timeout);
+      fn();
+    };
     try {
       const tokenClient = oauth2.initTokenClient({
         client_id: clientId,
@@ -86,10 +103,12 @@ export async function signInWithGoogle(options: SignInOptions = { prompt: 'selec
         callback: async (response: any) => {
           if (response?.error) {
             if (response.error === 'popup_closed_by_user') {
-              reject(new Error('Google sign-in popup was closed before completing.'));
+              finish(() => reject(new Error('Google sign-in popup was closed before completing.')));
               return;
             }
-            reject(new Error(response.error_description || response.error || 'Google sign-in failed.'));
+            finish(() =>
+              reject(new Error(response.error_description || response.error || 'Google sign-in failed.'))
+            );
             return;
           }
 
@@ -113,20 +132,20 @@ export async function signInWithGoogle(options: SignInOptions = { prompt: 'selec
               console.warn('[DrivePersistence] Could not fetch user profile details:', err);
             }
 
-            resolve(response.access_token);
+            finish(() => resolve(response.access_token));
             return;
           }
 
-          reject(new Error('Google sign-in did not return an access token.'));
+          finish(() => reject(new Error('Google sign-in did not return an access token.')));
         },
       });
 
-      // Always request with prompt: 'select_account' so the user gets the Google account picker
+      // prompt: '' is silent (no picker). select_account is only for a click.
       tokenClient.requestAccessToken({
         prompt: options.prompt !== undefined ? options.prompt : 'select_account',
       });
     } catch (err: any) {
-      reject(err instanceof Error ? err : new Error(err?.message || 'Google sign-in failed.'));
+      finish(() => reject(err instanceof Error ? err : new Error(err?.message || 'Google sign-in failed.')));
     }
   });
 }
@@ -227,6 +246,84 @@ export class DriveUnreadError extends Error {
   constructor(message: string = DRIVE_UNREAD_MESSAGE) {
     super(message);
     this.name = 'DriveUnreadError';
+  }
+}
+
+/** Token died. Local save is fine. Do not pop a Google picker while the owner sleeps. */
+export class DriveAuthRequiredError extends Error {
+  constructor(
+    message: string = 'Drive sign-in expired. Local copy is still saving. Reconnect when you are at the keyboard.'
+  ) {
+    super(message);
+    this.name = 'DriveAuthRequiredError';
+  }
+}
+
+export const DRIVE_AUTH_REQUIRED_EVENT = 'council-drive-auth-required';
+export const DRIVE_AUTH_RESTORED_EVENT = 'council-drive-auth-restored';
+
+export function notifyDriveNeedsReauth(): void {
+  try {
+    window.dispatchEvent(new CustomEvent(DRIVE_AUTH_REQUIRED_EVENT));
+  } catch {
+    // non-browser
+  }
+}
+
+export function notifyDriveAuthRestored(): void {
+  try {
+    window.dispatchEvent(new CustomEvent(DRIVE_AUTH_RESTORED_EVENT));
+  } catch {
+    // non-browser
+  }
+}
+
+/** Silent first. Interactive picker is only for a click. */
+export function authRecoveryStep(silentAlreadyTried: boolean): 'silent' | 'banner' {
+  return silentAlreadyTried ? 'banner' : 'silent';
+}
+
+/** Remember that this browser should try a silent Drive restore on the next load. Not a token. */
+export const DRIVE_WANTED_KEY = 'council-drive-wanted';
+
+export function isDriveWanted(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(DRIVE_WANTED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function markDriveWanted(): void {
+  try {
+    localStorage.setItem(DRIVE_WANTED_KEY, '1');
+  } catch {
+    // ignore
+  }
+}
+
+export function clearDriveWanted(): void {
+  try {
+    localStorage.removeItem(DRIVE_WANTED_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Same-browser reopen: one silent GIS refresh, never a picker.
+ * New device (brother's phone) has no wanted-flag → skip; they click Sign in once.
+ */
+export async function trySilentDriveRestore(): Promise<boolean> {
+  if (isGoogleSignedIn()) return true;
+  if (!isDriveWanted()) return false;
+  try {
+    await signInWithGoogle({ prompt: '' });
+    notifyDriveAuthRestored();
+    return true;
+  } catch {
+    notifyDriveNeedsReauth();
+    return false;
   }
 }
 
@@ -349,11 +446,15 @@ async function withAuthRetry<T>(op: (token: string) => Promise<T>): Promise<T> {
   try {
     return await op(requireToken());
   } catch (err: any) {
-    if (err instanceof AuthError) {
-      await signInWithGoogle();
-      return op(requireToken());
+    if (!(err instanceof AuthError)) throw err;
+    try {
+      await signInWithGoogle({ prompt: '' });
+      notifyDriveAuthRestored();
+      return await op(requireToken());
+    } catch {
+      notifyDriveNeedsReauth();
+      throw new DriveAuthRequiredError();
     }
-    throw err;
   }
 }
 
@@ -688,9 +789,16 @@ export function mergeOracleThreads(
       const incomingTitle = incoming.title && incoming.title !== 'New Consultation' && incoming.title !== 'New Conversation';
       const existingTitle = existing.title && existing.title !== 'New Consultation' && existing.title !== 'New Conversation';
 
+      // Mode / model / rosters belong to whoever edited last. Spreading incoming
+      // unconditionally was snapping a live Direct click back to a stale
+      // Auto-Rotate copy on every Drive save.
+      const incomingNewer = (incoming.updatedAt || 0) > (existing.updatedAt || 0);
+      const newer = incomingNewer ? incoming : existing;
+      const older = incomingNewer ? existing : incoming;
+
       const mergedThread = {
-        ...existing,
-        ...incoming,
+        ...older,
+        ...newer,
         title: incomingTitle ? incoming.title : existingTitle ? existing.title : incoming.title || existing.title,
         messages: mergedMessages,
         bible: mergeBibles(existing.bible, incoming.bible),
@@ -719,4 +827,147 @@ export function mergeOracleDocs(local: OracleDrivePayload, remote: OracleDrivePa
     globalBible: mergeBibles(local.globalBible, remote.globalBible),
     deleted: result.deleted,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Nexus Lab Drive sync — active mission + archive. JSON is metadata-only.
+// Extracted exhibit text is a separate hash-addressed appData file.
+// ---------------------------------------------------------------------------
+
+const NEXUS_FILE_NAME = 'council-nexus.json';
+
+export type { NexusDriveDoc, PersistedMission };
+
+export async function loadNexusDriveDoc(): Promise<NexusDriveDoc | null> {
+  if (!isGoogleSignedIn()) return null;
+  const read = await withAuthRetry((token) => readDriveJson(token, NEXUS_FILE_NAME));
+  if (read.missing) return { version: 2, updatedAt: 0, mission: null, archive: [], deleted: [] };
+  return parseNexusDriveDoc(read.raw);
+}
+
+export async function saveNexusToDrive(
+  mission: PersistedMission | null,
+  archive: PersistedMission[] = [],
+  deleted: Tombstone[] = []
+): Promise<NexusDriveDoc> {
+  const local: NexusDriveDoc = {
+    version: 2,
+    updatedAt: Date.now(),
+    mission: mission ? sanitizeMissionForStorage(mission) : null,
+    archive: archive.map(sanitizeMissionForStorage),
+    deleted,
+  };
+
+  return withAuthRetry(async (token) => {
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const read = await readDriveJson(token, NEXUS_FILE_NAME);
+      const remote = read.missing
+        ? { version: 2 as const, updatedAt: 0, mission: null, archive: [] as PersistedMission[], deleted: [] }
+        : parseNexusDriveDoc(read.raw);
+      const envelope = mergeNexusDocs(local, remote);
+      envelope.updatedAt = Date.now();
+      try {
+        await uploadSessionsMultipart(
+          token,
+          envelope,
+          read.missing ? undefined : read.file.id,
+          NEXUS_FILE_NAME,
+          read.missing ? undefined : read.file.etag
+        );
+        return envelope;
+      } catch (err: any) {
+        if (err instanceof PreconditionError) {
+          lastErr = err;
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr || new DriveUnreadError('Nexus Drive file changed and could not be merged after 3 tries.');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Exhibit bodies — separate hash-addressed files. Never in the JSON envelope.
+// ---------------------------------------------------------------------------
+
+async function uploadPlainTextMultipart(token: string, fileName: string, text: string): Promise<void> {
+  const metadata = {
+    name: fileName,
+    mimeType: 'text/plain',
+    parents: ['appDataFolder'],
+  };
+  const boundary = `council-blob-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const body = [
+    `--${boundary}`,
+    'Content-Type: application/json; charset=UTF-8',
+    '',
+    JSON.stringify(metadata),
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    '',
+    text,
+    `--${boundary}--`,
+  ].join('\r\n');
+
+  const resp = await fetch(`${DRIVE_UPLOAD_BASE}/files?uploadType=multipart`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`,
+    },
+    body,
+  });
+
+  if (resp.status === 401) throw new AuthError('Token expired');
+  if (!resp.ok) {
+    let errorDetail = '';
+    try {
+      const errJson = await resp.json();
+      errorDetail = errJson?.error?.message || JSON.stringify(errJson);
+    } catch {
+      errorDetail = `HTTP ${resp.status}`;
+    }
+    throw new Error(`Failed to create Drive blob (${fileName}): ${errorDetail}`);
+  }
+}
+
+/**
+ * Writes extracted UTF-8 to appDataFolder/council-blob-<id>.txt.
+ * Hash-addressed: if the file already exists we do not rewrite it.
+ * Never called with original PDF bytes. No-op when signed out.
+ */
+export async function saveEvidenceBlobToDrive(id: string, body: string): Promise<void> {
+  const fileName = evidenceBlobFileName(id);
+  if (!fileName || body == null) return;
+  if (!isGoogleSignedIn()) return;
+  await withAuthRetry(async (token) => {
+    const existing = await findDriveFile(token, fileName);
+    if (existing) return;
+    await uploadPlainTextMultipart(token, fileName, body);
+  });
+}
+
+/**
+ * Fetches extracted UTF-8 for an evidence id. Missing file → null.
+ * Unreadable Drive → DriveUnreadError (fail closed; do not invent a stub).
+ */
+export async function loadEvidenceBlobFromDrive(id: string): Promise<string | null> {
+  const fileName = evidenceBlobFileName(id);
+  if (!fileName) return null;
+  if (!isGoogleSignedIn()) return null;
+  return withAuthRetry(async (token) => {
+    const file = await findDriveFile(token, fileName);
+    if (!file) return null;
+    const resp = await fetch(`${DRIVE_API_BASE}/files/${file.id}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (resp.status === 401) throw new AuthError('Token expired');
+    if (resp.status === 404) return null;
+    if (!resp.ok) {
+      throw new DriveUnreadError(`Failed to read Drive blob (${fileName}): HTTP ${resp.status}`);
+    }
+    return resp.text();
+  });
 }
