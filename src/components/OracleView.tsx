@@ -89,6 +89,7 @@ import {
   mergeOracleThreads,
   DriveUnreadError,
   DriveAuthRequiredError,
+  DRIVE_AUTH_RESTORED_EVENT,
 } from '../lib/drivePersistence';
 import { addTombstone, AGENT_LOST_ON_REDEPLOY, DRIVE_UNREAD_MESSAGE, mergeTombstones } from '../lib/syncContract';
 import { copyToClipboard } from '../lib/clipboard';
@@ -236,6 +237,13 @@ export const OracleView: React.FC<OracleViewProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threads, briefingStoreVersion]);
 
+  const [driveEpoch, setDriveEpoch] = useState(0);
+  useEffect(() => {
+    const bump = () => setDriveEpoch((n) => n + 1);
+    window.addEventListener(DRIVE_AUTH_RESTORED_EVENT, bump);
+    return () => window.removeEventListener(DRIVE_AUTH_RESTORED_EVENT, bump);
+  }, []);
+
   // Drive sync
   useEffect(() => {
     if (!isSignedIn) return;
@@ -283,7 +291,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isSignedIn]);
+  }, [isSignedIn, driveEpoch]);
 
   // Debounced save to Drive
   const driveSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);

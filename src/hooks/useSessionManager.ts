@@ -14,6 +14,9 @@ import {
   DRIVE_AUTH_REQUIRED_EVENT,
   DRIVE_AUTH_RESTORED_EVENT,
   notifyDriveAuthRestored,
+  trySilentDriveRestore,
+  markDriveWanted,
+  clearDriveWanted,
   type Tombstone,
 } from '../lib/drivePersistence';
 import {
@@ -48,6 +51,7 @@ export function useSessionManager() {
   const [saveDestination, setSaveDestination] = useState<'cloud' | 'local' | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [driveNeedsReauth, setDriveNeedsReauth] = useState(false);
+  const [isSignedIn, setIsSignedIn] = useState(() => isGoogleSignedIn());
 
   const sessionsRef = useRef<Session[]>([]);
   sessionsRef.current = sessions;
@@ -55,7 +59,10 @@ export function useSessionManager() {
 
   useEffect(() => {
     const onNeed = () => setDriveNeedsReauth(true);
-    const onOk = () => setDriveNeedsReauth(false);
+    const onOk = () => {
+      setDriveNeedsReauth(false);
+      setIsSignedIn(true);
+    };
     window.addEventListener(DRIVE_AUTH_REQUIRED_EVENT, onNeed);
     window.addEventListener(DRIVE_AUTH_RESTORED_EVENT, onOk);
     return () => {
@@ -185,11 +192,18 @@ export function useSessionManager() {
     }
   }, []);
 
-  // ---- Load: Merge local storage cache with Drive on mount ----
+  // ---- Load: silent Drive restore (if this browser wanted it), then merge ----
   useEffect(() => {
     let isMounted = true;
     async function load() {
       setIsLoading(true);
+      if (!isGoogleSignedIn()) {
+        const restored = await trySilentDriveRestore();
+        if (isMounted) setIsSignedIn(restored);
+      } else if (isMounted) {
+        setIsSignedIn(true);
+      }
+
       const [local, stones] = await Promise.all([loadSessionsLocal(), loadTombstonesLocal()]);
       deletedRef.current = mergeTombstones(deletedRef.current, stones);
       let unified = local;
@@ -498,6 +512,8 @@ export function useSessionManager() {
 
   const signIn = useCallback(async (): Promise<void> => {
     await signInWithGoogle();
+    markDriveWanted();
+    setIsSignedIn(true);
     setIsSyncing(true);
     try {
       const remote = await loadSessionDriveDoc();
@@ -533,6 +549,8 @@ export function useSessionManager() {
 
   const signOut = useCallback(async (): Promise<void> => {
     await signOutGoogle();
+    clearDriveWanted();
+    setIsSignedIn(false);
   }, []);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) || sessions[0] || null;
@@ -553,7 +571,7 @@ export function useSessionManager() {
     deleteRoundFromActiveSession,
     exportSessionsJSON,
     importSessionsJSON,
-    isSignedIn: isGoogleSignedIn(),
+    isSignedIn,
     signIn,
     signOut,
     isSyncing,

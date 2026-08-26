@@ -9,6 +9,13 @@ import {
   type Tombstone,
 } from './syncContract';
 import { mergeBibles } from './bibleClaims';
+import {
+  mergeNexusDocs,
+  parseNexusDriveDoc,
+  sanitizeMissionForStorage,
+  type NexusDriveDoc,
+  type PersistedMission,
+} from './nexusMission';
 
 export type { Tombstone };
 
@@ -273,6 +280,50 @@ export function notifyDriveAuthRestored(): void {
 /** Silent first. Interactive picker is only for a click. */
 export function authRecoveryStep(silentAlreadyTried: boolean): 'silent' | 'banner' {
   return silentAlreadyTried ? 'banner' : 'silent';
+}
+
+/** Remember that this browser should try a silent Drive restore on the next load. Not a token. */
+export const DRIVE_WANTED_KEY = 'council-drive-wanted';
+
+export function isDriveWanted(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(DRIVE_WANTED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function markDriveWanted(): void {
+  try {
+    localStorage.setItem(DRIVE_WANTED_KEY, '1');
+  } catch {
+    // ignore
+  }
+}
+
+export function clearDriveWanted(): void {
+  try {
+    localStorage.removeItem(DRIVE_WANTED_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Same-browser reopen: one silent GIS refresh, never a picker.
+ * New device (brother's phone) has no wanted-flag → skip; they click Sign in once.
+ */
+export async function trySilentDriveRestore(): Promise<boolean> {
+  if (isGoogleSignedIn()) return true;
+  if (!isDriveWanted()) return false;
+  try {
+    await signInWithGoogle({ prompt: '' });
+    notifyDriveAuthRestored();
+    return true;
+  } catch {
+    notifyDriveNeedsReauth();
+    return false;
+  }
 }
 
 class PreconditionError extends Error {
@@ -768,4 +819,60 @@ export function mergeOracleDocs(local: OracleDrivePayload, remote: OracleDrivePa
     globalBible: mergeBibles(local.globalBible, remote.globalBible),
     deleted: result.deleted,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Nexus Lab Drive sync — active mission + archive. Bodies stay off Drive.
+// ---------------------------------------------------------------------------
+
+const NEXUS_FILE_NAME = 'council-nexus.json';
+
+export type { NexusDriveDoc, PersistedMission };
+
+export async function loadNexusDriveDoc(): Promise<NexusDriveDoc | null> {
+  if (!isGoogleSignedIn()) return null;
+  const read = await withAuthRetry((token) => readDriveJson(token, NEXUS_FILE_NAME));
+  if (read.missing) return { version: 2, updatedAt: 0, mission: null, archive: [] };
+  return parseNexusDriveDoc(read.raw);
+}
+
+export async function saveNexusToDrive(
+  mission: PersistedMission | null,
+  archive: PersistedMission[] = []
+): Promise<NexusDriveDoc> {
+  const local: NexusDriveDoc = {
+    version: 2,
+    updatedAt: Date.now(),
+    mission: mission ? sanitizeMissionForStorage(mission) : null,
+    archive: archive.map(sanitizeMissionForStorage),
+  };
+
+  return withAuthRetry(async (token) => {
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const read = await readDriveJson(token, NEXUS_FILE_NAME);
+      const remote = read.missing
+        ? { version: 2 as const, updatedAt: 0, mission: null, archive: [] as PersistedMission[] }
+        : parseNexusDriveDoc(read.raw);
+      const envelope = mergeNexusDocs(local, remote);
+      envelope.updatedAt = Date.now();
+      try {
+        await uploadSessionsMultipart(
+          token,
+          envelope,
+          read.missing ? undefined : read.file.id,
+          NEXUS_FILE_NAME,
+          read.missing ? undefined : read.file.etag
+        );
+        return envelope;
+      } catch (err: any) {
+        if (err instanceof PreconditionError) {
+          lastErr = err;
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr || new DriveUnreadError('Nexus Drive file changed and could not be merged after 3 tries.');
+  });
 }

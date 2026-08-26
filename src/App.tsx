@@ -474,6 +474,7 @@ export default function App() {
               onCompleteRound={updateRoundInActiveSession}
               activeSessionId={activeSessionId}
               costCeiling={costCeiling}
+              isSignedIn={isSignedIn}
             />
           ) : (
             <OracleView

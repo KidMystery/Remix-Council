@@ -180,4 +180,10 @@ describe('drive list URL (v3)', () => {
     expect(url).toContain('council-oracle.json');
     expect(url).not.toContain('etag');
   });
+
+  it('builds a valid search URL for nexus file too', () => {
+    const url = driveAppDataListUrl('council-nexus.json');
+    expect(url).toContain('council-nexus.json');
+    expect(url).not.toContain('etag');
+  });
 });
