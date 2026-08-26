@@ -876,9 +876,6 @@ export const OracleView: React.FC<OracleViewProps> = ({
           governorKey: latest.id,
           onToken: (chunk) =>
             setLiveAnswer((prev) => (prev ? { ...prev, text: prev.text + chunk } : prev)),
-          onBudgetAdjust: (_budget, direction) => {
-            govNote = direction === 'up' ? 'auto-expanded tokens' : 'tokens trimmed to fit';
-          },
         });
 
         if (res.expansions > 0) govNote = `auto-expanded tokens ×${res.expansions}`;
