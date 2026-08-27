@@ -26,6 +26,7 @@ import {
   Loader2,
   ChevronDown,
   Moon,
+  Pencil,
 } from 'lucide-react';
 import type {
   Persona,
@@ -71,6 +72,7 @@ import {
 import { archivesFromFiles, isArchiveAttachment, zipResultFromAttached } from '../lib/zipUtils';
 import { formatSandboxReport, verifyMissionCode } from '../lib/codeSandbox';
 import { ZipFilesModal } from './ZipFilesModal';
+import { CreatePersonalityModal } from './CreatePersonalityModal';
 import { MessageMarkdown } from './MessageMarkdown';
 import {
   launchAgentJob,
@@ -149,31 +151,34 @@ function buildFreeRoster(catalog?: RawOpenRouterModel[]): { personas: Persona[];
   const roles = [
     {
       id: 'nexus_free_a',
+      personaName: 'The Sprinter',
       role: 'Fast Specialist',
       avatar: '⚡',
       color: '#10b981',
-      prompt: 'You are the Fast Specialist in Nexus Lab. Provide rapid, concise, structured domain analysis.',
+      prompt: 'You are The Sprinter, the Fast Specialist in Nexus Lab. Provide rapid, concise, structured domain analysis.',
     },
     {
       id: 'nexus_free_b',
+      personaName: 'The Open-Weights Juror',
       role: 'Open Weights Evaluator',
       avatar: '🦙',
       color: '#f97316',
-      prompt: 'You are the Open Weights Evaluator in Nexus Lab. Provide clear open-weights domain analysis and actionable recommendations.',
+      prompt: 'You are The Open-Weights Juror in Nexus Lab. Provide clear open-weights domain analysis and actionable recommendations.',
     },
     {
       id: 'nexus_free_c',
+      personaName: 'The Context Keeper',
       role: 'Context Analyst',
       avatar: '🔎',
       color: '#0ea5e9',
-      prompt: 'You are the Context Analyst in Nexus Lab. Verify long-range context, flag inconsistencies, and keep the mission grounded.',
+      prompt: 'You are The Context Keeper in Nexus Lab. Verify long-range context, flag inconsistencies, and keep the mission grounded.',
     },
   ];
 
   const panelistCount = picks.length >= 4 ? 3 : Math.max(1, picks.length - 1);
   const personas = roles.slice(0, panelistCount).map((r, i) => ({
     id: r.id,
-    name: picks[i].name,
+    name: r.personaName,
     role: r.role,
     avatar: r.avatar,
     color: r.color,
@@ -209,35 +214,35 @@ export function getPresetRoster(
       personas: [
         {
           id: 'claude_frontier',
-          name: 'Claude Sonnet 4.5',
+          name: 'The Architect',
           role: 'Lead Architect',
           avatar: '🧠',
           color: '#3b82f6',
           model: 'anthropic/claude-sonnet-4.5',
           systemPrompt:
-            'You are Claude Sonnet 4.5, Lead Architect in Nexus Lab. Provide profound structural insights, robust logic, and clear architectural trade-offs.',
+            'You are The Architect (Claude Sonnet 4.5), Lead Architect in Nexus Lab. Provide profound structural insights, robust logic, and clear architectural trade-offs.',
           enabled: true,
         },
         {
           id: 'gpt4o_frontier',
-          name: 'GPT-4o',
+          name: 'The Executor',
           role: 'Strategy & Execution',
           avatar: '⚡',
           color: '#10b981',
           model: 'openai/gpt-4o',
           systemPrompt:
-            'You are GPT-4o, Strategy & Execution Specialist in Nexus Lab. Focus on operational execution, edge-case mitigation, and pragmatic paths.',
+            'You are The Executor (GPT-4o), Strategy & Execution Specialist in Nexus Lab. Focus on operational execution, edge-case mitigation, and pragmatic paths.',
           enabled: true,
         },
         {
           id: 'gemini_frontier',
-          name: 'Gemini 2.5 Flash',
+          name: 'The Verifier',
           role: 'Verification & Speed',
           avatar: '✨',
           color: '#f59e0b',
           model: 'google/gemini-2.5-flash',
           systemPrompt:
-            'You are Gemini 2.5 Flash, Verification Specialist in Nexus Lab. Stress-test assumptions, verify facts, and test for hidden vulnerabilities.',
+            'You are The Verifier (Gemini 2.5 Flash), Verification Specialist in Nexus Lab. Stress-test assumptions, verify facts, and test for hidden vulnerabilities.',
           enabled: true,
         },
       ],
@@ -259,35 +264,35 @@ export function getPresetRoster(
       personas: [
         {
           id: 'r1_reasoner',
-          name: 'DeepSeek R1',
+          name: 'The First-Principles Analyst',
           role: 'Deep Reasoning Engine',
           avatar: '🔬',
           color: '#8b5cf6',
           model: 'deepseek/deepseek-r1',
           systemPrompt:
-            'You are DeepSeek R1, Deep Reasoning Engine. Perform exhaustive first-principles reasoning and mathematical verification.',
+            'You are The First-Principles Analyst (DeepSeek R1), Deep Reasoning Engine. Perform exhaustive first-principles reasoning and mathematical verification.',
           enabled: true,
         },
         {
           id: 'claude_reasoner',
-          name: 'Claude Sonnet 4.5 (Thinking)',
+          name: 'The System Designer',
           role: 'System Designer',
           avatar: '💡',
           color: '#ec4899',
           model: 'anthropic/claude-sonnet-4.5',
           systemPrompt:
-            'You are Claude Sonnet 4.5 with extended thinking. Analyze core problem topology and build complete solution frameworks.',
+            'You are The System Designer (Claude Sonnet 4.5 with extended thinking). Analyze core problem topology and build complete solution frameworks.',
           enabled: true,
         },
         {
           id: 'gemini_pro_reasoner',
-          name: 'Gemini 2.5 Pro',
+          name: 'The Context Synthesist',
           role: 'Contextual Synthesist',
           avatar: '🌐',
           color: '#06b6d4',
           model: 'google/gemini-2.5-pro',
           systemPrompt:
-            'You are Gemini 2.5 Pro. Analyze deep contextual nuances, edge cases, and long-range system trajectories.',
+            'You are The Context Synthesist (Gemini 2.5 Pro). Analyze deep contextual nuances, edge cases, and long-range system trajectories.',
           enabled: true,
         },
       ],
@@ -493,7 +498,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [activeRosterSynthesizer, setActiveRosterSynthesizer] = useState<Persona>(() =>
     getPresetRoster('frontier_trio', personas, synthesizer, catalog).synthesizer
   );
-  const [isRosterModalOpen, setIsRosterModalOpen] = useState(false);
+  // Personality editor for the Active Model Panel (per-seat, in place).
+  const [editingSeat, setEditingSeat] = useState<Persona | null>(null);
 
   const handleSelectEnginePreset = (preset: NexusEnginePreset) => {
     setEnginePreset(preset);
@@ -514,6 +520,23 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setEnginePreset('custom');
     setActiveRosterSynthesizer((prev) => ({ ...prev, model: modelId }));
   };
+
+  /** Save an edited seat personality in place (name, role, avatar, prompt, model). */
+  const handleSaveSeatPersona = (saved: Persona) => {
+    if (saved.id === activeRosterSynthesizer.id) {
+      setActiveRosterSynthesizer(saved);
+    } else {
+      setActiveRosterPersonas((prev) => prev.map((p) => (p.id === saved.id ? saved : p)));
+    }
+    setEnginePreset('custom');
+    setEditingSeat(null);
+  };
+
+  /** Model palette offered to the per-seat personality editor. */
+  const rosterModelOptions = [
+    ...CURATED_NEXUS_MODELS.map((m) => ({ id: m.id, name: m.name })),
+    ...catalog.slice(0, 50).map((c: RawOpenRouterModel) => ({ id: c.id, name: (c as any).name || c.id })),
+  ];
   const [enableWebGrounding, setEnableWebGrounding] = useState(false);
   const [enableCodeSandbox, setEnableCodeSandbox] = useState(true);
   const [deepDocumentMode, setDeepDocumentMode] = useState(false);
@@ -2105,6 +2128,15 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                         </optgroup>
                       )}
                     </select>
+                    <button
+                      type="button"
+                      onClick={() => setEditingSeat(pers)}
+                      disabled={isRunning}
+                      title="Edit personality — name, role, avatar, prompt"
+                      className="shrink-0 p-1.5 text-slate-500 hover:text-indigo-300 bg-slate-900 border border-slate-700 rounded-lg cursor-pointer disabled:opacity-50"
+                    >
+                      <Pencil size={12} />
+                    </button>
                   </div>
                 ))}
 
@@ -2143,6 +2175,15 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                       </optgroup>
                     )}
                   </select>
+                  <button
+                    type="button"
+                    onClick={() => setEditingSeat(activeRosterSynthesizer)}
+                    disabled={isRunning}
+                    title="Edit chair personality — name, role, avatar, prompt"
+                    className="shrink-0 p-1.5 text-indigo-400/70 hover:text-indigo-300 bg-slate-900 border border-indigo-700/60 rounded-lg cursor-pointer disabled:opacity-50"
+                  >
+                    <Pencil size={12} />
+                  </button>
                 </div>
               </div>
             </div>
@@ -2762,6 +2803,15 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
         zipResult={activeZipResult}
         isOpen={isZipModalOpen}
         onClose={() => setIsZipModalOpen(false)}
+      />
+
+      {/* Per-seat personality editor (Active Model Panel) */}
+      <CreatePersonalityModal
+        isOpen={!!editingSeat}
+        onClose={() => setEditingSeat(null)}
+        onSave={handleSaveSeatPersona}
+        availableModels={rosterModelOptions}
+        editingPersona={editingSeat}
       />
       </div>
     </div>
