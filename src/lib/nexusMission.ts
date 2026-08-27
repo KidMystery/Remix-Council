@@ -300,3 +300,25 @@ export function applyServerJobSummaryToMission(
   if (status === 'cancelled' || status === 'interrupted') return { ...m, status: 'paused', updatedAt: Date.now() };
   return m; // non-terminal or unknown — leave for the real poller
 }
+
+/**
+ * Plain-markdown copy payload for "moments like this": the FINAL verdict
+ * (last round with synthesis content) plus the morning brief when present.
+ * Feeds the copy buttons on the Morning Brief and Agent Mission Report.
+ */
+export function buildConsensusCopyText(
+  rounds: PersistedMission['rounds'],
+  morningBrief?: string | null
+): string {
+  const list = Array.isArray(rounds) ? rounds : [];
+  let verdict = '';
+  for (let i = list.length - 1; i >= 0; i--) {
+    const content = list[i]?.synthesis?.content;
+    if (content && content.trim()) {
+      verdict = content.trim();
+      break;
+    }
+  }
+  const brief = typeof morningBrief === 'string' && morningBrief.trim() ? morningBrief.trim() : '';
+  return [verdict, brief].filter(Boolean).join('\n\n---\n\n');
+}

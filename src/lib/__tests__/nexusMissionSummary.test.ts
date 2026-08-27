@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { missionSummary, applyServerJobSummaryToMission, type PersistedMission } from '../nexusMission';
+import { missionSummary, applyServerJobSummaryToMission, buildConsensusCopyText, type PersistedMission } from '../nexusMission';
 
 /**
  * Regression tests for "Nexus threads commit on server but don't summarize
@@ -112,5 +112,27 @@ describe('applyServerJobSummaryToMission', () => {
       status: 'running',
       morningBrief: null,
     });
+  });
+});
+
+describe('buildConsensusCopyText', () => {
+  it('copies the FINAL verdict round, not earlier passes', () => {
+    const rounds = [
+      { synthesis: { content: 'Pass 1: preliminary read.' } } as any,
+      { synthesis: { content: 'Final verdict: ship it, with four caveats.' } } as any,
+    ];
+    const text = buildConsensusCopyText(rounds, null);
+    expect(text).toContain('Final verdict: ship it');
+    expect(text).not.toContain('Pass 1');
+  });
+
+  it('appends the morning brief when present', () => {
+    const rounds = [{ synthesis: { content: 'Verdict text.' } } as any];
+    expect(buildConsensusCopyText(rounds, 'Brief: three leaks plugged.')).toContain('Brief: three leaks plugged.');
+  });
+
+  it('returns empty string for a mission with no verdicts yet', () => {
+    expect(buildConsensusCopyText([], null)).toBe('');
+    expect(buildConsensusCopyText([{ synthesis: {} } as any], undefined)).toBe('');
   });
 });

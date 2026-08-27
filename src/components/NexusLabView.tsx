@@ -27,6 +27,7 @@ import {
   ChevronDown,
   Moon,
   Pencil,
+  Copy,
 } from 'lucide-react';
 import type {
   Persona,
@@ -43,6 +44,7 @@ import { streamPersonaWithFallback } from '../lib/fallbackManager';
 import { ingestFile } from '../lib/evidenceIngest';
 import { dropLocalStorageKey, kvDel, kvGet, kvSet, KV_KEYS, readLocalStorageJson } from '../lib/kvStore';
 import type { EvidenceRecord } from '../types';
+import { copyToClipboard } from '../lib/clipboard';
 import { summarizeTitle } from '../lib/titleUtils';
 import {
   deleteNexusMission,
@@ -51,6 +53,7 @@ import {
   mergeNexusDocs,
   NEXUS_SERVER_DEFAULT,
   applyServerJobSummaryToMission,
+  buildConsensusCopyText,
   openNexusMission,
   parkActiveMission,
   renameNexusMission,
@@ -882,6 +885,19 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
   const addLog = (msg: string) => {
     setTerminalLogs((prev) => [...prev.slice(-30), `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  };
+
+  // Consensus copy buttons (Morning Brief + Agent Mission Report).
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+  const handleCopyText = async (key: string, text: string) => {
+    if (!text.trim()) return;
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedKey(key);
+      if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => setCopiedKey(null), 2000);
+    }
   };
 
   const processFiles = async (filesList: FileList | File[]) => {
@@ -2626,6 +2642,16 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               <div className="flex items-center gap-2 text-xs font-bold text-indigo-300 border-b border-slate-800 pb-2">
                 <Moon size={14} />
                 Morning Brief — what changed overnight
+                <button
+                  type="button"
+                  onClick={() => handleCopyText('brief', buildConsensusCopyText(rounds, morningBrief))}
+                  className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-semibold text-slate-400 hover:text-indigo-200 border border-slate-700 hover:border-indigo-500/60 transition-colors cursor-pointer"
+                  title="Copy the consensus (verdict + brief) to clipboard"
+                  aria-label="Copy consensus to clipboard"
+                >
+                  {copiedKey === 'brief' ? <CheckCircle2 size={11} className="text-emerald-400" /> : <Copy size={11} />}
+                  {copiedKey === 'brief' ? 'Copied' : 'Copy'}
+                </button>
               </div>
               <div className="text-xs text-slate-200 leading-relaxed">
                 <MessageMarkdown content={morningBrief} />
@@ -2642,8 +2668,20 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                   <CheckCircle2 size={13} className="text-emerald-400" />
                   Agent Mission Report
                 </span>
-                <span className="font-mono text-[11px] text-slate-400">
-                  {serverJob.status === 'done' ? 'complete' : serverJob.status} · ${serverJob.usageUSD.toFixed(4)} USD
+                <span className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleCopyText('report', buildConsensusCopyText(rounds, morningBrief))}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-semibold text-slate-400 hover:text-sky-200 border border-slate-700 hover:border-sky-500/60 transition-colors cursor-pointer"
+                    title="Copy the consensus (verdict + brief) to clipboard"
+                    aria-label="Copy consensus to clipboard"
+                  >
+                    {copiedKey === 'report' ? <CheckCircle2 size={11} className="text-emerald-400" /> : <Copy size={11} />}
+                    {copiedKey === 'report' ? 'Copied' : 'Copy'}
+                  </button>
+                  <span className="font-mono text-[11px] text-slate-400">
+                    {serverJob.status === 'done' ? 'complete' : serverJob.status} · ${serverJob.usageUSD.toFixed(4)} USD
+                  </span>
                 </span>
               </div>
               {serverJob.plan && (
