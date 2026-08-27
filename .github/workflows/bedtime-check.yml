@@ -1,0 +1,31 @@
+name: Bedtime check
+
+on:
+  schedule:
+    - cron: "25 2 * * *"
+    - cron: "25 3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  bedtime-ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send bedtime ping (guarded to NY 22:25-22:59)
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          set -u
+          if [ -z "${NTFY_TOPIC:-}" ]; then
+            echo "NTFY_TOPIC secret is not set."; exit 1
+          fi
+          HM=$((10#$(TZ=America/New_York date +%H%M)))
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            if [ "$HM" -lt 2225 ] || [ "$HM" -gt 2259 ]; then
+              echo "Wrong DST window, skipping."; exit 0
+            fi
+          fi
+          curl -sS --fail-with-body \
+            -H "Title: Council" -H "Tags: bed" -H "Priority: default" \
+            -d "Bedtime. Showered? Bed? One tap to dismiss - no reply needed. (Council bedtime check v1)" \
+            "https://ntfy.sh/${NTFY_TOPIC}" > /dev/null
+          echo "Sent."
