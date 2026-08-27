@@ -19,6 +19,16 @@ import {
 
 export type { Tombstone };
 
+/**
+ * New Nexus missions (and follow-ups) launch on the server-side agent loop
+ * by default: the loop lives in server.ts, survives tab close and phone
+ * screen-off, and is bounded by the server-side job cost cap. The in-tab
+ * browser loop remains available as an explicit opt-out via the ☁️ toggle
+ * (useful when the server path is unavailable). Pinned by
+ * nexusServerDefault.test.ts — flip it consciously, not by accident.
+ */
+export const NEXUS_SERVER_DEFAULT = true;
+
 export interface PersistedMission {
   id: string;
   goal: string;

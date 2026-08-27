@@ -49,6 +49,7 @@ import {
   isPersistedMission,
   listNexusMissions,
   mergeNexusDocs,
+  NEXUS_SERVER_DEFAULT,
   openNexusMission,
   parkActiveMission,
   renameNexusMission,
@@ -546,8 +547,9 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [nightShiftCycles, setNightShiftCycles] = useState(5);
   const [nightShiftPaceMinutes, setNightShiftPaceMinutes] = useState(0);
   const [morningBrief, setMorningBrief] = useState<string | null>(null);
-  // Server-run missions: the agent loop lives in server.ts, survives tab close.
-  const [serverMode, setServerMode] = useState(false);
+    // Server-run missions: the agent loop lives in server.ts, survives tab close.
+    // Default ON (NEXUS_SERVER_DEFAULT) — phone-safe; bounded by server job cost cap.
+    const [serverMode, setServerMode] = useState(NEXUS_SERVER_DEFAULT);
   const [serverJobId, setServerJobId] = useState<string | null>(null);
   const [serverJob, setServerJob] = useState<AgentJobFull | null>(null);
   const [documentPlan, setDocumentPlan] = useState<DocumentChunkPlan | null>(null);
@@ -651,7 +653,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setNightShiftEnabled(true);
     setServerJobId(null);
     setServerJob(null);
-    setServerMode(false);
+    setServerMode(NEXUS_SERVER_DEFAULT);
     missionIdRef.current = newMissionId();
     persistMission(null, true);
   };
@@ -1608,7 +1610,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setNightShiftEnabled(true);
     setServerJobId(null);
     setServerJob(null);
-    setServerMode(false);
+    setServerMode(NEXUS_SERVER_DEFAULT);
     persistMission({
       id: childId,
       goal: directive,
