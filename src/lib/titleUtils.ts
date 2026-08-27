@@ -325,3 +325,44 @@ export function summarizeTitle(text: unknown, defaultFallback = DEFAULT_THREAD_T
   return formatted.charAt(0).toUpperCase() + formatted.slice(1);
 }
 
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * Thread summaries from the initial prompt (Aug 2026).
+ *
+ * "Check if all threads summarize — Oracle can be based on the initial
+ * prompt." Nexus missions summarize in the sidebar; Oracle threads and
+ * Chamber sessions did not. Oracle's switcher is a horizontal pill strip, so
+ * its pills get a backfilled LABEL (generic titles → initial prompt, Title
+ * Case) plus the full excerpt as tooltip; Chamber's vertical sidebar gets the
+ * excerpt as a second line, same as Nexus missions.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/** Flat, noise-stripped one-line excerpt of a thread's initial prompt. */
+export function threadSummaryLine(input: { initialPrompt?: unknown; max?: number }): string {
+  const max = Math.max(
+    40,
+    Math.min(200, typeof input.max === 'number' && Number.isFinite(input.max) ? Math.floor(input.max) : 130)
+  );
+  const raw = typeof input.initialPrompt === 'string' ? input.initialPrompt : '';
+  if (!raw.trim()) return '';
+  const cleaned = stripFormattingAndNoise(raw);
+  if (!cleaned) return '';
+  if (cleaned.length <= max) return cleaned;
+  const cut = cleaned.slice(0, max - 1).trimEnd();
+  const lastSpace = cut.lastIndexOf(' ');
+  const base = lastSpace > max * 0.6 ? cut.slice(0, lastSpace).trimEnd() : cut;
+  return `${base}…`;
+}
+
+/**
+ * Oracle pill label: a GENERIC title ("New Conversation"…) is backfilled from
+ * the initial prompt in Title Case. A real title — user rename or an
+ * informational auto-title like "Council Briefing — Finance" — always wins.
+ */
+export function oracleThreadLabel(title: unknown, initialPrompt: unknown): string {
+  const t = typeof title === 'string' ? title.trim() : '';
+  if (t && !isDefaultTitle(t)) return t;
+  const raw = typeof initialPrompt === 'string' && initialPrompt.trim() ? initialPrompt : '';
+  if (!raw) return t || DEFAULT_ORACLE_TITLE;
+  return summarizeTitle(raw, t || DEFAULT_ORACLE_TITLE);
+}

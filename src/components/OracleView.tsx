@@ -83,7 +83,7 @@ import { streamOpenRouterCompletion } from '../lib/openrouter';
 import { streamWithTokenGovernor } from '../lib/tokenGovernor';
 import { pickVoice, resolveVoiceModel } from '../lib/oracleVoices';
 import { MAX_CHAT_ATTACHMENT_CHARS, screenChatAttachments } from '../lib/chatAttachments';
-import { summarizeTitle, isDefaultTitle, DEFAULT_ORACLE_TITLE } from '../lib/titleUtils';
+import { summarizeTitle, isDefaultTitle, DEFAULT_ORACLE_TITLE, oracleThreadLabel, threadSummaryLine } from '../lib/titleUtils';
 import { useSpeech } from '../hooks/useSpeech';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { useOpenRouterCredits } from '../hooks/useOpenRouterCredits';
@@ -1288,7 +1288,11 @@ export const OracleView: React.FC<OracleViewProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2.5 p-2.5 bg-slate-900/80 border border-slate-800 rounded-2xl">
             {/* Threads tabs */}
             <div className="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
-              {threads.map((t) => (
+              {threads.map((t) => {
+                const tPrompt = t.messages?.find((m) => m?.role === 'user' && (m.content || '').trim())?.content;
+                const tLabel = oracleThreadLabel(t.title, tPrompt);
+                const tSummary = threadSummaryLine({ initialPrompt: tPrompt });
+                return (
                 <div
                   key={t.id}
                   className={`group/thread flex items-center gap-1 p-0.5 rounded-xl border transition-all ${
@@ -1322,9 +1326,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
                       className={`px-2 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer max-w-[150px] truncate ${
                         t.id === activeId ? 'text-white font-semibold' : 'text-slate-300 hover:text-white'
                       }`}
-                      title={t.title}
+                      title={tSummary && tSummary !== tLabel ? `${tLabel}\n\n${tSummary}` : tLabel}
                     >
-                      {t.title}
+                      {tLabel}
                     </button>
                   )}
 
@@ -1356,7 +1360,8 @@ export const OracleView: React.FC<OracleViewProps> = ({
                     </button>
                   )}
                 </div>
-              ))}
+                );
+              })}
 
               <button
                 type="button"
