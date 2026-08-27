@@ -72,3 +72,53 @@ export const ORACLE_VOICES: OracleVoice[] = [
 export function pickVoice(turnIndex: number): OracleVoice {
   return ORACLE_VOICES[turnIndex % ORACLE_VOICES.length];
 }
+
+export interface VoiceModelResolution {
+  model: string;
+  /** Set only when a substitution happened, so the UI can surface it. */
+  note?: string;
+}
+
+/**
+ * Picks the model for a voiced turn, validating the voice's hardcoded model
+ * against the live catalog when one is available.
+ *
+ * Why this exists (Aug 2026 incident): voice models used to be sent raw.
+ * When one delisted on OpenRouter (gpt-4o, llama-3.3-70b…), every turn that
+ * voice came up returned a provider 404 — and because the rotation pointer
+ * only advanced on success, retries re-picked the SAME dead model. Result:
+ * an error storm that never self-healed.
+ *
+ * Rules:
+ * - No voice / model-per-voice off / free-tier thread / voice has no model
+ *   → the thread's own model (never upscale a free thread).
+ * - Catalog available and the voice model is live → the voice model.
+ * - Catalog available and the voice model is DELISTED → the thread's model,
+ *   plus a visible note naming the swap. No more silent 404 loop.
+ * - Catalog unavailable (offline) → legacy behavior: trust the voice model.
+ */
+export function resolveVoiceModel(
+  voice: OracleVoice | null | undefined,
+  opts: {
+    threadModel: string;
+    modelPerVoice: boolean;
+    threadModelIsFree: boolean;
+    /** Liveness check from the live catalog. Omit when no catalog is loaded. */
+    isLive?: (id: string) => boolean;
+  }
+): VoiceModelResolution {
+  const threadModel = opts.threadModel;
+  const wanted = voice && opts.modelPerVoice && !opts.threadModelIsFree && voice.model;
+  if (!voice || !wanted) return { model: threadModel };
+
+  const voiceModel = voice.model as string;
+  if (!opts.isLive) return { model: voiceModel };
+  if (opts.isLive(voiceModel)) return { model: voiceModel };
+
+  const shortVoice = voiceModel.split('/').pop() || voiceModel;
+  const shortThread = threadModel.split('/').pop() || threadModel;
+  return {
+    model: threadModel,
+    note: `${voice.name}'s model ${shortVoice} is delisted — replying on ${shortThread} this turn.`,
+  };
+}

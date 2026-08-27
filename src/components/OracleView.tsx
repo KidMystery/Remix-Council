@@ -80,7 +80,7 @@ import type { AgentJobFull } from '../lib/agentClient';
 import { modelHasVision } from '../lib/modelScoring';
 import { streamOpenRouterCompletion } from '../lib/openrouter';
 import { streamWithTokenGovernor } from '../lib/tokenGovernor';
-import { pickVoice } from '../lib/oracleVoices';
+import { pickVoice, resolveVoiceModel } from '../lib/oracleVoices';
 import { MAX_CHAT_ATTACHMENT_CHARS, screenChatAttachments } from '../lib/chatAttachments';
 import { summarizeTitle, isDefaultTitle, DEFAULT_ORACLE_TITLE } from '../lib/titleUtils';
 import { useSpeech } from '../hooks/useSpeech';
@@ -734,6 +734,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
       let answerText = '';
       let answerModelUsed = effectiveModel;
       let govNote: string | undefined;
+      let rotateNote: string | undefined;
       let usedVoice: { id: string; name: string; avatar: string } | undefined;
 
       if (mode === 'mini_deliberation') {
@@ -851,9 +852,21 @@ export const OracleView: React.FC<OracleViewProps> = ({
           : ORACLE_SYSTEM_PROMPT;
 
         const threadModelIsFree = (selectedModel || '').endsWith(':free');
-        const voiceModelWanted =
-          voice && latest.rotateVoiceModels && !threadModelIsFree && voice.model;
-        let answerModel = voiceModelWanted ? voice.model! : selectedModel;
+        // Validate the voice's model against the live catalog: a delisted
+        // voice model must fall back to the thread model WITH a visible note,
+        // not fire a provider 404 into the chat (Auto-Rotate error storm fix).
+        const isLive = (id: string) =>
+          !Array.isArray(catalog) || catalog.length === 0
+            ? true
+            : catalog.some((m) => m?.id?.toLowerCase() === id.toLowerCase());
+        const voiceResolution = resolveVoiceModel(voice, {
+          threadModel: selectedModel,
+          modelPerVoice: Boolean(latest.rotateVoiceModels),
+          threadModelIsFree,
+          isLive,
+        });
+        if (voiceResolution.note) rotateNote = voiceResolution.note;
+        let answerModel = voiceResolution.model;
 
         // Vision guard for direct/rotation: swap a text-only model when images are attached.
         if (images.length > 0 && !isModelVisionOk(answerModel)) {
@@ -862,7 +875,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
           answerModel = visionFallback;
         }
 
-        setLiveAnswer({ id: answerId, text: '', headerNote: visionNote });
+        setLiveAnswer({ id: answerId, text: '', headerNote: [visionNote, rotateNote].filter(Boolean).join(' ') || undefined });
 
         const res = await streamWithTokenGovernor({
           model: answerModel,
@@ -894,7 +907,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
         timestamp: Date.now(),
         model: answerModelUsed,
         voice: usedVoice,
-        note: visionNote ? `${visionNote}${govNote ? ` ${govNote}` : ''}`.trim() : govNote,
+        note: [visionNote, rotateNote, govNote].filter(Boolean).join(' ') || undefined,
       };
 
       latest = {
@@ -987,7 +1000,15 @@ export const OracleView: React.FC<OracleViewProps> = ({
           error: true,
           model: attemptedModel,
         };
-        commitThread({ ...latest, messages: [...latest.messages, errMsg], updatedAt: Date.now() });
+        // Advance the rotation pointer on failure so the next attempt picks a
+        // DIFFERENT voice/model instead of re-picking the same dead one —
+        // this is the "errors forever and never fixes" half of the storm.
+        commitThread({
+          ...latest,
+          messages: [...latest.messages, errMsg],
+          turnCount: (latest.turnCount || 0) + 1,
+          updatedAt: Date.now(),
+        });
       }
       setLiveAnswer(null);
     } finally {
