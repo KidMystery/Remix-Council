@@ -1,6 +1,7 @@
 import type { Session, CouncilRound } from '../types';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { preferIncomingRound, stripSessionsBodies } from './evidence';
+import { isDefaultTitle } from './titleUtils';
 import {
   addTombstone,
   applyTombstones,
@@ -37,8 +38,97 @@ const SESSION_FILE_NAME = 'council-sessions.json';
 const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
 
+const GOOGLE_AUTH_STORAGE_KEY = 'council_google_auth_v2';
+
 let accessToken: string | null = null;
 let currentUserEmail: string | null = null;
+
+interface PersistedGoogleAuth {
+  token: string;
+  email: string | null;
+  expiresAt: number;
+}
+
+function saveStoredAuth(token: string, expiresInSeconds: number = 3600, email?: string | null): void {
+  accessToken = token;
+  if (email !== undefined) {
+    currentUserEmail = email;
+  }
+  // Store with a 2-minute safety margin
+  const ttlSec = Math.max(60, (expiresInSeconds || 3600) - 120);
+  const authData: PersistedGoogleAuth = {
+    token,
+    email: currentUserEmail,
+    expiresAt: Date.now() + ttlSec * 1000,
+  };
+  try {
+    sessionStorage.setItem(GOOGLE_AUTH_STORAGE_KEY, JSON.stringify(authData));
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(GOOGLE_AUTH_STORAGE_KEY, JSON.stringify(authData));
+    }
+  } catch {
+    // ignore
+  }
+  markDriveWanted();
+}
+
+function loadStoredAuth(): { token: string; email: string | null } | null {
+  if (accessToken) {
+    return { token: accessToken, email: currentUserEmail };
+  }
+  let raw: string | null = null;
+  try {
+    raw = (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(GOOGLE_AUTH_STORAGE_KEY) : null) ||
+          (typeof localStorage !== 'undefined' ? localStorage.getItem(GOOGLE_AUTH_STORAGE_KEY) : null);
+  } catch {
+    // ignore
+  }
+
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as PersistedGoogleAuth;
+    if (parsed && typeof parsed.token === 'string' && parsed.token.length > 0) {
+      if (parsed.expiresAt && Date.now() < parsed.expiresAt) {
+        accessToken = parsed.token;
+        currentUserEmail = parsed.email || null;
+        return { token: parsed.token, email: currentUserEmail };
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // Expired or invalid - clear it
+  clearStoredAuth(false);
+  return null;
+}
+
+function clearStoredAuth(fullSignOut: boolean = true): void {
+  accessToken = null;
+  currentUserEmail = null;
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem(GOOGLE_AUTH_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(GOOGLE_AUTH_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+  if (fullSignOut) {
+    clearDriveWanted();
+  }
+}
 
 export interface SignInOptions {
   prompt?: 'select_account' | 'consent' | 'consent select_account' | '';
@@ -113,25 +203,27 @@ export async function signInWithGoogle(options: SignInOptions = { prompt: 'selec
           }
 
           if (response?.access_token) {
-            accessToken = response.access_token;
+            const expiresIn = typeof response.expires_in === 'number' ? response.expires_in : parseInt(response.expires_in, 10) || 3599;
+            saveStoredAuth(response.access_token, expiresIn, currentUserEmail);
 
             // Fetch user email/profile from Drive About endpoint
             try {
               const userRes = await fetch(`${DRIVE_API_BASE}/about?fields=user`, {
-                headers: { Authorization: `Bearer ${accessToken}` },
+                headers: { Authorization: `Bearer ${response.access_token}` },
               });
               if (userRes.ok) {
                 const data = await userRes.json();
-                if (data?.user?.emailAddress) {
-                  currentUserEmail = data.user.emailAddress;
-                } else if (data?.user?.displayName) {
-                  currentUserEmail = data.user.displayName;
+                const email = data?.user?.emailAddress || data?.user?.displayName || null;
+                if (email) {
+                  currentUserEmail = email;
+                  saveStoredAuth(response.access_token, expiresIn, email);
                 }
               }
             } catch (err) {
               console.warn('[DrivePersistence] Could not fetch user profile details:', err);
             }
 
+            notifyDriveAuthRestored();
             finish(() => resolve(response.access_token));
             return;
           }
@@ -151,44 +243,47 @@ export async function signInWithGoogle(options: SignInOptions = { prompt: 'selec
 }
 
 /**
- * Revokes the in-memory token and clears it.
+ * Revokes the token and clears all stored session state.
  */
 export async function signOutGoogle(): Promise<void> {
-  if (accessToken) {
+  const currentToken = accessToken || loadStoredAuth()?.token;
+  if (currentToken) {
     try {
       const google = typeof window !== 'undefined' ? (window as any).google : null;
       if (google?.accounts?.oauth2?.revoke) {
         await new Promise<void>((resolve) => {
-          google.accounts.oauth2.revoke(accessToken, () => resolve());
+          google.accounts.oauth2.revoke(currentToken, () => resolve());
         });
       } else {
-        await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(accessToken)}`);
+        await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(currentToken)}`);
       }
     } catch (err) {
       console.warn('[DrivePersistence] Token revocation failed:', err);
     }
   }
-  accessToken = null;
-  currentUserEmail = null;
+  clearStoredAuth(true);
 }
 
-/** Returns true if an in-memory token is set and non-empty. */
+/** Returns true if an active non-expired token is present. */
 export function isGoogleSignedIn(): boolean {
-  return Boolean(accessToken && accessToken.length > 0);
+  const auth = loadStoredAuth();
+  return Boolean(auth && auth.token && auth.token.length > 0);
 }
 
 /**
- * Returns the in-memory Google access token, if present. Used by the API client
+ * Returns the Google access token, if present and non-expired. Used by the API client
  * to prove identity to the server (owner gate) on same-origin requests only.
- * Never persisted to storage.
  */
 export function getGoogleAccessToken(): string | null {
-  return accessToken;
+  const auth = loadStoredAuth();
+  return auth ? auth.token : null;
 }
 
-/** Returns the email from the GIS credential response if available. */
+/** Returns the email from the GIS credential response or cache if available. */
 export function getCurrentUserEmail(): string | null {
-  return currentUserEmail;
+  if (currentUserEmail) return currentUserEmail;
+  const auth = loadStoredAuth();
+  return auth ? auth.email : null;
 }
 
 function requireToken(): string {
@@ -315,14 +410,17 @@ export function clearDriveWanted(): void {
  * New device (brother's phone) has no wanted-flag → skip; they click Sign in once.
  */
 export async function trySilentDriveRestore(): Promise<boolean> {
-  if (isGoogleSignedIn()) return true;
+  if (isGoogleSignedIn()) {
+    notifyDriveAuthRestored();
+    return true;
+  }
   if (!isDriveWanted()) return false;
   try {
     await signInWithGoogle({ prompt: '' });
     notifyDriveAuthRestored();
     return true;
   } catch {
-    notifyDriveNeedsReauth();
+    // Speculative background restore failed on page load; keep local storage active
     return false;
   }
 }
@@ -447,6 +545,7 @@ async function withAuthRetry<T>(op: (token: string) => Promise<T>): Promise<T> {
     return await op(requireToken());
   } catch (err: any) {
     if (!(err instanceof AuthError)) throw err;
+    clearStoredAuth(false);
     try {
       await signInWithGoogle({ prompt: '' });
       notifyDriveAuthRestored();
@@ -700,9 +799,6 @@ export function mergeSessions(
         (a, b) => (a.timestamp || 0) - (b.timestamp || 0)
       );
 
-      const isDefaultTitle = (t?: string) =>
-        !t || t.trim() === '' || t === 'New Deliberation' || t === 'Untitled Session';
-
       const bestTitle = !isDefaultTitle(existing.title)
         ? existing.title
         : !isDefaultTitle(incoming.title)
@@ -786,8 +882,8 @@ export function mergeOracleThreads(
         (a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0)
       );
 
-      const incomingTitle = incoming.title && incoming.title !== 'New Consultation' && incoming.title !== 'New Conversation';
-      const existingTitle = existing.title && existing.title !== 'New Consultation' && existing.title !== 'New Conversation';
+      const incomingValidTitle = !isDefaultTitle(incoming.title);
+      const existingValidTitle = !isDefaultTitle(existing.title);
 
       // Mode / model / rosters belong to whoever edited last. Spreading incoming
       // unconditionally was snapping a live Direct click back to a stale
@@ -799,7 +895,7 @@ export function mergeOracleThreads(
       const mergedThread = {
         ...older,
         ...newer,
-        title: incomingTitle ? incoming.title : existingTitle ? existing.title : incoming.title || existing.title,
+        title: incomingValidTitle ? incoming.title : existingValidTitle ? existing.title : incoming.title || existing.title || 'New Conversation',
         messages: mergedMessages,
         bible: mergeBibles(existing.bible, incoming.bible),
         updatedAt: Math.max(existing.updatedAt || 0, incoming.updatedAt || 0),

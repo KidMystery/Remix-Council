@@ -80,7 +80,7 @@ import { modelHasVision } from '../lib/modelScoring';
 import { streamOpenRouterCompletion } from '../lib/openrouter';
 import { streamWithTokenGovernor } from '../lib/tokenGovernor';
 import { pickVoice } from '../lib/oracleVoices';
-import { summarizeTitle } from '../lib/titleUtils';
+import { summarizeTitle, isDefaultTitle, DEFAULT_ORACLE_TITLE } from '../lib/titleUtils';
 import { useSpeech } from '../hooks/useSpeech';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { useOpenRouterCredits } from '../hooks/useOpenRouterCredits';
@@ -641,7 +641,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
       latest = {
         ...thread,
         model: effectiveModel,
-        title: thread.title === 'New Conversation' || !thread.title ? summarizeTitle(text) : thread.title,
+        title: isDefaultTitle(thread.title) ? summarizeTitle(text, DEFAULT_ORACLE_TITLE) : thread.title,
         messages: [...thread.messages, userMsg],
         updatedAt: now,
       };

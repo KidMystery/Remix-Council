@@ -7,17 +7,26 @@ import {
   markDriveWanted,
   clearDriveWanted,
   trySilentDriveRestore,
+  isGoogleSignedIn,
+  getGoogleAccessToken,
+  getCurrentUserEmail,
+  signOutGoogle,
 } from '../drivePersistence';
 
-function installLocalStorage() {
+function installStorage() {
   const store = new Map<string, string>();
   const api = {
     getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
     setItem: (k: string, v: string) => void store.set(k, String(v)),
     removeItem: (k: string) => void store.delete(k),
     clear: () => store.clear(),
+    key: (i: number) => Array.from(store.keys())[i] || null,
+    get length() {
+      return store.size;
+    },
   };
-  (globalThis as unknown as { localStorage: typeof api }).localStorage = api;
+  (globalThis as unknown as { localStorage: typeof api; sessionStorage: typeof api }).localStorage = api;
+  (globalThis as unknown as { sessionStorage: typeof api }).sessionStorage = api;
   return api;
 }
 
@@ -35,12 +44,14 @@ describe('Drive auth recovery', () => {
   });
 });
 
-describe('Drive wanted flag (same-browser reopen, not a token)', () => {
+describe('Drive wanted flag & token persistence across page reloads', () => {
   beforeEach(() => {
-    installLocalStorage();
+    installStorage();
   });
-  afterEach(() => {
+  afterEach(async () => {
+    await signOutGoogle();
     delete (globalThis as { localStorage?: unknown }).localStorage;
+    delete (globalThis as { sessionStorage?: unknown }).sessionStorage;
   });
 
   it('remembers that this browser asked for Drive and can forget it', () => {
@@ -56,4 +67,36 @@ describe('Drive wanted flag (same-browser reopen, not a token)', () => {
     expect(isDriveWanted()).toBe(false);
     await expect(trySilentDriveRestore()).resolves.toBe(false);
   });
+
+  it('restores auth state from cached storage across page refreshes without re-prompting', async () => {
+    const validAuth = {
+      token: 'ya29.test_valid_access_token_123',
+      email: 'tester@example.com',
+      expiresAt: Date.now() + 3600 * 1000,
+    };
+    sessionStorage.setItem('council_google_auth_v2', JSON.stringify(validAuth));
+    markDriveWanted();
+
+    expect(isGoogleSignedIn()).toBe(true);
+    expect(getGoogleAccessToken()).toBe('ya29.test_valid_access_token_123');
+    expect(getCurrentUserEmail()).toBe('tester@example.com');
+
+    // Silent restore immediately succeeds without network calls
+    const restored = await trySilentDriveRestore();
+    expect(restored).toBe(true);
+  });
+
+  it('ignores and clears expired tokens on page refresh', async () => {
+    const expiredAuth = {
+      token: 'ya29.expired_token_456',
+      email: 'tester@example.com',
+      expiresAt: Date.now() - 10000, // expired 10 seconds ago
+    };
+    sessionStorage.setItem('council_google_auth_v2', JSON.stringify(expiredAuth));
+
+    expect(isGoogleSignedIn()).toBe(false);
+    expect(getGoogleAccessToken()).toBeNull();
+    expect(sessionStorage.getItem('council_google_auth_v2')).toBeNull();
+  });
 });
+

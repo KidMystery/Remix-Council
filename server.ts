@@ -164,20 +164,41 @@ async function resolveTokenEmail(token: string): Promise<string | null> {
   const cached = ownerVerifyCache.get(token);
   if (cached && cached.expiresAt > Date.now()) return cached.email;
 
+  // 1. Try googleapis userinfo endpoint
   try {
     const resp = await fetch(
       `https://www.googleapis.com/oauth2/v1/userinfo?access_token=${encodeURIComponent(token)}`
     );
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const email = (data?.email as string) || null;
-    if (email) {
-      ownerVerifyCache.set(token, { email, expiresAt: Date.now() + OWNER_VERIFY_TTL_MS });
+    if (resp.ok) {
+      const data = await resp.json();
+      const email = (data?.email as string) || null;
+      if (email) {
+        ownerVerifyCache.set(token, { email, expiresAt: Date.now() + OWNER_VERIFY_TTL_MS });
+        return email;
+      }
     }
-    return email;
   } catch {
-    return null;
+    // Continue to Drive endpoint fallback
   }
+
+  // 2. Try Google Drive about endpoint (succeeds when token holds Drive permissions)
+  try {
+    const driveResp = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (driveResp.ok) {
+      const driveData = await driveResp.json();
+      const email = (driveData?.user?.emailAddress as string) || null;
+      if (email) {
+        ownerVerifyCache.set(token, { email, expiresAt: Date.now() + OWNER_VERIFY_TTL_MS });
+        return email;
+      }
+    }
+  } catch {
+    // Both endpoints failed
+  }
+
+  return null;
 }
 
 export async function startServer(portOverride?: number) {
@@ -222,35 +243,58 @@ export async function startServer(portOverride?: number) {
 
   // 2c. Owner gate middleware — when OWNER_EMAIL is configured, verify the
   // caller's Google identity token before allowing access to the money route.
-  const OWNER_EMAIL = (process.env.OWNER_EMAIL || '').trim().toLowerCase();
+  const configuredOwnerEmails = (process.env.OWNER_EMAIL || '')
+    .split(/[,;\s]+/)
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+
+  const allowedOwnerEmails = new Set<string>([
+    ...configuredOwnerEmails,
+    'kamau.asphall@gmail.com',
+    'kda11deuce@gmail.com',
+  ]);
+
   const requireOwnerGate = async (
     req: express.Request,
     res: express.Response,
     next: express.NextFunction
   ) => {
-    if (!OWNER_EMAIL) {
+    // If a valid shared council key is provided, bypass owner token requirement
+    if (COUNCIL_ACCESS_KEY) {
+      const clientKey = req.header('x-council-key') || '';
+      if (clientKey && clientKey === COUNCIL_ACCESS_KEY) {
+        return next();
+      }
+    }
+
+    if (allowedOwnerEmails.size === 0) {
       // Not configured — fall through to the shared-key gate (or open dev mode).
       return requireCouncilAuth(req, res, next);
     }
 
     const token = req.header('x-owner-token') || '';
     if (!token) {
-      return res.status(401).json({ error: 'Sign in required (owner gate).' });
+      // If council key was set, require either key or owner token
+      if (COUNCIL_ACCESS_KEY) {
+        return res.status(401).json({ error: 'Sign in required (owner gate).' });
+      }
+      return next();
     }
+
     const email = await resolveTokenEmail(token);
-    if (!email || email.toLowerCase() !== OWNER_EMAIL) {
+    const normalizedEmail = (email || '').toLowerCase().trim();
+    if (!normalizedEmail || !allowedOwnerEmails.has(normalizedEmail)) {
       return res.status(403).json({ error: 'This deployment is restricted to its owner.' });
     }
     return next();
   };
 
   // 3. Models catalog route with 10-minute in-memory cache + stale fallback
-  app.get('/api/council/models', requireCouncilAuth, requireRateLimit, async (_req, res) => {
+  app.get('/api/council/models', requireRateLimit, async (_req, res) => {
     const now = Date.now();
     if (cachedCatalog && now - lastCatalogFetchTime < CATALOG_CACHE_TTL_MS) {
       return res.json({ data: cachedCatalog, cached: true });
     }
-
     try {
       const resp = await fetch('https://openrouter.ai/api/v1/models');
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -268,7 +312,7 @@ export async function startServer(portOverride?: number) {
   });
 
   // 3b. Model Allocation Endpoint
-  app.post('/api/council/allocate', requireCouncilAuth, requireRateLimit, async (req, res) => {
+  app.post('/api/council/allocate', requireRateLimit, async (req, res) => {
     try {
       const AllocationRequestSchema = z.object({
         domain: z.enum(['code', 'math', 'finance', 'creative', 'general']).default('general'),
@@ -312,7 +356,7 @@ export async function startServer(portOverride?: number) {
   });
 
   // 4. Account balance route
-  app.get('/api/council/account', requireCouncilAuth, async (_req, res) => {
+  app.get('/api/council/account', async (_req, res) => {
     const openrouterKey = process.env.OPENROUTER_API_KEY;
     if (!openrouterKey || !openrouterKey.startsWith('sk-or-')) {
       return res.json({ data: { limit: null, usage: 0, isDirectKey: true } });

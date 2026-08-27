@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { Session, CouncilRound, Persona } from '../types';
-import { summarizeTitle } from '../lib/titleUtils';
+import { summarizeTitle, isDefaultTitle } from '../lib/titleUtils';
 import {
   saveSessionsToDrive,
   loadSessionDriveDoc,
@@ -367,16 +367,12 @@ export function useSessionManager() {
       } else {
         nextRounds.push(updatedRound);
       }
-      const isDefaultTitle =
-        !s.title ||
-        s.title.trim() === '' ||
-        s.title === 'New Deliberation' ||
-        s.title === 'Untitled Session';
+      const queryToSummarize = nextRounds[0]?.userQuery || updatedRound.userQuery;
       return {
         ...s,
         rounds: nextRounds,
-        title: isDefaultTitle && nextRounds.length === 1
-          ? summarizeTitle(nextRounds[0]?.userQuery)
+        title: isDefaultTitle(s.title) && queryToSummarize
+          ? summarizeTitle(queryToSummarize)
           : s.title,
         updatedAt: Date.now(),
       };

@@ -20,6 +20,24 @@ export interface RefreshRecommendationsResult {
   fromCache: boolean;
 }
 
+export const FALLBACK_SEED_MODELS: RawOpenRouterModel[] = [
+  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', pricing: { prompt: '0.00000015', completion: '0.0000006' }, context_length: 1048576 },
+  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', pricing: { prompt: '0.00000125', completion: '0.000005' }, context_length: 1048576 },
+  { id: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', pricing: { prompt: '0.00000025', completion: '0.000001' }, context_length: 1048576 },
+  { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', pricing: { prompt: '0.000003', completion: '0.000015' }, context_length: 200000 },
+  { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', pricing: { prompt: '0.000003', completion: '0.000015' }, context_length: 200000 },
+  { id: 'openai/gpt-5.1', name: 'GPT-5.1', pricing: { prompt: '0.000005', completion: '0.000015' }, context_length: 128000 },
+  { id: 'openai/gpt-4o', name: 'GPT-4o', pricing: { prompt: '0.0000025', completion: '0.00001' }, context_length: 128000 },
+  { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', pricing: { prompt: '0.00000015', completion: '0.0000006' }, context_length: 128000 },
+  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', pricing: { prompt: '0.00000055', completion: '0.00000219' }, context_length: 64000 },
+  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat', pricing: { prompt: '0.00000014', completion: '0.00000028' }, context_length: 64000 },
+  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct', pricing: { prompt: '0.00000013', completion: '0.0000004' }, context_length: 131072 },
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra (Free)', pricing: { prompt: '0', completion: '0' }, context_length: 32768 },
+  { id: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (Free)', pricing: { prompt: '0', completion: '0' }, context_length: 32768 },
+  { id: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B (Free)', pricing: { prompt: '0', completion: '0' }, context_length: 32768 },
+  { id: 'qwen/qwen3-next-80b-a3b-instruct:free', name: 'Qwen 3 Next 80B (Free)', pricing: { prompt: '0', completion: '0' }, context_length: 32768 },
+];
+
 let activeAbortController: AbortController | null = null;
 let currentRefreshPromise: Promise<RefreshRecommendationsResult> | null = null;
 
@@ -139,25 +157,24 @@ export async function refreshModelRecommendations(
 
       console.warn('refreshModelRecommendations failed:', err.message || err);
 
-      // Never blank existing results on failure!
-      if (cachedModels && cachedModels.length > 0) {
-        updatePresetsFromFetchedModels(cachedModels);
-        const mapped = mapOpenRouterModels(cachedModels);
-        return {
-          models: cachedModels,
-          mapped,
-          metadata: {
-            updatedAt: cachedMeta.updatedAt,
-            lastSuccessfulRefresh: cachedMeta.lastSuccessfulRefresh,
-            cacheStatus: 'stale',
-            sourceStatus: 'error',
-            errorMessage: err.message || 'Unknown network error',
-          },
-          fromCache: true,
-        };
-      }
+      // Gracefully fall back to cached models or predefined seed models
+      const fallbackList: RawOpenRouterModel[] =
+        cachedModels && cachedModels.length > 0 ? cachedModels : FALLBACK_SEED_MODELS;
 
-      throw err;
+      updatePresetsFromFetchedModels(fallbackList);
+      const mapped = mapOpenRouterModels(fallbackList);
+      return {
+        models: fallbackList,
+        mapped,
+        metadata: {
+          updatedAt: cachedMeta.updatedAt || Date.now(),
+          lastSuccessfulRefresh: cachedMeta.lastSuccessfulRefresh,
+          cacheStatus: 'stale',
+          sourceStatus: 'error',
+          errorMessage: err.message || 'Unknown network error',
+        },
+        fromCache: true,
+      };
     } finally {
       currentRefreshPromise = null;
       activeAbortController = null;
