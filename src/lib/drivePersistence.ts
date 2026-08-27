@@ -131,7 +131,7 @@ function clearStoredAuth(fullSignOut: boolean = true): void {
 }
 
 export interface SignInOptions {
-  prompt?: 'select_account' | 'consent' | 'consent select_account' | '';
+  prompt?: 'select_account' | 'consent' | 'consent select_account' | '' | 'none';
 }
 
 function getClientId(): string {
@@ -169,13 +169,18 @@ function getGisClientAsync(): Promise<any> {
 
 /**
  * Signs in with Google via GIS token client and resolves with the access token.
- * Default prompt is the account picker — only for a user click. Overnight
- * recovery must pass prompt: '' so GIS does not open a popup.
+ * Default prompt is the account picker — only for a user click. Automatic
+ * recovery must pass prompt: 'none' so GIS errors instead of opening a popup
+ * ('' still pops up when the Google session has gone stale).
  */
 export async function signInWithGoogle(options: SignInOptions = { prompt: 'select_account' }): Promise<string> {
   const clientId = getClientId();
   const oauth2 = await getGisClientAsync();
-  const silent = options.prompt === '';
+  // '' is "silent if possible, popup if not" in GIS — 'none' is the truly
+  // silent mode: it errors instead of ever opening a popup. Automatic paths
+  // (restore on load, mid-session token refresh) must use 'none' so a stale
+  // Google session shows the amber banner, never a surprise popup.
+  const silent = options.prompt === '' || options.prompt === 'none';
 
   return new Promise<string>((resolve, reject) => {
     const timeout = setTimeout(
@@ -232,7 +237,8 @@ export async function signInWithGoogle(options: SignInOptions = { prompt: 'selec
         },
       });
 
-      // prompt: '' is silent (no picker). select_account is only for a click.
+      // 'none' is truly silent (errors instead of popping). select_account is
+    // only for a click.
       tokenClient.requestAccessToken({
         prompt: options.prompt !== undefined ? options.prompt : 'select_account',
       });
@@ -416,7 +422,7 @@ export async function trySilentDriveRestore(): Promise<boolean> {
   }
   if (!isDriveWanted()) return false;
   try {
-    await signInWithGoogle({ prompt: '' });
+    await signInWithGoogle({ prompt: 'none' });
     notifyDriveAuthRestored();
     return true;
   } catch {
@@ -547,7 +553,7 @@ async function withAuthRetry<T>(op: (token: string) => Promise<T>): Promise<T> {
     if (!(err instanceof AuthError)) throw err;
     clearStoredAuth(false);
     try {
-      await signInWithGoogle({ prompt: '' });
+      await signInWithGoogle({ prompt: 'none' });
       notifyDriveAuthRestored();
       return await op(requireToken());
     } catch {

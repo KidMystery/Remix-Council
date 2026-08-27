@@ -710,8 +710,21 @@ export async function startServer(portOverride?: number) {
     } catch (error: any) {
       clearTimeout(timeoutId);
       // Client disconnected or stream was cancelled — nothing left to respond to.
-      if (res.writableEnded || res.destroyed || res.headersSent) {
+      if (res.writableEnded || res.destroyed) {
         return;
+      }
+      // Mid-stream failure (upstream stalled/aborted after SSE started): END
+      // the stream with an error frame. Returning without ending it leaves the
+      // client's reader pending forever — a wedged Oracle on a one-liner.
+      if (res.headersSent) {
+        try {
+          res.write(
+            `data: ${JSON.stringify({ error: { message: `Upstream stream failed mid-response: ${error?.message || String(error)}` } })}\n\n`
+          );
+        } catch {
+          // socket already gone
+        }
+        return res.end();
       }
       if (error.name === 'AbortError') {
         return res.status(504).json({
