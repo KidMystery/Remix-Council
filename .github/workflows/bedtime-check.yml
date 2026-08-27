@@ -24,8 +24,14 @@ jobs:
               echo "Wrong DST window, skipping."; exit 0
             fi
           fi
+          DOM=$((10#$(TZ=America/New_York date +%d) % 2))
+          if [ "$DOM" -eq 0 ]; then
+            MSG="Shower night + bed. One tap to dismiss. (Council v1.1)"
+          else
+            MSG="Bedtime. Day's done - wind down. One tap to dismiss. (Council v1.1)"
+          fi
           curl -sS --fail-with-body \
             -H "Title: Council" -H "Tags: bed" -H "Priority: default" \
-            -d "Bedtime. Showered? Bed? One tap to dismiss - no reply needed. (Council bedtime check v1)" \
+            -d "$MSG" \
             "https://ntfy.sh/${NTFY_TOPIC}" > /dev/null
-          echo "Sent."
+          echo "Sent: $MSG"
