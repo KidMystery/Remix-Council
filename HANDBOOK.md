@@ -215,3 +215,23 @@ Still open (honest status):
 2. **Persistent (non-in-memory) rate limiting + cost ledger** — the rate limiter and the per-round cost ledger are in-memory (they reset on server restart). That's correct for personal use; it only matters if you go multi-user, at which point both want a small durable store.
 3. **Blind Pro Compare** — the old Phase-2 toggle was a no-op and has been removed. Its spirit (which output can you actually trust?) is now served by the opt-in **Confidence Ledger** built on your own tracked outcomes instead of benchmark tables. A separate independent adversarial critic is still a candidate — flag it if you want it.
 4. **Live production verification** — every server-side safety layer (liveness guard, vision routing, cost governor) is unit-tested, but this sandbox has no outbound HTTPS to OpenRouter, so none of it has seen a real catalog/completion yet. Deploy to Railway with the key set and watch the first live rounds.
+
+---
+
+## Handoff — Aug 27, 2026 (session: big exhibits on server jobs, stream watchdog, roster personalities)
+
+**Read this before changing anything.** Five commits landed this session; `main` was web-recreated during it (unrelated root history — your workflow commits), so the session branch was rebased on top via cherry-pick. Content of both is identical.
+
+**To make the fixes live:** `server.ts` + `src/` both changed. Redeploy Railway (server halves: server-job exhibit walking, mid-stream SSE error frames). Rebuild/re-export the client bundle (stall watchdog, no surprise sign-in popups, roster personalities, attachment refusal).
+
+**Invariants — break these and the app lies to its owner:**
+1. **Never silently truncate a user's file.** Refuse visibly (Oracle chat attachments: 50k cap, `chatAttachments.ts`) or walk it part-by-part (Nexus local Autonomous AND server jobs: ~20-page chunks, every part read; hard caps 16 files / 4M chars, `nexusExhibits.ts` + `agentLoop.ts`).
+2. **Every await must be able to fail visibly.** The Oracle wedge was a stalled SSE stream nobody ended: client now has a 120s stall watchdog (`openrouter.ts`) and the server ends mid-stream failures with an SSE `error` frame. Any new streaming path reuses this pattern — no reader without a timeout.
+3. **Automatic auth is silent** — Google Identity `prompt:'none'` (errors, never pops). Popups only from real clicks (`drivePersistence.ts`).
+4. **Server job exhibit bodies are redacted** in disk persistence and every API response (`redactAgentJob`). Bodies live in server memory only.
+
+**Ops facts:** bedtime workflow v1.1 on `main` (ntfy ping, NY 22:25–22:59 guard, `NTFY_TOPIC` secret verified by a successful dispatch run). GitHub disables cron workflows after 60 days of repo inactivity — any push keeps it alive. The ntfy topic is public-by-name (unguessable = the security model); the even/odd message alternation repeats at 31st→1st month boundaries. Env: `OPENROUTER_API_KEY` (server), `OWNER_EMAIL`/`COUNCIL_ACCESS_KEY` (gates), `AGENT_*` knobs in `server.ts`.
+
+**Known open items:** rate limiter + per-round cost ledger are in-memory (reset on restart — fine single-user); the old pre-recreation git history (with the 1MB test zip blob) only exists on the pre-merge session branch — purge only if you care about 1MB of dead history; `package-lock.json` intentionally untracked (sandbox `npm install` creates one — don't commit it).
+
+**Before every push:** `npx tsc --noEmit && npx vitest run` — 350 passing as of this commit.
