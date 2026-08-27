@@ -7,6 +7,12 @@
  *
  * Mechanics (all grounded in OpenRouter's documented server tool):
  *  - Planning:   one bounded pass that drafts a plan + research queries.
+ *                Exhibits contribute a manifest (names/sizes) — never bodies —
+ *                so the planning call stays bounded even for million-char trees.
+ *  - Reading:    when exhibits exceed the single-read context cap, every part
+ *                (~20-page chunks, same chunker as local Autonomous) is read
+ *                in its own pass and distilled into a bounded reading ledger.
+ *                Every part is read; none is silently sliced away.
  *  - Research:   per-query passes using the `openrouter:web_search` server
  *                tool — OpenRouter executes the search inside the request and
  *                the model returns synthesized findings + url_citations.
@@ -28,10 +34,12 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { chunkDocuments } from '../lib/documentChunker';
 
 export type AgentMode = 'nexus' | 'oracle' | 'chamber';
 export type AgentJobStatus =
   | 'planning'
+  | 'reading'
   | 'researching'
   | 'deliberating'
   | 'finalizing'
@@ -44,14 +52,33 @@ export type AgentJobStatus =
 export interface AgentJobSpec {
   goal: string;
   mode: AgentMode;
-  /** Optional extra context (Bible excerpts, attached files, prior consensus). */
+  /** Optional extra context (Bible excerpts, prior consensus). Capped small. */
   context?: string;
+  /**
+   * Attached exhibits, read in full. Up to MAX_EXHIBIT_TOTAL_CHARS: small
+   * sets ride inline in one read; larger sets are walked part-by-part in a
+   * reading phase (same ~20-page chunker as local Autonomous). Never sliced.
+   */
+  exhibits?: AgentExhibit[];
   model?: string;
   budget?: 'free' | 'cheap' | 'quality';
   maxResearchQueries?: number;
   maxDeliberationPasses?: number;
   maxJobCostUSD?: number;
   pacedMinutes?: number;
+}
+
+export interface AgentExhibit {
+  name: string;
+  content: string;
+}
+
+/** One part-read of a chunked exhibit, distilled into bounded notes. */
+export interface AgentReading {
+  label: string;
+  sourceName: string;
+  section: string;
+  notes: string;
 }
 
 export interface AgentSource {
@@ -81,6 +108,7 @@ export interface AgentJob {
   finishedAt?: number;
   plan: { summary: string; steps: string[]; researchQueries: string[] } | null;
   research: AgentResearchItem[];
+  readings: AgentReading[];
   passes: AgentPass[];
   verdict: string;
   brief?: string;
@@ -94,6 +122,16 @@ export interface AgentJob {
 const CALL_TIMEOUT_MS = 110_000;
 const MAX_GOAL_CHARS = 4000;
 const MAX_CONTEXT_CHARS = 50_000;
+/** Exhibits small enough to ride inline in one read (manifest + all bodies). */
+const EXHIBIT_INLINE_CHARS = 50_000;
+/** Hard honesty caps for attached exhibits — refused, never silently sliced. */
+const MAX_EXHIBIT_FILES = 16;
+const MAX_EXHIBIT_TOTAL_CHARS = 4_000_000;
+/** Mirrors the local Autonomous chunker safety cap. */
+const MAX_EXHIBIT_CHUNKS = 60;
+/** Reading-note budget: per-part cap and total ledger cap. */
+const READING_NOTE_CHARS = 2200;
+const READING_LEDGER_CHARS = 45_000;
 const MAX_RESEARCH_QUERIES = 6;
 const MAX_DELIBERATION_PASSES = 5;
 const DEFAULT_MAX_JOB_COST_USD = 2.0;
@@ -196,7 +234,9 @@ export class AgentLoopRunner {
     try {
       fs.mkdirSync(this.dataDir, { recursive: true });
       const file = path.join(this.dataDir, 'agent-jobs.json');
-      fs.writeFileSync(file, JSON.stringify(this.list().slice(0, MAX_JOBS_STORED)));
+      // Exhibit bodies live only in memory for the running job; disk keeps a
+      // redacted placeholder (jobs never resume mid-flight, so nothing is lost).
+      fs.writeFileSync(file, JSON.stringify(this.list().slice(0, MAX_JOBS_STORED).map(redactAgentJob)));
     } catch (err) {
       console.warn('[agent] Failed to persist jobs:', (err as any)?.message);
     }
@@ -213,8 +253,12 @@ export class AgentLoopRunner {
         if (job && typeof job.id === 'string') {
           // A job that was mid-flight when the process died gets an honest
           // terminal state; it can be re-launched but never pretends to be live.
-          const midFlight = ['planning', 'researching', 'deliberating', 'finalizing'].includes(job.status);
-          map.set(job.id, { ...job, ...(midFlight ? { status: 'interrupted', error: 'Server restarted mid-job; re-launch to resume.' } : {}) });
+          const midFlight = ['planning', 'reading', 'researching', 'deliberating', 'finalizing'].includes(job.status);
+          map.set(job.id, {
+            ...job,
+            readings: Array.isArray(job.readings) ? job.readings : [],
+            ...(midFlight ? { status: 'interrupted', error: 'Server restarted mid-job; re-launch to resume.' } : {}),
+          });
         }
       }
       return map;
@@ -345,7 +389,13 @@ export class AgentLoopRunner {
 
     // ---- 1. Planning ----
     this.setPhase(job, 'planning', spec.mode === 'nexus' ? 'Inventorying exhibits and drafting a plan...' : 'Assessing the question and drafting a plan...');
-    const baseCtx = spec.context ? `\n\n[Provided context]\n${spec.context.slice(0, MAX_CONTEXT_CHARS)}` : '';
+    const exhibits = Array.isArray(spec.exhibits) ? spec.exhibits.filter((e) => (e.content || '').trim().length > 0) : [];
+    const exhibitChars = exhibits.reduce((n, e) => n + e.content.length, 0);
+    const manifest = renderExhibitManifest(exhibits);
+    // Planning sees the manifest (names/sizes) — never the bodies — so the
+    // planning call stays bounded even for a million-char tree.
+    const carriedCtx = spec.context ? `\n\n[Provided context]\n${spec.context.slice(0, MAX_CONTEXT_CHARS)}` : '';
+    const planCtx = exhibits.length > 0 ? `${carriedCtx}\n\n${manifest}` : carriedCtx;
     let plan: AgentJob['plan'] = { summary: spec.goal.slice(0, 200), steps: [], researchQueries: [] };
     try {
       const planRes = await this.complete(
@@ -357,7 +407,7 @@ export class AgentLoopRunner {
           },
           {
             role: 'user',
-            content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}\n\nDraft a concise execution plan. Respond ONLY with a fenced JSON block:\n\`\`\`json\n{"summary": "...", "steps": ["..."], "research_queries": ["...", "..."]}\n\`\`\`\nAt most ${maxQueries} research queries, each a precise search phrase. If exhibits are attached, inventory them first and use an empty array unless a fact is missing from the files. If no live research is needed, use an empty array.`,
+            content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${planCtx}\n\nDraft a concise execution plan. Respond ONLY with a fenced JSON block:\n\`\`\`json\n{"summary": "...", "steps": ["..."], "research_queries": ["...", "..."]}\n\`\`\`\nAt most ${maxQueries} research queries, each a precise search phrase. If exhibits are attached, inventory them first and use an empty array unless a fact is missing from the files. If no live research is needed, use an empty array.`,
           },
         ],
         { maxTokens: 900 }
@@ -383,6 +433,80 @@ export class AgentLoopRunner {
       console.warn('[agent] Planning failed, continuing with default plan:', err?.message);
       this.setPhase(job, 'researching', 'Planning was unavailable; proceeding straight to research.');
     }
+
+    // ---- 1b. Exhibit reading walk ----
+    // Small sets ride inline in a single read. Anything bigger is walked
+    // part-by-part — the same ~20-page chunker as local Autonomous — and
+    // distilled into a bounded ledger. Every part is read; none is dropped.
+    let evidenceBlock = '';
+    if (exhibits.length > 0) {
+      if (exhibitChars <= EXHIBIT_INLINE_CHARS) {
+        evidenceBlock =
+          `\n\n[Attached exhibits]\n${manifest}\n\n` +
+          exhibits.map((e) => `--- File: ${e.name} ---\n${e.content}`).join('\n\n');
+      } else {
+        const docPlan = chunkDocuments(
+          exhibits.map((e) => ({ name: e.name, content: e.content })),
+          { pagesPerChunk: 20, maxChunks: MAX_EXHIBIT_CHUNKS }
+        );
+        const chunks = docPlan.chunks;
+        const noteCap = Math.max(
+          600,
+          Math.min(READING_NOTE_CHARS, Math.floor(READING_LEDGER_CHARS / Math.max(1, chunks.length)))
+        );
+        for (let i = 0; i < chunks.length; i++) {
+          const c = chunks[i];
+          if (this.cancelled.has(job.id)) return this.finishBudgetOrCancel(job);
+          this.setPhase(job, 'reading', `Reading exhibit part ${i + 1}/${chunks.length} · ${c.sourceName} section ${c.index + 1}/${c.total} (~${c.estimatedPages} pages)...`);
+          try {
+            const res = await this.complete(
+              job,
+              [
+                {
+                  role: 'system',
+                  content: `${SYSTEM_PROMPTS[spec.mode]}\nYou are in the READING phase. Do not answer the directive yet. Read this one part and report the facts: concrete numbers, definitions, entities, risks, dependencies, and open questions. Quote short key passages verbatim. Never invent a file or fact that is not in this part.`,
+                },
+                {
+                  role: 'user',
+                  content: `Directive (context only — do not answer it yet): ${spec.goal.slice(0, MAX_GOAL_CHARS)}\n\n[Exhibit part ${i + 1} of ${chunks.length} — ${c.sourceName}, section ${c.index + 1}/${c.total}, ~${c.estimatedPages} pages]\n${c.content}\n\nReport the facts from this part only. Other parts follow in later passes.`,
+                },
+              ],
+              { maxTokens: 1600 }
+            );
+            this.spend(job, res.usageUSD);
+            if (this.overBudget(job)) return this.finishBudgetOrCancel(job);
+            job.readings.push({
+              label: `Part ${i + 1}/${chunks.length}`,
+              sourceName: c.sourceName,
+              section: `${c.index + 1}/${c.total}`,
+              notes: stripFencedJson(res.content).slice(0, noteCap),
+            });
+            this.persist();
+          } catch (err: any) {
+            job.readings.push({
+              label: `Part ${i + 1}/${chunks.length}`,
+              sourceName: c.sourceName,
+              section: `${c.index + 1}/${c.total}`,
+              notes: `[Reading failed: ${err?.message}]`,
+            });
+            this.persist();
+          }
+        }
+        if (job.readings.length > 0 && job.readings.every((r) => r.notes.startsWith('[Reading failed'))) {
+          job.status = 'failed';
+          job.error = 'Exhibits were attached but every part failed to read upstream. No verdict was stamped.';
+          job.updatedAt = Date.now();
+          job.finishedAt = Date.now();
+          job.progress = { phase: 'failed', detail: job.error };
+          this.persist();
+          return { job, succeeded: false };
+        }
+        evidenceBlock =
+          `\n\n[Exhibit reading ledger — every part was read in its own pass before deliberation]\n${manifest}\n\n` +
+          job.readings.map((r) => `### ${r.label} · ${r.sourceName} (section ${r.section})\n${r.notes}`).join('\n\n');
+      }
+    }
+    const baseCtx = carriedCtx + evidenceBlock;
 
     // ---- 2. Research ----
     const queries = free || maxQueries === 0 ? [] : plan.researchQueries.slice(0, maxQueries);
@@ -576,6 +700,36 @@ function dedupeSources(sources: AgentSource[]): AgentSource[] {
   return out.slice(0, 30);
 }
 
+/** Cover sheet for attached exhibits: names + sizes, never bodies. */
+function renderExhibitManifest(exhibits: AgentExhibit[]): string {
+  if (exhibits.length === 0) return '';
+  const lines = [`EXHIBITS (${exhibits.length} artifact${exhibits.length === 1 ? '' : 's'} attached — read them, do not guess at them)`];
+  exhibits.forEach((e, i) => {
+    const pages = Math.max(1, Math.round(e.content.length / 3000));
+    lines.push(`- ${String.fromCharCode(65 + (i % 26))}. ${e.name} · ${e.content.length.toLocaleString()} chars (~${pages} pages)`);
+  });
+  return lines.join('\n');
+}
+
+/**
+ * Copy of a job with exhibit bodies replaced by size placeholders. Used for
+ * disk persistence and API responses so million-char trees are never echoed
+ * back on every 4-second poll; the full bodies stay in server memory only.
+ */
+export function redactAgentJob(job: AgentJob): AgentJob {
+  if (!job.spec.exhibits || job.spec.exhibits.length === 0) return job;
+  return {
+    ...job,
+    spec: {
+      ...job.spec,
+      exhibits: job.spec.exhibits.map((e) => ({
+        name: e.name,
+        content: `[attached to this job — ${e.content.length.toLocaleString()} chars, read server-side]`,
+      })),
+    },
+  };
+}
+
 function extractConfidence(finalText: string): string | undefined {
   const match = finalText.match(/## Confidence\s*\n([\s\S]*?)(?=\n## |$)/);
   if (match) return match[1].trim().slice(0, 500);
@@ -586,6 +740,32 @@ export function newAgentJobId(): string {
   return `agent_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
 }
 
+/**
+ * Exhibits are refused above the honesty caps (files / total chars) — never
+ * silently sliced. Empty bodies are dropped; an all-empty docket is refused.
+ */
+function sanitizeExhibits(raw: any): { exhibits?: AgentExhibit[] } | { error: string } {
+  if (raw === undefined || raw === null) return {};
+  if (!Array.isArray(raw)) return { error: 'Exhibits must be an array of { name, content } files.' };
+  const cleaned: AgentExhibit[] = (raw as any[])
+    .filter((e) => e && typeof e === 'object' && typeof e.name === 'string' && typeof e.content === 'string')
+    .map((e) => ({ name: (e.name.trim() || 'exhibit').slice(0, 200), content: e.content }))
+    .filter((e) => e.content.trim().length > 0);
+  if (raw.length > 0 && cleaned.length === 0) {
+    return { error: 'Exhibits were attached but every body is empty (blob missing). Re-attach the files.' };
+  }
+  if (cleaned.length > MAX_EXHIBIT_FILES) {
+    return { error: `Too many exhibit files (${cleaned.length}) — the server cap is ${MAX_EXHIBIT_FILES}.` };
+  }
+  const total = cleaned.reduce((n, e) => n + e.content.length, 0);
+  if (total > MAX_EXHIBIT_TOTAL_CHARS) {
+    return {
+      error: `Exhibits are ${total.toLocaleString()} chars — over the server cap of ${MAX_EXHIBIT_TOTAL_CHARS.toLocaleString()}. Trim the tree or run Autonomous locally.`,
+    };
+  }
+  return cleaned.length > 0 ? { exhibits: cleaned } : {};
+}
+
 export function sanitizeAgentSpec(raw: any): AgentJobSpec | { error: string } {
   if (!raw || typeof raw !== 'object') return { error: 'Invalid agent job spec.' };
   const goal = typeof raw.goal === 'string' ? raw.goal.trim() : '';
@@ -593,11 +773,14 @@ export function sanitizeAgentSpec(raw: any): AgentJobSpec | { error: string } {
   if (goal.length > MAX_GOAL_CHARS) return { error: `Goal exceeds ${MAX_GOAL_CHARS} characters.` };
   const mode: AgentMode = raw.mode === 'nexus' || raw.mode === 'oracle' ? raw.mode : 'chamber';
   const context = typeof raw.context === 'string' ? raw.context.slice(0, MAX_CONTEXT_CHARS) : undefined;
+  const exhibits = sanitizeExhibits(raw.exhibits);
+  if ('error' in exhibits) return { error: exhibits.error };
   const budget = raw.budget === 'free' || raw.budget === 'quality' ? raw.budget : 'cheap';
   const spec: AgentJobSpec = {
     goal,
     mode,
     context,
+    ...(exhibits.exhibits ? { exhibits: exhibits.exhibits } : {}),
     budget,
     maxResearchQueries: clampInt(raw.maxResearchQueries, 4, 0, MAX_RESEARCH_QUERIES),
     maxDeliberationPasses: clampInt(raw.maxDeliberationPasses, 3, 1, MAX_DELIBERATION_PASSES),

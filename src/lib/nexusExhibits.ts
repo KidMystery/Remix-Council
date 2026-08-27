@@ -2,14 +2,23 @@
  * Nexus works exhibits overnight. Not a chat.
  *
  * Debug: buildOvernightPlan({…}).messages in the terminal, or
- * packExhibitsForServer(files) before a server launch. A refused pack
- * is honest — we do not slice a tree to 15k and pretend it was read.
+ * packExhibitsForServerJob(files) before a server launch. A refused pack is
+ * honest — we never slice a tree to fit a single call. Big exhibits are
+ * walked part-by-part (local Autonomous on this device, or the server's
+ * reading phase for server jobs) so every part is still read.
  */
 
 import { chunkDocuments, type DocumentChunkPlan } from './documentChunker';
 
-/** Matches server `MAX_CONTEXT_CHARS`. Refuse rather than let the server slice. */
-export const MAX_SERVER_EXHIBIT_CHARS = 50_000;
+/**
+ * Mirrors the server's hard honesty caps (see MAX_EXHIBIT_* in
+ * src/server/agentLoop.ts). Above these a server launch is refused outright —
+ * never silently sliced. Run Autonomous locally instead.
+ */
+export const MAX_SERVER_EXHIBIT_TOTAL_CHARS = 4_000_000;
+export const MAX_SERVER_EXHIBIT_FILES = 16;
+/** Under this total the server reads exhibits inline in a single pass. */
+export const SERVER_EXHIBIT_INLINE_CHARS = 50_000;
 
 export type ExhibitKind = 'code' | 'csv' | 'pdf' | 'archive' | 'text';
 
@@ -83,26 +92,48 @@ export function renderExhibitManifest(files: ExhibitSource[]): string {
 }
 
 /**
- * Pack exhibits for a server job. Refuse rather than slice.
- * Local Autonomous still walks every chunk on this device.
+ * Pack exhibits for a server job. Up to the hard caps above, the full
+ * docket ships — the server walks oversized sets part-by-part in its reading
+ * phase (every part read, none sliced). Refusal is reserved for the caps.
  */
-export function packExhibitsForServer(files: ExhibitSource[]):
-  | { ok: true; context: string; chars: number }
+export function packExhibitsForServerJob(files: ExhibitSource[]):
+  | {
+      ok: true;
+      exhibits: ExhibitSource[];
+      manifest: string;
+      chars: number;
+      chunkCount: number;
+      wasChunked: boolean;
+    }
   | { ok: false; error: string; chars: number } {
   const live = liveExhibits(files);
   const chars = live.reduce((n, f) => n + f.content.length, 0);
   if (live.length === 0) {
-    return { ok: false, error: 'Nexus server jobs need exhibits. Attach the artifacts, or run a follow-up of a finished mission.', chars: 0 };
-  }
-  if (chars > MAX_SERVER_EXHIBIT_CHARS) {
     return {
       ok: false,
-      error: `Exhibits are ${chars.toLocaleString()} chars — too large for a server job (cap ${MAX_SERVER_EXHIBIT_CHARS.toLocaleString()}). Run Autonomous on this device so every part is read.`,
+      error: 'Nexus server jobs need exhibits. Attach the artifacts, or run a follow-up of a finished mission.',
+      chars: 0,
+    };
+  }
+  if (live.length > MAX_SERVER_EXHIBIT_FILES) {
+    return {
+      ok: false,
+      error: `Too many exhibit files (${live.length}) — the server cap is ${MAX_SERVER_EXHIBIT_FILES}.`,
       chars,
     };
   }
-  const body = live.map((f) => `--- File: ${f.name} ---\n${f.content}`).join('\n\n');
-  return { ok: true, context: `${renderExhibitManifest(live)}\n\n${body}`, chars };
+  if (chars > MAX_SERVER_EXHIBIT_TOTAL_CHARS) {
+    return {
+      ok: false,
+      error: `Exhibits are ${chars.toLocaleString()} chars — over the server cap of ${MAX_SERVER_EXHIBIT_TOTAL_CHARS.toLocaleString()}. Trim the tree or run Autonomous on this device.`,
+      chars,
+    };
+  }
+  const wasChunked = chars > SERVER_EXHIBIT_INLINE_CHARS;
+  const chunkCount = wasChunked
+    ? chunkDocuments(live.map((f) => ({ name: f.name, content: f.content })), { pagesPerChunk: 20 }).chunks.length
+    : 1;
+  return { ok: true, exhibits: live, manifest: renderExhibitManifest(live), chars, chunkCount, wasChunked };
 }
 
 const ROTATION_THEMES = [

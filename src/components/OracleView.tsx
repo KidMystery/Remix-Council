@@ -29,6 +29,7 @@ import {
   Pencil,
   Eraser,
   AlertCircle,
+  AlertTriangle,
   RotateCcw,
 } from 'lucide-react';
 import {
@@ -80,6 +81,7 @@ import { modelHasVision } from '../lib/modelScoring';
 import { streamOpenRouterCompletion } from '../lib/openrouter';
 import { streamWithTokenGovernor } from '../lib/tokenGovernor';
 import { pickVoice } from '../lib/oracleVoices';
+import { MAX_CHAT_ATTACHMENT_CHARS, screenChatAttachments } from '../lib/chatAttachments';
 import { summarizeTitle, isDefaultTitle, DEFAULT_ORACLE_TITLE } from '../lib/titleUtils';
 import { useSpeech } from '../hooks/useSpeech';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
@@ -1797,6 +1799,7 @@ function OracleComposer({
   const [text, setText] = useState('');
   const [images, setImages] = useState<OracleImage[]>([]);
   const [files, setFiles] = useState<OracleTextFile[]>([]);
+  const [attachWarning, setAttachWarning] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1844,17 +1847,26 @@ function OracleComposer({
 
   const handleFiles = async (list: FileList | null) => {
     if (!list) return;
-    const out: OracleTextFile[] = [];
+    const read: OracleTextFile[] = [];
     for (const file of Array.from(list)) {
       if (file.type.startsWith('image/')) continue;
       try {
         const content = await file.text();
-        out.push({ name: file.name, content: content.slice(0, 50000) });
+        read.push({ name: file.name, content });
       } catch (err) {
         console.warn('[Oracle] Could not read file', file.name, err);
       }
     }
-    setFiles((prev) => [...prev, ...out]);
+    // Chat attachments ride inline in one message — refuse oversize files
+    // visibly instead of silently slicing them to fit.
+    const { accepted, rejected } = screenChatAttachments(read);
+    if (accepted.length > 0) setFiles((prev) => [...prev, ...accepted]);
+    if (rejected.length > 0) {
+      setAttachWarning(
+        `${rejected.map((r) => `${r.name} (${r.chars.toLocaleString()} chars)`).join(', ')} — too large for a chat attachment (cap ${MAX_CHAT_ATTACHMENT_CHARS.toLocaleString()}). Nothing was sliced. Attach it in Nexus Lab instead: big exhibits are read part-by-part, every page.`
+      );
+      window.setTimeout(() => setAttachWarning(null), 12_000);
+    }
   };
 
   const submit = () => {
@@ -1902,6 +1914,21 @@ function OracleComposer({
               </button>
             </span>
           ))}
+        </div>
+      )}
+
+      {attachWarning && (
+        <div className="flex items-start gap-1.5 text-[10px] text-amber-300 bg-amber-950/40 border border-amber-800/60 px-2 py-1.5 rounded">
+          <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+          <span className="leading-relaxed">{attachWarning}</span>
+          <button
+            type="button"
+            onClick={() => setAttachWarning(null)}
+            className="text-amber-500 hover:text-amber-300 cursor-pointer ml-auto mt-0.5"
+            aria-label="Dismiss attachment warning"
+          >
+            <X size={11} />
+          </button>
         </div>
       )}
 

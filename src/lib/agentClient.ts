@@ -11,6 +11,8 @@ export interface AgentLaunchSpec {
   goal: string;
   mode: 'nexus' | 'oracle' | 'chamber';
   context?: string;
+  /** Attached exhibits — the server reads every part; never silently sliced. */
+  exhibits?: { name: string; content: string }[];
   model?: string;
   budget?: 'free' | 'cheap' | 'quality';
   maxResearchQueries?: number;
@@ -30,6 +32,7 @@ export interface AgentJobStatus {
   mode: string;
   status:
     | 'planning'
+    | 'reading'
     | 'researching'
     | 'deliberating'
     | 'finalizing'
@@ -51,6 +54,7 @@ export interface AgentJobFull extends AgentJobStatus {
   spec?: { goal: string; model?: string; budget?: string };
   plan: { summary: string; steps: string[]; researchQueries: string[] } | null;
   research: { query: string; findings: string; sources: AgentSource[] }[];
+  readings?: { label: string; sourceName: string; section: string; notes: string }[];
   passes: { index: number; label: string; consensus: string; agreementScore?: number }[];
   verdict: string;
   brief?: string;

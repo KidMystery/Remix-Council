@@ -3,8 +3,9 @@ import {
   buildOvernightPlan,
   canLaunchNexus,
   classifyExhibit,
-  MAX_SERVER_EXHIBIT_CHARS,
-  packExhibitsForServer,
+  packExhibitsForServerJob,
+  MAX_SERVER_EXHIBIT_TOTAL_CHARS,
+  MAX_SERVER_EXHIBIT_FILES,
 } from '../nexusExhibits';
 
 describe('canLaunchNexus', () => {
@@ -29,25 +30,49 @@ describe('canLaunchNexus', () => {
   });
 });
 
-describe('packExhibitsForServer', () => {
-  it('refuses rather than slice a huge tree', () => {
-    const huge = 'x'.repeat(MAX_SERVER_EXHIBIT_CHARS + 1);
-    const packed = packExhibitsForServer([{ name: 'repo.zip', content: huge }]);
-    expect(packed.ok).toBe(false);
-    if (!packed.ok) expect(packed.error).toMatch(/too large for a server job/i);
+describe('packExhibitsForServerJob', () => {
+  it('ships a full 768k-char tree — the server walks it part-by-part', () => {
+    // Regression: this size used to be refused client-side (old 50k cap).
+    const tree = 'Paragraph.\n\n'.repeat(96_000); // 768,000 chars
+    const packed = packExhibitsForServerJob([{ name: 'repo.zip', content: tree }]);
+    expect(packed.ok).toBe(true);
+    if (packed.ok) {
+      expect(packed.wasChunked).toBe(true);
+      expect(packed.chunkCount).toBeGreaterThan(1);
+      expect(packed.exhibits[0].content.length).toBe(tree.length); // full body, never sliced
+      expect(packed.manifest).toContain('repo.zip');
+    }
   });
 
-  it('packs a CSV + statement in full', () => {
-    const packed = packExhibitsForServer([
+  it('packs a small CSV + statement for a single inline read', () => {
+    const packed = packExhibitsForServerJob([
       { name: 'spend.csv', content: 'date,amt\n2026-01-01,40' },
       { name: 'statement.txt', content: 'Opening balance 1200' },
     ]);
     expect(packed.ok).toBe(true);
     if (packed.ok) {
-      expect(packed.context).toContain('spend.csv');
-      expect(packed.context).toContain('Opening balance 1200');
-      expect(packed.context).toContain('EXHIBITS');
+      expect(packed.wasChunked).toBe(false);
+      expect(packed.chunkCount).toBe(1);
+      expect(packed.exhibits).toHaveLength(2);
+      expect(packed.manifest).toContain('EXHIBITS');
     }
+  });
+
+  it('refuses above the hard server caps instead of slicing', () => {
+    const huge = packExhibitsForServerJob([{ name: 'repo.zip', content: 'x'.repeat(MAX_SERVER_EXHIBIT_TOTAL_CHARS + 1) }]);
+    expect(huge.ok).toBe(false);
+    if (!huge.ok) expect(huge.error).toMatch(/over the server cap/i);
+
+    const many = Array.from({ length: MAX_SERVER_EXHIBIT_FILES + 1 }, (_, i) => ({ name: `f${i}.txt`, content: 'body' }));
+    const tooMany = packExhibitsForServerJob(many);
+    expect(tooMany.ok).toBe(false);
+    if (!tooMany.ok) expect(tooMany.error).toMatch(/too many exhibit files/i);
+  });
+
+  it('refuses an empty docket', () => {
+    const packed = packExhibitsForServerJob([]);
+    expect(packed.ok).toBe(false);
+    if (!packed.ok) expect(packed.error).toMatch(/need exhibits/i);
   });
 });
 

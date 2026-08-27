@@ -215,6 +215,26 @@ export async function streamOpenRouterCompletion(
 
   let grounding: GroundingData | undefined;
 
+  // Combined abort: the caller's signal (user Stop) OR our stall watchdog.
+  // A stalled upstream must surface as a visible error, never a silent hang —
+  // the reader loop below has no other way to unblock.
+  const combined = new AbortController();
+  const onOuterAbort = () => combined.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) combined.abort(signal.reason);
+    else signal.addEventListener('abort', onOuterAbort);
+  }
+  const STALL_MS = 120_000; // server aborts upstream at 110s; this is the backstop
+  let stalled = false;
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
+  const armStallTimer = () => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      stalled = true;
+      combined.abort(new DOMException('Stream stalled', 'AbortError'));
+    }, STALL_MS);
+  };
+
   try {
     const response = await fetch('/api/council', {
       method: 'POST',
@@ -223,7 +243,7 @@ export async function streamOpenRouterCompletion(
         ...getAuthHeaders(),
       },
       body: JSON.stringify(body),
-      signal,
+      signal: combined.signal,
     });
 
     if (!response.ok) {
@@ -250,22 +270,30 @@ export async function streamOpenRouterCompletion(
     let usage: StreamCompletionResult['usage'];
     let routedModel: string | undefined;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    let streamError: string | undefined;
+    try {
+      while (true) {
+        armStallTimer();
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
-        if (trimmed === 'data: [DONE]') break;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+          if (trimmed === 'data: [DONE]') break;
 
-        try {
-          const json = JSON.parse(trimmed.replace(/^data:\s*/, ''));
-          const choice = json.choices?.[0];
+          try {
+            const json = JSON.parse(trimmed.replace(/^data:\s*/, ''));
+            // The server reports mid-stream upstream failures as an error
+            // frame — record it instead of treating the stream as complete.
+            if (json.error?.message) {
+              streamError = String(json.error.message);
+            }
+            const choice = json.choices?.[0];
           const delta = choice?.delta?.content || '';
           if (delta) {
             accumulated += delta;
@@ -292,7 +320,21 @@ export async function streamOpenRouterCompletion(
         } catch {
           // Safe ignore of partial SSE frames
         }
+          if (streamError) break;
+        }
+        if (streamError) break;
       }
+    } finally {
+      if (stallTimer) clearTimeout(stallTimer);
+      try {
+        reader.cancel();
+      } catch {
+        // already closed
+      }
+    }
+
+    if (streamError) {
+      throw new Error(streamError);
     }
 
     return {
@@ -303,8 +345,17 @@ export async function streamOpenRouterCompletion(
       finishReason,
     };
   } catch (error: any) {
-    if (error?.name === 'AbortError') throw error;
+    // A watchdog abort (no bytes for STALL_MS) must surface as a visible
+    // error — not an AbortError, which callers treat as a user stop.
+    if (stalled) {
+      throw new Error(
+        `No data from the model for ${Math.round(STALL_MS / 1000)}s — the stream stalled. Try again or switch models.`
+      );
+    }
     throw error;
+  } finally {
+    if (stallTimer) clearTimeout(stallTimer);
+    if (signal) signal.removeEventListener('abort', onOuterAbort);
   }
 }
 

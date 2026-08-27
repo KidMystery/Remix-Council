@@ -11,6 +11,7 @@ import {
   AgentLoopRunner,
   sanitizeAgentSpec,
   newAgentJobId,
+  redactAgentJob,
   DEFAULT_MAX_JOB_COST_USD,
   type AgentJob,
 } from './src/server/agentLoop';
@@ -709,8 +710,21 @@ export async function startServer(portOverride?: number) {
     } catch (error: any) {
       clearTimeout(timeoutId);
       // Client disconnected or stream was cancelled — nothing left to respond to.
-      if (res.writableEnded || res.destroyed || res.headersSent) {
+      if (res.writableEnded || res.destroyed) {
         return;
+      }
+      // Mid-stream failure (upstream stalled/aborted after SSE started): END
+      // the stream with an error frame. Returning without ending it leaves the
+      // client's reader pending forever — a wedged Oracle on a one-liner.
+      if (res.headersSent) {
+        try {
+          res.write(
+            `data: ${JSON.stringify({ error: { message: `Upstream stream failed mid-response: ${error?.message || String(error)}` } })}\n\n`
+          );
+        } catch {
+          // socket already gone
+        }
+        return res.end();
       }
       if (error.name === 'AbortError') {
         return res.status(504).json({
@@ -757,6 +771,7 @@ export async function startServer(portOverride?: number) {
     finishedAt: job.finishedAt,
     usageUSD: Number(job.usageUSD.toFixed(6)),
     citations: job.citations.length,
+    readings: job.readings.length,
     error: job.error,
   });
 
@@ -773,6 +788,7 @@ export async function startServer(portOverride?: number) {
       updatedAt: Date.now(),
       plan: null,
       research: [],
+      readings: [],
       passes: [],
       verdict: '',
       citations: [],
@@ -792,7 +808,8 @@ export async function startServer(portOverride?: number) {
   app.get('/api/agent/jobs/:id', requireOwnerGate, requireRateLimit, (req, res) => {
     const job = agentRunner.get(String(req.params.id || ''));
     if (!job) return res.status(404).json({ error: 'Agent job not found.' });
-    return res.json({ data: job });
+    // Exhibit bodies are never echoed back on polls — they live server-side.
+    return res.json({ data: redactAgentJob(job) });
   });
 
   app.post('/api/agent/jobs/:id/cancel', requireOwnerGate, requireRateLimit, (req, res) => {
