@@ -50,6 +50,7 @@ import {
   listNexusMissions,
   mergeNexusDocs,
   NEXUS_SERVER_DEFAULT,
+  applyServerJobSummaryToMission,
   openNexusMission,
   parkActiveMission,
   renameNexusMission,
@@ -837,6 +838,47 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverJobId]);
+
+  // One-shot sweep: archived missions whose server job finished while the app
+  // was closed still say 'running' in the list. Fold each finished job's
+  // outcome (status / brief / cost) into the archive so the mission list tells
+  // the truth. Full round hydration still happens when the mission is opened.
+  const sweptServerJobsRef = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    const stale = archive.filter(
+      (m) => m.serverJobId && m.status === 'running' && !sweptServerJobsRef.current.has(m.serverJobId)
+    );
+    if (stale.length === 0) return;
+    for (const m of stale) sweptServerJobsRef.current.add(m.serverJobId as string);
+    let cancelled = false;
+    void (async () => {
+      const results = await Promise.all(
+        stale.map(async (m) => {
+          try {
+            return { m, job: await getAgentJob(m.serverJobId as string) };
+          } catch {
+            return { m, job: null };
+          }
+        })
+      );
+      if (cancelled) return;
+      const folded = new Map<
+        string,
+        ReturnType<typeof applyServerJobSummaryToMission>
+      >();
+      for (const { m, job } of results) {
+        if (job && isAgentJobTerminal(job.status)) {
+          const next = applyServerJobSummaryToMission(m, job);
+          if (next !== m) folded.set(m.id, next);
+        }
+      }
+      if (folded.size > 0) commitList(archive.map((m) => folded.get(m.id) || m));
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archive]);
 
   const addLog = (msg: string) => {
     setTerminalLogs((prev) => [...prev.slice(-30), `[${new Date().toLocaleTimeString()}] ${msg}`]);

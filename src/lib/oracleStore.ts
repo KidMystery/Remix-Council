@@ -358,3 +358,23 @@ export function importOracleThreads(jsonString: string): {
     extras,
   };
 }
+
+/**
+ * Error-message hygiene (Aug 2026 storm follow-up): error bubbles are live
+ * diagnostics, not permanent furniture. The moment a thread has a successful
+ * assistant message AFTER an error, that error is resolved litter — prune it
+ * on commit. Errors after the LAST success (the currently-broken tail) stay:
+ * they are what the user still needs to see and retry.
+ */
+export function pruneStaleOracleErrors(messages: OracleMessage[]): OracleMessage[] {
+  const list = Array.isArray(messages) ? messages : [];
+  let lastSuccessIdx = -1;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i]?.role === 'assistant' && !list[i]?.error) {
+      lastSuccessIdx = i;
+      break;
+    }
+  }
+  if (lastSuccessIdx === -1) return list; // never succeeded — keep diagnostics
+  return list.filter((m, i) => !m?.error || i > lastSuccessIdx);
+}

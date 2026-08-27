@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Orbit, PanelLeftClose, Plus, Search, X, Clock, Trash2, Pencil, ArrowRight } from 'lucide-react';
-import type { PersistedMission } from '../lib/nexusMission';
+import { missionSummary, type PersistedMission } from '../lib/nexusMission';
 import { ConfirmButton } from './ConfirmButton';
 
 interface NexusSidebarProps {
@@ -211,6 +211,14 @@ export const NexusSidebar: React.FC<NexusSidebarProps> = ({
                             <span className="truncate">follow-up of {missionLabel(parent)}</span>
                           </div>
                         )}
+                        {(() => {
+                          const summary = missionSummary(m);
+                          return summary ? (
+                            <div className="text-[10px] leading-snug text-slate-500 line-clamp-2 break-words" title={summary}>
+                              {summary}
+                            </div>
+                          ) : null;
+                        })()}
                         <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono flex-wrap">
                           <span className="flex items-center gap-1">
                             <Clock size={10} aria-hidden="true" />

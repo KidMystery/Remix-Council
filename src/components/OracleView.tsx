@@ -52,6 +52,7 @@ import {
   DEFAULT_MINI_DELIBERATION_MODELS,
   DEFAULT_ROTATION_ROSTER,
   ORACLE_THREADS_UPDATED_EVENT,
+  pruneStaleOracleErrors,
 } from '../lib/oracleStore';
 import {
   buildOracleModelOptions,
@@ -912,7 +913,9 @@ export const OracleView: React.FC<OracleViewProps> = ({
 
       latest = {
         ...latest,
-        messages: [...latest.messages, assistantMsg],
+        // A successful turn resolves every error before it — prune the storm
+        // litter instead of leaving dead [Error: …] bubbles hanging in the chat.
+        messages: pruneStaleOracleErrors([...latest.messages, assistantMsg]),
         turnCount: (latest.turnCount || 0) + 1,
         updatedAt: Date.now(),
       };
