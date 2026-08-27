@@ -11,6 +11,7 @@ import {
   AgentLoopRunner,
   sanitizeAgentSpec,
   newAgentJobId,
+  redactAgentJob,
   DEFAULT_MAX_JOB_COST_USD,
   type AgentJob,
 } from './src/server/agentLoop';
@@ -757,6 +758,7 @@ export async function startServer(portOverride?: number) {
     finishedAt: job.finishedAt,
     usageUSD: Number(job.usageUSD.toFixed(6)),
     citations: job.citations.length,
+    readings: job.readings.length,
     error: job.error,
   });
 
@@ -773,6 +775,7 @@ export async function startServer(portOverride?: number) {
       updatedAt: Date.now(),
       plan: null,
       research: [],
+      readings: [],
       passes: [],
       verdict: '',
       citations: [],
@@ -792,7 +795,8 @@ export async function startServer(portOverride?: number) {
   app.get('/api/agent/jobs/:id', requireOwnerGate, requireRateLimit, (req, res) => {
     const job = agentRunner.get(String(req.params.id || ''));
     if (!job) return res.status(404).json({ error: 'Agent job not found.' });
-    return res.json({ data: job });
+    // Exhibit bodies are never echoed back on polls — they live server-side.
+    return res.json({ data: redactAgentJob(job) });
   });
 
   app.post('/api/agent/jobs/:id/cancel', requireOwnerGate, requireRateLimit, (req, res) => {

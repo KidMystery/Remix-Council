@@ -66,7 +66,7 @@ import type { DocumentChunkPlan } from '../lib/documentChunker';
 import {
   buildOvernightPlan,
   canLaunchNexus,
-  packExhibitsForServer,
+  packExhibitsForServerJob,
 } from '../lib/nexusExhibits';
 import { archivesFromFiles, isArchiveAttachment, zipResultFromAttached } from '../lib/zipUtils';
 import { formatSandboxReport, verifyMissionCode } from '../lib/codeSandbox';
@@ -959,7 +959,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     const title = summarizeTitle(missionGoal);
     setMissionTitle(title);
 
-    const packed = packExhibitsForServer(attachedFiles);
+    const packed = packExhibitsForServerJob(attachedFiles);
     if (!packed.ok && (attachedFiles.length > 0 || !followUpContext)) {
       addLog(`⛔ ${packed.error}`);
       setIsRunning(false);
@@ -967,7 +967,6 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
       return;
     }
     const carriedContext = followUpContext ? `[Prior Mission Consensus Memory]\n${followUpContext.slice(0, 6000)}` : '';
-    const context = [carriedContext, packed.ok ? packed.context : ''].filter(Boolean).join('\n\n');
 
     const budget =
       enginePreset === 'fast_and_free' ? 'free' : enginePreset === 'frontier_trio' || enginePreset === 'deep_reasoning' ? 'quality' : 'cheap';
@@ -975,13 +974,16 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     const jobCap = capRaw > 0 ? Math.min(25, Math.max(0.5, capRaw)) : undefined;
 
     addLog(
-      `☁️ Launching overnight server mission on the exhibits (plan → work the files → falsify)${jobCap ? ` — capped at $${jobCap.toFixed(2)}` : ' — server cost cap applies'}...`
+      packed.ok && packed.wasChunked
+        ? `📖 Exhibits are ${packed.chars.toLocaleString()} chars — the server will read all ${packed.chunkCount} part${packed.chunkCount === 1 ? '' : 's'} before falsifying${jobCap ? ` (capped at $${jobCap.toFixed(2)})` : ''}...`
+        : `☁️ Launching overnight server mission on the exhibits (plan → work the files → falsify)${jobCap ? ` — capped at $${jobCap.toFixed(2)}` : ' — server cost cap applies'}...`
     );
     try {
       const { id } = await launchAgentJob({
         goal: missionGoal || 'Produce a plan from the attached exhibits.',
         mode: 'nexus',
-        context: context || undefined,
+        context: carriedContext || undefined,
+        exhibits: packed.ok ? packed.exhibits.map((f) => ({ name: f.name, content: f.content })) : undefined,
         model: activeRosterSynthesizer?.model,
         budget,
         maxResearchQueries: enableWebGrounding ? 3 : 0,
@@ -1020,7 +1022,9 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
 
   /** Fold a finished server job back into the mission view. */
   const hydrateServerAgentJob = (job: AgentJobFull) => {
-    addLog(`🏁 Server mission finished (${job.usageUSD.toFixed(4)} USD) — hydrating results...`);
+    addLog(
+      `🏁 Server mission finished (${job.usageUSD.toFixed(4)} USD${job.readings?.length ? `, ${job.readings.length} exhibit part${job.readings.length === 1 ? '' : 's'} read` : ''}) — hydrating results...`
+    );
     const hydratedRounds: CouncilRound[] = job.passes.map((p, i) => ({
       id: `server_${job.id}_pass_${p.index}`,
       userQuery: `[Server mission pass ${p.index}] ${missionGoal}`,
@@ -2519,6 +2523,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                 </div>
               ))}
               <div className="flex items-center gap-3 text-[10px] font-mono text-slate-500 flex-wrap">
+                {!!serverJob.readings?.length && <span>parts read: {serverJob.readings.length}</span>}
                 <span>research: {serverJob.research.length}</span>
                 <span>passes: {serverJob.passes.length}</span>
                 <span>sources: {serverJob.citations}</span>
