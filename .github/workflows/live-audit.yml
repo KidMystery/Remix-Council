@@ -1,0 +1,92 @@
+# ─────────────────────────────────────────────────────────────────
+# Live Audit — click-through verification of the deployed Council
+#
+# Answers the Handbook's last open item ("live production
+# verification") with repeatable probes instead of one-off curls.
+#
+# What it proves (negative-path security + availability):
+#   1. /api/health is 200 (deploy is alive)
+#   2. / serves the SPA HTML
+#   3. POST /api/council WITHOUT identity → 401 (owner gate CLOSED)
+#   4. POST /api/council with a BOGUS council key → 401
+#   5. GET /api/council/models behaves (200 with valid key if the
+#      secret is set; otherwise records 200/401 without failing)
+#
+# What it deliberately does NOT do: drive the money route. A real
+# completion requires the owner's Google session — no secret can
+# (or should) fake that. The signed-in browser test stays yours.
+#
+# Setup (one-time):
+#   GitHub → Settings → Secrets and variables → Actions:
+#     - Secret  COUNCIL_ACCESS_KEY  (only if you set it on Railway)
+#   Run: Actions tab → Live audit → Run workflow → paste the app URL.
+#
+# The OpenRouter key NEVER goes in GitHub. Railway only. Always.
+# ─────────────────────────────────────────────────────────────────
+name: Live audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Deployed app URL, no trailing slash (e.g. https://council-xxxx.up.railway.app)"
+        required: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe the deployment
+        env:
+          BASE: ${{ inputs.base_url }}
+          COUNCIL_KEY: ${{ secrets.COUNCIL_ACCESS_KEY }}
+        run: |
+          set -u
+          BASE="${BASE%/}"
+          pass=0; fail=0
+          check () {
+            if [ "$2" = "$3" ]; then echo "✅ $1 → $3"; pass=$((pass+1));
+            else echo "❌ $1 → expected $2, got $3"; fail=$((fail+1)); fi
+          }
+          code () { curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$@"; }
+
+          echo "── Auditing $BASE ──"
+
+          # 1. Health
+          check "GET /api/health" 200 "$(code "$BASE/api/health")"
+
+          # 2. SPA served at root
+          if curl -s --max-time 30 "$BASE/" | grep -qi '<html'; then
+            echo "✅ GET / serves HTML"; pass=$((pass+1))
+          else
+            echo "❌ GET / did not serve HTML"; fail=$((fail+1))
+          fi
+
+          # 3. Owner gate CLOSED: no identity token on the money route
+          check "POST /api/council, no identity → 401" 401 "$(
+            code -X POST "$BASE/api/council" -H 'Content-Type: application/json' \
+              -d '{"model":"audit/probe","messages":[{"role":"user","content":"ping"}]}'
+          )"
+
+          # 4. Bogus council key rejected
+          check "POST /api/council, bogus key → 401" 401 "$(
+            code -X POST "$BASE/api/council" -H 'Content-Type: application/json' \
+              -H 'x-council-key: definitely-not-the-key' \
+              -d '{"model":"audit/probe","messages":[{"role":"user","content":"ping"}]}'
+          )"
+
+          # 5. Models endpoint: behavior recorded, only hard-fails on 5xx
+          if [ -n "${COUNCIL_KEY:-}" ]; then
+            m=$(code -H "x-council-key: $COUNCIL_KEY" "$BASE/api/council/models")
+            check "GET /api/council/models (valid key) → 200" 200 "$m"
+          else
+            m=$(code "$BASE/api/council/models")
+            case "$m" in
+              200|401|403) echo "ℹ️ /api/council/models → $m (no key secret set; acceptable)"; pass=$((pass+1));;
+              *) echo "❌ /api/council/models → $m (expected 200/401/403)"; fail=$((fail+1));;
+            esac
+          fi
+
+          echo
+          echo "── Result: $pass passed, $fail failed ──"
+          [ "$fail" -eq 0 ]
