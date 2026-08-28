@@ -46,7 +46,7 @@ describe('createServerEventLog', () => {
   });
 
   it('never throws on a broken file path', () => {
-    const log = createServerEventLog({ filePath: 'Z:\\/definitely/not/a/path/events.jsonl' });
+    const log = createServerEventLog({ filePath: '/dev/null/not/a/path/events.jsonl' });
     expect(() => log.record('warn', 'test', 'boom')).not.toThrow();
     expect(log.recent(1)[0].message).toBe('boom');
   });

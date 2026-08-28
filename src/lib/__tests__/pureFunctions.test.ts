@@ -111,7 +111,9 @@ describe('Pure Functions Tests', () => {
       expect(pruned.id).toBe('meta-llama/llama-3.3-70b-instruct');
       expect(pruned.name).toBe('Llama 3.3 70B Instruct');
       expect((pruned as any).description).toBeUndefined();
-      expect((pruned as any).architecture).toBeUndefined();
+      // Tokenizer and raw tokenizer configs pruned, but modality preserved for vision checks
+      expect(pruned.architecture?.modality).toBe('text->text');
+      expect((pruned.architecture as any)?.tokenizer).toBeUndefined();
       expect(pruned.context_length).toBe(131072);
       expect(pruned.pricing?.prompt).toBe('0.0000004');
 
@@ -121,6 +123,16 @@ describe('Pure Functions Tests', () => {
       expect(models).toHaveLength(1);
       expect(models![0].id).toBe('meta-llama/llama-3.3-70b-instruct');
       expect(metadata.cacheStatus).toBe('fresh');
+
+      // Test vision model retains image modality and modelHasVision works after pruning
+      const { modelHasVision } = await import('../modelScoring');
+      const visionModel = {
+        id: 'google/gemini-2.5-flash',
+        name: 'Gemini 2.5 Flash',
+        architecture: { input_modalities: ['text', 'image'], modality: 'text+image->text' },
+      };
+      const prunedVision = pruneModelForCache(visionModel as any);
+      expect(modelHasVision(prunedVision)).toBe(true);
     });
   });
 });

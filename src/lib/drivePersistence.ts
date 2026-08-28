@@ -379,6 +379,36 @@ export function notifyDriveAuthRestored(): void {
   }
 }
 
+let ongoingSilentRefresh: Promise<string> | null = null;
+
+/**
+ * Attempt a silent token refresh via Google Identity Services (prompt: 'none').
+ * Deduplicated so simultaneous requests (e.g. parallel council seats) share
+ * one refresh request instead of firing multiple.
+ */
+export async function refreshOwnerTokenSilently(): Promise<string> {
+  if (ongoingSilentRefresh) {
+    return ongoingSilentRefresh;
+  }
+
+  ongoingSilentRefresh = (async () => {
+    try {
+      const token = await signInWithGoogle({ prompt: 'none' });
+      notifyDriveAuthRestored();
+      return token;
+    } catch (err) {
+      notifyDriveNeedsReauth();
+      throw err;
+    } finally {
+      setTimeout(() => {
+        ongoingSilentRefresh = null;
+      }, 50);
+    }
+  })();
+
+  return ongoingSilentRefresh;
+}
+
 /** Silent first. Interactive picker is only for a click. */
 export function authRecoveryStep(silentAlreadyTried: boolean): 'silent' | 'banner' {
   return silentAlreadyTried ? 'banner' : 'silent';

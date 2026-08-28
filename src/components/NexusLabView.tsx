@@ -218,36 +218,36 @@ export function getPresetRoster(
     return {
       personas: [
         {
-          id: 'claude_frontier',
+          id: 'nexus_architect',
           name: 'The Architect',
           role: 'Lead Architect',
           avatar: '🧠',
           color: '#3b82f6',
           model: 'anthropic/claude-sonnet-4.5',
           systemPrompt:
-            'You are The Architect (Claude Sonnet 4.5), Lead Architect in Nexus Lab. Provide profound structural insights, robust logic, and clear architectural trade-offs.',
+            'You are The Architect, Lead Architect in Nexus Lab. Provide profound structural insights, robust logic, and clear architectural trade-offs.',
           enabled: true,
         },
         {
-          id: 'gpt4o_frontier',
+          id: 'nexus_executor',
           name: 'The Executor',
           role: 'Strategy & Execution',
           avatar: '⚡',
           color: '#10b981',
           model: 'openai/gpt-4o',
           systemPrompt:
-            'You are The Executor (GPT-4o), Strategy & Execution Specialist in Nexus Lab. Focus on operational execution, edge-case mitigation, and pragmatic paths.',
+            'You are The Executor, Strategy & Execution Specialist in Nexus Lab. Focus on operational execution, edge-case mitigation, and pragmatic paths.',
           enabled: true,
         },
         {
-          id: 'gemini_frontier',
+          id: 'nexus_verifier',
           name: 'The Verifier',
           role: 'Verification & Speed',
           avatar: '✨',
           color: '#f59e0b',
           model: 'google/gemini-2.5-flash',
           systemPrompt:
-            'You are The Verifier (Gemini 2.5 Flash), Verification Specialist in Nexus Lab. Stress-test assumptions, verify facts, and test for hidden vulnerabilities.',
+            'You are The Verifier, Verification Specialist in Nexus Lab. Stress-test assumptions, verify facts, and test for hidden vulnerabilities.',
           enabled: true,
         },
       ],
@@ -268,36 +268,36 @@ export function getPresetRoster(
     return {
       personas: [
         {
-          id: 'r1_reasoner',
+          id: 'nexus_first_principles',
           name: 'The First-Principles Analyst',
           role: 'Deep Reasoning Engine',
           avatar: '🔬',
           color: '#8b5cf6',
           model: 'deepseek/deepseek-r1',
           systemPrompt:
-            'You are The First-Principles Analyst (DeepSeek R1), Deep Reasoning Engine. Perform exhaustive first-principles reasoning and mathematical verification.',
+            'You are The First-Principles Analyst, Deep Reasoning Engine in Nexus Lab. Perform exhaustive first-principles reasoning and mathematical verification.',
           enabled: true,
         },
         {
-          id: 'claude_reasoner',
+          id: 'nexus_system_designer',
           name: 'The System Designer',
           role: 'System Designer',
           avatar: '💡',
           color: '#ec4899',
           model: 'anthropic/claude-sonnet-4.5',
           systemPrompt:
-            'You are The System Designer (Claude Sonnet 4.5 with extended thinking). Analyze core problem topology and build complete solution frameworks.',
+            'You are The System Designer in Nexus Lab. Analyze core problem topology and build complete solution frameworks.',
           enabled: true,
         },
         {
-          id: 'gemini_pro_reasoner',
+          id: 'nexus_context_synthesist',
           name: 'The Context Synthesist',
           role: 'Contextual Synthesist',
           avatar: '🌐',
           color: '#06b6d4',
           model: 'google/gemini-2.5-pro',
           systemPrompt:
-            'You are The Context Synthesist (Gemini 2.5 Pro). Analyze deep contextual nuances, edge cases, and long-range system trajectories.',
+            'You are The Context Synthesist in Nexus Lab. Analyze deep contextual nuances, edge cases, and long-range system trajectories.',
           enabled: true,
         },
       ],
@@ -2118,8 +2118,8 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                   disabled={isRunning}
                   className="w-full bg-slate-950 text-slate-200 text-xs p-2.5 rounded-xl border border-slate-800"
                 >
-                  <option value="frontier_trio">🌟 Frontier Trio (Sonnet/GPT-4o/Gemini)</option>
-                  <option value="deep_reasoning">🧠 Deep Reasoning (R1/Sonnet/Pro)</option>
+                  <option value="frontier_trio">🌟 Frontier Trio (Architect / Executor / Verifier)</option>
+                  <option value="deep_reasoning">🧠 Deep Reasoning (Analyst / Designer / Synthesist)</option>
                   <option value="fast_and_free">⚡ Free Tier (live-verified)</option>
                   <option value="active_council">🏛️ Active Council (Settings)</option>
                   <option value="custom">⚙️ Custom Roster</option>

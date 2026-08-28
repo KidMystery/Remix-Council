@@ -1,6 +1,15 @@
 import type { GroundingData } from '../types';
 import { parseWebSearchAnnotations } from './webGrounding';
 import { getAuthHeaders } from './apiClient';
+import { refreshOwnerTokenSilently } from './drivePersistence';
+
+export class OwnerAuthError extends Error {
+  isOwnerAuthError = true;
+  constructor(message: string = 'Sign in required (owner gate).') {
+    super(message);
+    this.name = 'OwnerAuthError';
+  }
+}
 
 export interface StreamOpenRouterOptions {
   model: string;
@@ -37,7 +46,7 @@ export async function streamOpenRouter({
   if (maxTokens) body.max_tokens = maxTokens;
   if (budget) body.budget = budget;
 
-  const headers: Record<string, string> = {
+  let currentHeaders: Record<string, string> = {
     'Content-Type': 'application/json',
     ...getAuthHeaders(),
   };
@@ -45,9 +54,9 @@ export async function streamOpenRouter({
   let attempt = 0;
   while (attempt <= maxRetries) {
     try {
-      const response = await fetch('/api/council', {
+      let response = await fetch('/api/council', {
         method: 'POST',
-        headers,
+        headers: currentHeaders,
         body: JSON.stringify(body),
         signal,
       });
@@ -61,8 +70,30 @@ export async function streamOpenRouter({
         continue;
       }
 
+      if (response.status === 401) {
+        const errorData = await response.json().catch(() => ({}));
+        try {
+          await refreshOwnerTokenSilently();
+          currentHeaders = {
+            'Content-Type': 'application/json',
+            ...getAuthHeaders(),
+          };
+          response = await fetch('/api/council', {
+            method: 'POST',
+            headers: currentHeaders,
+            body: JSON.stringify(body),
+            signal,
+          });
+        } catch {
+          throw new OwnerAuthError(errorData.error || 'Sign in required (owner gate).');
+        }
+      }
+
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
+        if (response.status === 401) {
+          throw new OwnerAuthError(errorData.error || 'Sign in required (owner gate).');
+        }
         throw new Error(errorData.error || `HTTP ${response.status}: LLM Deliberation streaming failure`);
       }
 
@@ -236,15 +267,36 @@ export async function streamOpenRouterCompletion(
   };
 
   try {
-    const response = await fetch('/api/council', {
+    let attemptHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+    };
+
+    let response = await fetch('/api/council', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...getAuthHeaders(),
-      },
+      headers: attemptHeaders,
       body: JSON.stringify(body),
       signal: combined.signal,
     });
+
+    if (response.status === 401) {
+      const errorData = await response.json().catch(() => ({}));
+      try {
+        await refreshOwnerTokenSilently();
+        attemptHeaders = {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        };
+        response = await fetch('/api/council', {
+          method: 'POST',
+          headers: attemptHeaders,
+          body: JSON.stringify(body),
+          signal: combined.signal,
+        });
+      } catch {
+        throw new OwnerAuthError(errorData.error || 'Sign in required (owner gate).');
+      }
+    }
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
@@ -254,6 +306,9 @@ export async function streamOpenRouterCompletion(
           errorData.roundCostUSD,
           errorData.ceilingUSD
         );
+      }
+      if (response.status === 401) {
+        throw new OwnerAuthError(errorData.error || 'Sign in required (owner gate).');
       }
       throw new Error(errorData.error || `HTTP ${response.status}: LLM streaming failure`);
     }
