@@ -19,6 +19,16 @@ import {
 
 export type { Tombstone };
 
+/**
+ * New Nexus missions (and follow-ups) launch on the server-side agent loop
+ * by default: the loop lives in server.ts, survives tab close and phone
+ * screen-off, and is bounded by the server-side job cost cap. The in-tab
+ * browser loop remains available as an explicit opt-out via the ☁️ toggle
+ * (useful when the server path is unavailable). Pinned by
+ * nexusServerDefault.test.ts — flip it consciously, not by accident.
+ */
+export const NEXUS_SERVER_DEFAULT = true;
+
 export interface PersistedMission {
   id: string;
   goal: string;
@@ -206,4 +216,109 @@ export function renameNexusMission(
   const nextActive = active?.id === id ? { ...active, title: clean, updatedAt: now } : active;
   const nextArchive = archive.map((m) => (m.id === id ? { ...m, title: clean, updatedAt: now } : m));
   return { active: nextActive, archive: nextArchive };
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * Mission summaries + server-job sweep fold (Aug 2026).
+ *
+ * "Nexus threads commit on server but don't summarize what they're about":
+ * the sidebar showed only title + status, and missions that finished while
+ * the app was closed stayed 'running' in the archive until clicked. These
+ * two pure functions feed (1) a one-liner per mission in the list and
+ * (2) a lightweight mount sweep that folds finished jobs into the archive
+ * without full in-view hydration (clicking a mission still hydrates rounds).
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+function excerpt(raw: string, max = 130): string {
+  const flat = String(raw || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/[*_`>]/g, '')
+    .replace(/^\s*[-*•]\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!flat) return '';
+  return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
+}
+
+/** One-line "what is this mission about / what did it conclude" for lists. */
+export function missionSummary(m: PersistedMission): string {
+  const fromBrief = excerpt(m.morningBrief || '');
+  if (fromBrief) return fromBrief;
+  const rounds = Array.isArray(m.rounds) ? m.rounds : [];
+  for (let i = rounds.length - 1; i >= 0; i--) {
+    const content = rounds[i]?.synthesis?.content;
+    const got = excerpt(content || '');
+    if (got) return got;
+  }
+  return excerpt(m.goal || '');
+}
+
+/** Structural subset of AgentJobFull — keeps this lib free of fetch coupling. */
+export interface ServerJobSummary {
+  status: string;
+  brief?: string | null;
+  verdict?: string;
+  usageUSD?: number;
+  passes?: { agreementScore?: number }[];
+}
+
+/**
+ * Folds a finished server job's OUTCOME into an archived mission that still
+ * says 'running'. Only touches missions that are still running; full round
+ * hydration happens later in the view when the mission is opened.
+ */
+export function applyServerJobSummaryToMission(
+  m: PersistedMission,
+  job: ServerJobSummary | null | undefined
+): PersistedMission {
+  if (!m || !job) return m;
+  if (m.status !== 'running') return m;
+  const status = String(job.status || '');
+  const lastScore = job.passes?.[job.passes.length - 1]?.agreementScore;
+
+  if (status === 'done') {
+    return {
+      ...m,
+      status: typeof lastScore === 'number' && lastScore >= 85 ? 'converged' : 'max_reached',
+      morningBrief: job.brief || m.morningBrief || null,
+      estimatedCost: typeof job.usageUSD === 'number' ? job.usageUSD : m.estimatedCost,
+      updatedAt: Date.now(),
+    };
+  }
+  if (status === 'stopped_budget') {
+    return {
+      ...m,
+      status: 'max_reached',
+      morningBrief: job.brief || m.morningBrief || null,
+      estimatedCost: typeof job.usageUSD === 'number' ? job.usageUSD : m.estimatedCost,
+      updatedAt: Date.now(),
+    };
+  }
+  if (status === 'failed') return { ...m, status: 'error', updatedAt: Date.now() };
+  if (status === 'cancelled' || status === 'interrupted') return { ...m, status: 'paused', updatedAt: Date.now() };
+  return m; // non-terminal or unknown — leave for the real poller
+}
+
+/**
+ * Plain-markdown copy payload for "moments like this": the FINAL verdict
+ * (last round with synthesis content) plus the morning brief when present.
+ * Feeds the copy buttons on the Morning Brief and Agent Mission Report.
+ */
+export function buildConsensusCopyText(
+  rounds: PersistedMission['rounds'],
+  morningBrief?: string | null
+): string {
+  const list = Array.isArray(rounds) ? rounds : [];
+  let verdict = '';
+  for (let i = list.length - 1; i >= 0; i--) {
+    const content = list[i]?.synthesis?.content;
+    if (content && content.trim()) {
+      verdict = content.trim();
+      break;
+    }
+  }
+  const brief = typeof morningBrief === 'string' && morningBrief.trim() ? morningBrief.trim() : '';
+  return [verdict, brief].filter(Boolean).join('\n\n---\n\n');
 }

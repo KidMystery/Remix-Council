@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { MessageSquare, PanelLeftClose, Plus, Search, X, Clock, Trash2, Eraser, RefreshCw, Cloud, Pencil } from 'lucide-react';
 import { Session } from '../../types';
+import { threadSummaryLine } from '../../lib/titleUtils';
 import { ConfirmButton } from '../ConfirmButton';
 
 interface CouncilSidebarProps {
@@ -242,6 +243,17 @@ export const CouncilSidebar: React.FC<CouncilSidebarProps> = ({
                             )}
                           </div>
                         )}
+                        {(() => {
+                          const summary = threadSummaryLine({ initialPrompt: s.rounds?.[0]?.userQuery });
+                          return summary ? (
+                            <div
+                              className="text-[10px] leading-snug text-slate-500 dark:text-slate-500 line-clamp-2 break-words"
+                              title={summary}
+                            >
+                              {summary}
+                            </div>
+                          ) : null;
+                        })()}
                         <div className="flex items-center gap-2 text-[10px] text-slate-400 dark:text-slate-500 font-mono flex-wrap">
                           <span className="flex items-center gap-1">
                             <Clock size={10} aria-hidden="true" />

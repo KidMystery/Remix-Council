@@ -200,6 +200,27 @@ export function useSessionManager() {
     }
   }, []);
 
+  // ---- Refresh/close safety net: flush pending throttled writes on pagehide.
+  // IndexedDB writes are async and a hard refresh may kill them mid-flight,
+  // which is why stage boundaries ALSO persist immediately (see
+  // updateRoundInActiveSession). This listener is the belt to those suspenders.
+  useEffect(() => {
+    const onHide = () => {
+      if (localTimerRef.current || driveTimerRef.current || pendingLocalRef.current || pendingDriveRef.current) {
+        void flushNow().catch(() => { /* best effort on unload */ });
+      }
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') onHide();
+    };
+    window.addEventListener('pagehide', onHide);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('pagehide', onHide);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [flushNow]);
+
   // ---- Load: silent Drive restore (if this browser wanted it), then merge ----
   useEffect(() => {
     let isMounted = true;
@@ -415,9 +436,15 @@ export function useSessionManager() {
     upsertRound(activeSessionId, round, true);
   }, [activeSessionId, upsertRound]);
 
-  /** Upserts a round into a session (throttled — used during streaming). */
-  const updateRoundInActiveSession = useCallback((sessionId: string, round: CouncilRound) => {
-    upsertRound(sessionId, round, true);
+  /**
+   * Upserts a round into a session. Default: throttled (streaming-time).
+   * `immediate: true` → write-through NOW (stage boundaries, run start,
+   * completion) so a refresh inside the old 750ms debounce window can never
+   * erase a panelist that finished. Found Aug 27 ("refresh erased one that
+   * did work").
+   */
+  const updateRoundInActiveSession = useCallback((sessionId: string, round: CouncilRound, immediate = false) => {
+    upsertRound(sessionId, round, !immediate);
   }, [upsertRound]);
 
   const deleteRoundFromActiveSession = useCallback((roundId: string) => {

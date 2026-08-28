@@ -327,7 +327,10 @@ export async function streamOpenRouterCompletion(
     } finally {
       if (stallTimer) clearTimeout(stallTimer);
       try {
-        reader.cancel();
+        // cancel() returns a promise; on an errored/aborted stream it REJECTS.
+        // Await + swallow so the rejection can't surface as unhandled after
+        // the caller has already received the visible "stalled" error.
+        await reader.cancel();
       } catch {
         // already closed
       }

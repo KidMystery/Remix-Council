@@ -27,6 +27,7 @@ import {
   ChevronDown,
   Moon,
   Pencil,
+  Copy,
 } from 'lucide-react';
 import type {
   Persona,
@@ -43,12 +44,16 @@ import { streamPersonaWithFallback } from '../lib/fallbackManager';
 import { ingestFile } from '../lib/evidenceIngest';
 import { dropLocalStorageKey, kvDel, kvGet, kvSet, KV_KEYS, readLocalStorageJson } from '../lib/kvStore';
 import type { EvidenceRecord } from '../types';
+import { copyToClipboard } from '../lib/clipboard';
 import { summarizeTitle } from '../lib/titleUtils';
 import {
   deleteNexusMission,
   isPersistedMission,
   listNexusMissions,
   mergeNexusDocs,
+  NEXUS_SERVER_DEFAULT,
+  applyServerJobSummaryToMission,
+  buildConsensusCopyText,
   openNexusMission,
   parkActiveMission,
   renameNexusMission,
@@ -546,8 +551,9 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
   const [nightShiftCycles, setNightShiftCycles] = useState(5);
   const [nightShiftPaceMinutes, setNightShiftPaceMinutes] = useState(0);
   const [morningBrief, setMorningBrief] = useState<string | null>(null);
-  // Server-run missions: the agent loop lives in server.ts, survives tab close.
-  const [serverMode, setServerMode] = useState(false);
+    // Server-run missions: the agent loop lives in server.ts, survives tab close.
+    // Default ON (NEXUS_SERVER_DEFAULT) — phone-safe; bounded by server job cost cap.
+    const [serverMode, setServerMode] = useState(NEXUS_SERVER_DEFAULT);
   const [serverJobId, setServerJobId] = useState<string | null>(null);
   const [serverJob, setServerJob] = useState<AgentJobFull | null>(null);
   const [documentPlan, setDocumentPlan] = useState<DocumentChunkPlan | null>(null);
@@ -651,7 +657,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setNightShiftEnabled(true);
     setServerJobId(null);
     setServerJob(null);
-    setServerMode(false);
+    setServerMode(NEXUS_SERVER_DEFAULT);
     missionIdRef.current = newMissionId();
     persistMission(null, true);
   };
@@ -836,8 +842,62 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverJobId]);
 
+  // One-shot sweep: archived missions whose server job finished while the app
+  // was closed still say 'running' in the list. Fold each finished job's
+  // outcome (status / brief / cost) into the archive so the mission list tells
+  // the truth. Full round hydration still happens when the mission is opened.
+  const sweptServerJobsRef = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    const stale = archive.filter(
+      (m) => m.serverJobId && m.status === 'running' && !sweptServerJobsRef.current.has(m.serverJobId)
+    );
+    if (stale.length === 0) return;
+    for (const m of stale) sweptServerJobsRef.current.add(m.serverJobId as string);
+    let cancelled = false;
+    void (async () => {
+      const results = await Promise.all(
+        stale.map(async (m) => {
+          try {
+            return { m, job: await getAgentJob(m.serverJobId as string) };
+          } catch {
+            return { m, job: null };
+          }
+        })
+      );
+      if (cancelled) return;
+      const folded = new Map<
+        string,
+        ReturnType<typeof applyServerJobSummaryToMission>
+      >();
+      for (const { m, job } of results) {
+        if (job && isAgentJobTerminal(job.status)) {
+          const next = applyServerJobSummaryToMission(m, job);
+          if (next !== m) folded.set(m.id, next);
+        }
+      }
+      if (folded.size > 0) commitList(archive.map((m) => folded.get(m.id) || m));
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archive]);
+
   const addLog = (msg: string) => {
     setTerminalLogs((prev) => [...prev.slice(-30), `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  };
+
+  // Consensus copy buttons (Morning Brief + Agent Mission Report).
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+  const handleCopyText = async (key: string, text: string) => {
+    if (!text.trim()) return;
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setCopiedKey(key);
+      if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => setCopiedKey(null), 2000);
+    }
   };
 
   const processFiles = async (filesList: FileList | File[]) => {
@@ -1608,7 +1668,7 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setNightShiftEnabled(true);
     setServerJobId(null);
     setServerJob(null);
-    setServerMode(false);
+    setServerMode(NEXUS_SERVER_DEFAULT);
     persistMission({
       id: childId,
       goal: directive,
@@ -2582,6 +2642,16 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
               <div className="flex items-center gap-2 text-xs font-bold text-indigo-300 border-b border-slate-800 pb-2">
                 <Moon size={14} />
                 Morning Brief — what changed overnight
+                <button
+                  type="button"
+                  onClick={() => handleCopyText('brief', buildConsensusCopyText(rounds, morningBrief))}
+                  className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-semibold text-slate-400 hover:text-indigo-200 border border-slate-700 hover:border-indigo-500/60 transition-colors cursor-pointer"
+                  title="Copy the consensus (verdict + brief) to clipboard"
+                  aria-label="Copy consensus to clipboard"
+                >
+                  {copiedKey === 'brief' ? <CheckCircle2 size={11} className="text-emerald-400" /> : <Copy size={11} />}
+                  {copiedKey === 'brief' ? 'Copied' : 'Copy'}
+                </button>
               </div>
               <div className="text-xs text-slate-200 leading-relaxed">
                 <MessageMarkdown content={morningBrief} />
@@ -2598,8 +2668,20 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
                   <CheckCircle2 size={13} className="text-emerald-400" />
                   Agent Mission Report
                 </span>
-                <span className="font-mono text-[11px] text-slate-400">
-                  {serverJob.status === 'done' ? 'complete' : serverJob.status} · ${serverJob.usageUSD.toFixed(4)} USD
+                <span className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleCopyText('report', buildConsensusCopyText(rounds, morningBrief))}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-semibold text-slate-400 hover:text-sky-200 border border-slate-700 hover:border-sky-500/60 transition-colors cursor-pointer"
+                    title="Copy the consensus (verdict + brief) to clipboard"
+                    aria-label="Copy consensus to clipboard"
+                  >
+                    {copiedKey === 'report' ? <CheckCircle2 size={11} className="text-emerald-400" /> : <Copy size={11} />}
+                    {copiedKey === 'report' ? 'Copied' : 'Copy'}
+                  </button>
+                  <span className="font-mono text-[11px] text-slate-400">
+                    {serverJob.status === 'done' ? 'complete' : serverJob.status} · ${serverJob.usageUSD.toFixed(4)} USD
+                  </span>
                 </span>
               </div>
               {serverJob.plan && (
