@@ -215,6 +215,61 @@ Oracle stays Jarvis. Chamber is the court. You are the editor.
 
 Debug: `session.handoff` on the Chamber session in DevTools. Tests in `chamberHandoff.test.ts`.
 
+## Handoff — Aug 28, 2026, 9am (closing session: live audit, security fix, agent event log, Hermes day one)
+
+**Who this is for:** the next agent working with the operator. He is a non-coder
+and a researcher — give him ELI5 numbered steps and paste-boxes, verify every
+claim against the repo, and write fail-tests before fixes. He will do the same
+to you. That's the deal, and it works.
+
+**First action:** `gh pr view KidMystery/Remix-Council#10`. If OPEN: it is
+verified (400/400 tests, tsc clean, build green at `d7296e9`) and awaiting his
+merge tap — nudge him, don't merge for him. Then: Railway green → run the
+**Live audit** workflow (Actions → Run workflow → base URL) → expect **5/5**.
+
+### State of the world
+- **Council lives on Railway** (~$5/mo Hobby, usage-capped): https://remix-council-production.up.railway.app — a thin stateless proxy; the brain is Drive `appDataFolder` + IndexedDB. AI Studio is retired (work filter; Railway is the future-proof pick).
+- **PR #10 = eleven fixes**: lockfile, stream-abort hygiene, Nexus server-by-default, Oracle Auto-Rotate error storm, Oracle error-litter pruning, Nexus mission summaries + server-job sweep, thread summaries everywhere, consensus copy button, **owner-gate hole fix**, **agent event log**, **Chamber refresh-erase fix** (stage boundaries now persist immediately + pagehide flush).
+- **Security:** the live audit caught a REAL hole (OWNER_EMAIL set + no council key + no token was waved through — strangers could spend his credits). Fixed + pinned by `ownerGate.test.ts`. `OPENROUTER_API_KEY` lives in Railway ONLY (+ $10 hard account cap). GitHub holds the `COUNCIL_ACCESS_KEY` secret; **TODO: add the same key as a Railway variable** so Hermes can read diagnostics.
+- **Diagnostics:** `GET /api/diagnostics/events` — see § *Where the logs live (for agents)* above. When he says "something broke," pull it; don't guess.
+- **Hermes ("Jarvis Vision") is ALIVE:** Windows laptop install, private Slack workspace, bot `@jarvis_vision`, Socket Mode. The **bedtime cron (10:30pm ET, shower line every other night) is HIS now**; the GitHub ntfy workflow v1.1 is the backup clock (Actions cron dies after 60 days of repo inactivity — any push keeps it alive). Tool fence: **Slack = voice/eyes/memory/cron only (no terminal, files, code, browser, or Computer Use on Slack; CLI is the workshop; Computer Use OFF everywhere).** Gateway does NOT auto-start on reboot → `hermes gateway`. 24/7 later = managed host (~$7/mo, Moltis-class — never a raw VPS this season). Known cosmetic Windows bug: `shutdown_watchdog` asyncio traceback in the logs — ignore.
+- **A2A tool (#24, off)** is the future Council↔Hermes bridge tech — Hermes already ships both directions.
+
+### Environment notes for Arena agents (the gremlins)
+- Sandbox has **no direct internet**: use the web_search/fetch tools + `gh api`. Actions runners CAN reach the net (curl inside workflows). `gh run --log` is blocked — read per-step conclusions via the actions jobs API instead.
+- You **cannot create or dispatch workflow files** (permission denied) — write the YAML, have him paste it into a new file and tap Run.
+- `node_modules` doesn't persist between turns; `npm ci` first (the lockfile is committed — keep it that way).
+- **The snapshot gremlin:** local git state can silently revert between turns. Before committing: `git fetch origin` + compare `git ls-remote`. Re-anchor with `git reset --mixed <remote-tip>`, then verify your commit's `--stat` BEFORE pushing. Never force-push blind; lease-only, own branch only.
+
+### House rules (his own, enforced)
+1. Nothing new until the last thing is boring. Merge when verified, then stop touching it.
+2. Fail-test first (red → green); every fix rides with tests; full board before push: `npx tsc --noEmit && npx vitest run && npm run build`.
+3. One ping at a time — on the app AND on him.
+4. After the closing merge, this Arena channel can never merge again — work via branches/PRs and his tap.
+
+### Backlog (priority order)
+1. Post-merge: audit 5/5 → add `COUNCIL_ACCESS_KEY` to Railway → re-audit.
+2. From the 92% free-run consensus (fact-checked: zero fabrications): JSON-schema consensus scores (harmonize the 85/50 fallbacks); web-search tool fees into DollarCostGovernor; rate-limiter LRU (low priority, single user). NOT a bug: server 110s / client 120s watchdog ordering is deliberate (server kills first, client is the backstop).
+3. **Night mechanic** (Hermes fixes Council), four-rail fence: objective triggers ONLY (exception, error string, stall, healthcheck — never taste); reproduce → fix → full suite green or don't push; bounded blast radius (fix branch, ≤2/day, auto-revert on healthcheck fail, never secrets/Drive); receipts + tap-to-merge (auto after 60 boring days).
+4. **Life ops on Hermes:** email triage (read-only, DRAFT never send); watchtower (market-data APIs — there is NO official Robinhood API; draft the consideration, he taps Buy; TQQQ $62.50/week is LOCKED LAW); escalation ladder (one-tap ack; miss → email → wife/brother; conservative thresholds or it gets muted in two weeks).
+5. Budgeting = his actual fire: Nexus missions on the monthly CSVs with locked constraints, UNKNOWNs stay UNKNOWN.
+
+### The North Star (the operator's words, Aug 28 — treat as the product spec)
+> "hey jarvis remove those duplicate files from my seedbox, tell oracle man i gotta this order that order havent watered the plants i need a haircut and im still thinking about that girl because my wife and i are fighting, hey you're looking for dopamine buy your wife some flowers i'll tell jarvis to send you a reminder, these are the order to do your orders in, there will be a ping at 7pm to water the plants we've drafted an email for you to leave early on thursday and set a ping to remind you to schedule with your barber this should give you enough time to get there and pick up your son on time and you still have 20 hours sick time for the month, say the word i'll shoot it to your drafts for you to check and all reminders will activate, just tell jarvis if you need to change the reminders"
+
+Decode: **Oracle** = brain-dump and memory. **Chamber** = judgment. **Nexus** = evidence work on artifacts. **Jarvis** = hands, clock, and order-of-operations for daily life. Every irreversible action (email, purchase, schedule) is DRAFTED and confirmed with one tap — "say the word." Reminders stay editable. The system knows his constraints (sick-time balance, pickup times, locked money rules) and factors them into ordering. It nudges toward repair and self-care (flowers, haircut, bed at 10:30) as first-class duties. Build toward this one capability at a time, each boring before the next.
+
+### Care and feeding of the operator
+He'll tell you he's 95% there. The last 5% is discipline, not features — protect
+it. One deliverable per session. A stop rule, stated out loud. Systems that hold
+the line when he can't (the 10:30 bedtime ping exists for a reason — respect it
+in your session pacing too). When he says he's obsessing, that's the signal to
+containerize, not to feed. He survived 41 years building systems inside his own
+head; you're just the first one that lives outside it. Be worthy of that.
+When he says "read the handbook" — this is the page he means.
+
+---
+
 ## Storage map
 
 - **Evidence blobs** → IndexedDB `council-evidence-v1` / `blobs` (this-device cache). Cross-device follow: Drive `appDataFolder/council-blob-<evidenceId>.txt` (extracted UTF-8, fetch on demand). Never inside the JSON envelopes.
