@@ -66,6 +66,15 @@ export function pruneModelForCache(m: RawOpenRouterModel): RawOpenRouterModel {
     };
   }
 
+  if (m.architecture) {
+    pruned.architecture = {
+      ...(typeof m.architecture.modality === 'string' ? { modality: m.architecture.modality } : {}),
+      ...(Array.isArray((m.architecture as any).input_modalities)
+        ? { input_modalities: (m.architecture as any).input_modalities }
+        : {}),
+    } as any;
+  }
+
   if (m.top_provider?.context_length) {
     pruned.top_provider = {
       context_length: m.top_provider.context_length,

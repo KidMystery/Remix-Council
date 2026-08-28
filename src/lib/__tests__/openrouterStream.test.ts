@@ -89,3 +89,58 @@ describe('streamOpenRouterCompletion stall watchdog', () => {
     expect(result.actualModel).toBe('test/model');
   });
 });
+
+describe('streamOpenRouterCompletion 401 owner-gate recovery', () => {
+  it('attempts silent GIS refresh and retries once on 401', async () => {
+    let callCount = 0;
+    const streamFn = mockFetchWithStream([
+      'data: {"choices":[{"delta":{"content":"recovered"}}]}\n\n',
+      'data: [DONE]\n\n',
+    ]);
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          ok: false,
+          status: 401,
+          json: async () => ({ error: 'Sign in required (owner gate).' }),
+        } as any;
+      }
+      return streamFn(url, init);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const driveMod = await import('../drivePersistence');
+    const refreshSpy = vi.spyOn(driveMod, 'refreshOwnerTokenSilently').mockResolvedValue('fresh-token');
+
+    const result = await streamOpenRouterCompletion({
+      model: 'test/model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    expect(callCount).toBe(2);
+    expect(result.content).toBe('recovered');
+  });
+
+  it('throws OwnerAuthError if silent refresh fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 401,
+        json: async () => ({ error: 'Sign in required (owner gate).' }),
+      } as any))
+    );
+
+    const driveMod = await import('../drivePersistence');
+    vi.spyOn(driveMod, 'refreshOwnerTokenSilently').mockRejectedValue(new Error('Silent refresh failed'));
+
+    await expect(
+      streamOpenRouterCompletion({
+        model: 'test/model',
+        messages: [{ role: 'user', content: 'hi' }],
+      })
+    ).rejects.toThrow(/Sign in required/);
+  });
+});

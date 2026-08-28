@@ -342,8 +342,9 @@ export async function streamPersonaWithFallback(
       };
     } catch (error: any) {
       // A cost-governor refusal is a budget guard, not a model failure: never
-      // try backup models, surface it to the run loop untouched.
-      if (error?.costCeilingExceeded) throw error;
+      // try backup models, surface it to the run loop untouched. Same for owner gate
+      // auth rejection: backup models cannot fix a 401.
+      if (error?.costCeilingExceeded || error?.isOwnerAuthError) throw error;
       lastError = error;
       const triggerReason = classifyTriggerReason(error, null);
       const nextModel = attemptChain[attempts] || '';

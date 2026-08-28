@@ -283,5 +283,20 @@ describe('Fallback Manager tests', () => {
       expect(mockedStream.mock.calls[0][0].roundKey).toBe('sess:round');
       expect(mockedStream.mock.calls[0][0].costCeilingUSD).toBe(0.5);
     });
+
+    it('never tries backup models when the owner gate rejects auth', async () => {
+      const authError = new Error('Sign in required (owner gate).');
+      (authError as any).isOwnerAuthError = true;
+      mockedStream.mockRejectedValueOnce(authError);
+      await expect(
+        streamPersonaWithFallback({
+          persona,
+          messages: [{ role: 'user', content: 'hi' }],
+          policy: DEFAULT_POLICY,
+        })
+      ).rejects.toThrow('Sign in required (owner gate).');
+      // Auth error is fatal — do not burn backup models.
+      expect(mockedStream).toHaveBeenCalledTimes(1);
+    });
   });
 });
