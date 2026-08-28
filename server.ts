@@ -202,6 +202,96 @@ async function resolveTokenEmail(token: string): Promise<string | null> {
   return null;
 }
 
+/* ───────────────────────────────────────────────────────────────────────────
+ * Server event log (Aug 2026) — "where the logs live" for agents.
+ *
+ * Structured JSON events, newest-first, readable via GET /api/diagnostics/events
+ * (council key or owner token). In-memory ring is the primary source (Railway is
+ * ephemeral); data/events.jsonl is best-effort persistence with one rotation.
+ * Logging must NEVER throw — a broken logger must not take down requests.
+ * ─────────────────────────────────────────────────────────────────────────── */
+export interface ServerEvent {
+  ts: string;
+  level: 'error' | 'warn' | 'info';
+  scope: string;
+  message: string;
+  meta?: Record<string, unknown>;
+}
+
+export function createServerEventLog(
+  opts: { maxEvents?: number; filePath?: string; maxFileBytes?: number } = {}
+): { record: (level: ServerEvent['level'], scope: string, message: string, meta?: Record<string, unknown>) => void; recent: (limit?: number) => ServerEvent[] } {
+  const maxEvents = Math.max(50, Math.floor(opts.maxEvents ?? 500));
+  const filePath = opts.filePath ?? '';
+  const maxFileBytes = Math.max(2048, opts.maxFileBytes ?? 1_048_576);
+  const events: ServerEvent[] = [];
+
+  const appendFile = (line: string) => {
+    if (!filePath) return;
+    try {
+      const fs = require('fs') as typeof import('fs');
+      const pathMod = require('path') as typeof import('path');
+      fs.mkdirSync(pathMod.dirname(filePath), { recursive: true });
+      try {
+        const size = fs.statSync(filePath).size;
+        if (size > maxFileBytes) {
+          const rotated = `${filePath}.1`;
+          try { fs.unlinkSync(rotated); } catch { /* none yet */ }
+          fs.renameSync(filePath, rotated);
+        }
+      } catch { /* file does not exist yet */ }
+      fs.appendFileSync(filePath, line);
+    } catch { /* never throw from logging */ }
+  };
+
+  return {
+    record: (level, scope, message, meta) => {
+      const event: ServerEvent = { ts: new Date().toISOString(), level, scope, message, ...(meta ? { meta } : {}) };
+      events.push(event);
+      if (events.length > maxEvents) events.splice(0, events.length - maxEvents);
+      appendFile(JSON.stringify(event) + '\n');
+    },
+    recent: (limit) => {
+      const raw = Math.floor(limit ?? 100);
+      const n = Number.isFinite(raw) && raw > 0 ? Math.min(raw, maxEvents) : 100;
+      return events.slice(-n).reverse();
+    },
+  };
+}
+
+/**
+ * Owner-gate decision as a PURE function so the auth matrix is unit-testable.
+ * FIX (Aug 2026, found by the live audit): when OWNER_EMAIL is configured and
+ * the caller presents NEITHER a valid council key NOR an owner token, the old
+ * code waved the request through (next()) whenever COUNCIL_ACCESS_KEY was
+ * unset — an open door on exactly-one-gate-configured deployments. Now:
+ * owners configured + no credentials → 401, always.
+ */
+export function decideOwnerGate(input: {
+  councilKeyConfigured: boolean;
+  clientKey: string;
+  councilKeyMatches: boolean;
+  ownerEmailsConfigured: boolean;
+  token: string;
+  tokenEmail?: string | null;
+  emailAllowed: (email: string) => boolean;
+}): { allow: true } | { allow: false; status: 401 | 403; reason: 'signin_required' | 'not_owner' } {
+  if (input.councilKeyConfigured && input.clientKey && input.councilKeyMatches) {
+    return { allow: true }; // agent bypass — the shared key is the credential
+  }
+  if (!input.ownerEmailsConfigured) {
+    return { allow: true }; // dev mode — council-key gate still applies separately
+  }
+  if (!input.token) {
+    return { allow: false, status: 401, reason: 'signin_required' }; // THE FIX
+  }
+  const email = (input.tokenEmail || '').toLowerCase().trim();
+  if (!email || !input.emailAllowed(email)) {
+    return { allow: false, status: 403, reason: 'not_owner' };
+  }
+  return { allow: true };
+}
+
 export async function startServer(portOverride?: number) {
   const app = express();
   const activePort = resolvePort(portOverride ?? process.env.PORT);
@@ -214,6 +304,9 @@ export async function startServer(portOverride?: number) {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+  // 1b. Server event log — "where the logs live" for agents (HANDBOOK § Where the logs live).
+  const eventLog = createServerEventLog({ filePath: path.join(process.cwd(), 'data', 'events.jsonl') });
+
   // 2. Council access key gate (applies to every /api/council route, not /api/health)
   const COUNCIL_ACCESS_KEY = (process.env.COUNCIL_ACCESS_KEY || process.env.COUNCIL_ACCESS_SECRET)?.trim() || '';
 
@@ -225,6 +318,7 @@ export async function startServer(portOverride?: number) {
     if (COUNCIL_ACCESS_KEY) {
       const clientKey = req.header('x-council-key') || '';
       if (clientKey !== COUNCIL_ACCESS_KEY) {
+        eventLog.record('warn', 'auth', 'Council access key rejected (401).', { path: req.path });
         return res.status(401).json({ error: 'Invalid council access key.' });
       }
       return next();
@@ -237,6 +331,7 @@ export async function startServer(portOverride?: number) {
   const requireRateLimit = (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     if (rateLimited(ip)) {
+      eventLog.record('warn', 'ratelimit', 'Rate limit exceeded (429).', { path: req.path });
       return res.status(429).json({ error: 'Rate limit exceeded. Please slow down.' });
     }
     return next();
@@ -260,34 +355,30 @@ export async function startServer(portOverride?: number) {
     res: express.Response,
     next: express.NextFunction
   ) => {
-    // If a valid shared council key is provided, bypass owner token requirement
-    if (COUNCIL_ACCESS_KEY) {
-      const clientKey = req.header('x-council-key') || '';
-      if (clientKey && clientKey === COUNCIL_ACCESS_KEY) {
-        return next();
-      }
-    }
-
-    if (allowedOwnerEmails.size === 0) {
-      // Not configured — fall through to the shared-key gate (or open dev mode).
-      return requireCouncilAuth(req, res, next);
-    }
-
+    const clientKey = req.header('x-council-key') || '';
     const token = req.header('x-owner-token') || '';
-    if (!token) {
-      // If council key was set, require either key or owner token
-      if (COUNCIL_ACCESS_KEY) {
-        return res.status(401).json({ error: 'Sign in required (owner gate).' });
+    const decision = decideOwnerGate({
+      councilKeyConfigured: Boolean(COUNCIL_ACCESS_KEY),
+      clientKey,
+      councilKeyMatches: Boolean(COUNCIL_ACCESS_KEY) && clientKey === COUNCIL_ACCESS_KEY,
+      ownerEmailsConfigured: allowedOwnerEmails.size > 0,
+      token,
+      tokenEmail: token ? await resolveTokenEmail(token) : null,
+      emailAllowed: (email) => allowedOwnerEmails.has(email),
+    });
+    if (decision.allow) {
+      if (allowedOwnerEmails.size === 0) {
+        // Dev mode — still enforce the shared council key if configured.
+        return requireCouncilAuth(req, res, next);
       }
       return next();
     }
-
-    const email = await resolveTokenEmail(token);
-    const normalizedEmail = (email || '').toLowerCase().trim();
-    if (!normalizedEmail || !allowedOwnerEmails.has(normalizedEmail)) {
-      return res.status(403).json({ error: 'This deployment is restricted to its owner.' });
+    if (decision.status === 401) {
+      eventLog.record('warn', 'auth', 'Owner gate: no credentials accepted — 401.', { path: req.path });
+      return res.status(401).json({ error: 'Sign in required (owner gate).' });
     }
-    return next();
+    eventLog.record('warn', 'auth', 'Owner gate: identity not on the owner list — 403.', { path: req.path });
+    return res.status(403).json({ error: 'This deployment is restricted to its owner.' });
   };
 
   // 3. Models catalog route with 10-minute in-memory cache + stale fallback
@@ -834,9 +925,19 @@ export async function startServer(portOverride?: number) {
     });
   }
 
+  // Diagnostics: recent server events. Auth = council key (for agents like Hermes)
+  // or the owner token (your signed-in browser). See HANDBOOK § Where the logs live.
+  app.get('/api/diagnostics/events', requireOwnerGate, requireRateLimit, (req, res) => {
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+    res.json({ events: eventLog.recent(limit), generatedAt: new Date().toISOString() });
+  });
+
   // Structured Error Middleware
   app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     console.error('[ServerError]', err);
+    eventLog.record('error', 'server', err?.message || String(err), {
+      stack: String(err?.stack || '').split('\n').slice(0, 4).join(' | '),
+    });
     res.status(500).json({ error: 'Internal Server Error', message: err.message || String(err) });
   });
 

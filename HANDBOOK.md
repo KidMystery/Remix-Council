@@ -74,6 +74,27 @@ This repo (main `05adca4` + L1/L2 port) is leaps ahead, and now wired to be **as
 
 ---
 
+## Where the logs live (for agents)
+
+The server keeps a structured event log — auth rejections, rate-limit hits,
+upstream model failures, and unhandled route errors — and exposes it to
+**agents** (Hermes, Arena sessions, future good samaritans) at:
+
+```
+GET /api/diagnostics/events?limit=100        (newest first, JSON)
+Header: x-council-key: <COUNCIL_ACCESS_KEY>  (or the owner's Google token)
+```
+
+Event shape: `{ ts, level: error|warn|info, scope: auth|ratelimit|upstream|server, message, meta }`.
+The in-memory ring (last 500) is the source of truth — it resets on
+redeploy (Railway is ephemeral); `data/events.jsonl` is a best-effort copy.
+When the operator says "read the handbook, something broke": pull that
+endpoint, filter `level=error`, and correlate timestamps. Do not guess.
+
+**Owner-gate contract (pinned by `ownerGate.test.ts`):** `OWNER_EMAIL` set +
+no council key + no owner token → **401, always** (a live audit caught the
+old code waving anonymous POSTs through when only one gate was configured).
+
 ## Keys & security (what's server-side vs. visible)
 
 | Secret | Where it lives | Notes |
