@@ -94,7 +94,7 @@ export interface CouncilChamberProps {
   onClearActiveHistory?: () => void;
   onToggleSidebar?: () => void;
   isSidebarOpen?: boolean;
-  onUpdateRound: (sessionId: string, round: CouncilRound) => void;
+  onUpdateRound: (sessionId: string, round: CouncilRound, immediate?: boolean) => void;
   onCompleteRound: (sessionId: string, round: CouncilRound) => void;
   onDeleteRound?: (roundId: string) => void;
   flushNow: () => void;
@@ -764,7 +764,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     // Ensure the live render list has this round and persist it immediately so
     // an interrupted run can be resumed after a reload.
     dispatch({ type: 'UPSERT_ROUND', payload: currentRoundState });
-    onUpdateRound(activeSessionId, { ...currentRoundState });
+    onUpdateRound(activeSessionId, { ...currentRoundState }, true);
 
     // Hierarchical memory (Council Archivist): the `archivistRecentRounds`
     // most recent rounds stay verbatim; older rounds are condensed into an
@@ -977,7 +977,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       });
 
       await Promise.allSettled(s1Promises);
-      onUpdateRound(activeSessionId, { ...currentRoundState });
+      onUpdateRound(activeSessionId, { ...currentRoundState }, true);
     }
 
     if (isRunAborted()) {
@@ -994,7 +994,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       });
       const stamped = applyStamp(currentRoundState, stampFromBlockers(blockers, { aborted: true }), blockers);
       Object.assign(currentRoundState, stamped);
-      onUpdateRound(activeSessionId, { ...currentRoundState });
+      onUpdateRound(activeSessionId, { ...currentRoundState }, true);
       return;
     }
 
@@ -1020,7 +1020,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       const stamped = applyStamp(currentRoundState, 'blocked', panelBlockers);
       Object.assign(currentRoundState, stamped);
       dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
-      onUpdateRound(activeSessionId, { ...currentRoundState });
+      onUpdateRound(activeSessionId, { ...currentRoundState }, true);
       flushNow();
       showToast?.('Docket blocked — the Chair will not stamp a verdict from a partial panel or unread exhibit.', 'warning');
       return;
@@ -1059,7 +1059,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
         currentRoundState.stamp = 'completed';
       }
       dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
-      onUpdateRound(activeSessionId, { ...currentRoundState });
+      onUpdateRound(activeSessionId, { ...currentRoundState }, true);
       return;
     }
 
@@ -1086,7 +1086,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
       const stamped = applyStamp(currentRoundState, 'blocked', skipBlockers);
       Object.assign(currentRoundState, stamped);
       dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
-      onUpdateRound(activeSessionId, { ...currentRoundState });
+      onUpdateRound(activeSessionId, { ...currentRoundState }, true);
       flushNow();
       return;
     }
@@ -1213,7 +1213,7 @@ If the question contains code, documents, or attached files, treat them as avail
       });
 
       await Promise.allSettled(s2Promises);
-      onUpdateRound(activeSessionId, { ...currentRoundState });
+      onUpdateRound(activeSessionId, { ...currentRoundState }, true);
     }
 
     if (isRunAborted()) return;
@@ -1245,7 +1245,7 @@ If the question contains code, documents, or attached files, treat them as avail
       currentRoundState.stamp = 'completed';
     }
     dispatch({ type: 'UPSERT_ROUND', payload: { ...currentRoundState } });
-    onUpdateRound(activeSessionId, { ...currentRoundState });
+    onUpdateRound(activeSessionId, { ...currentRoundState }, true);
     } finally {
       announceRoundOutcome(currentRoundState);
     }
@@ -1531,7 +1531,7 @@ If the question contains code, documents, or attached files, treat them as avail
         call.cleanup();
       }
 
-      onUpdateRound(activeSessionId, { ...currentRoundState });
+      onUpdateRound(activeSessionId, { ...currentRoundState }, true);
       await runSynthesisPhase(currentRoundState.deliberation.stage1, currentRoundState.deliberation.stage2);
     } finally {
       releaseDeliberationLock();
