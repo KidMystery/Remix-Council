@@ -126,18 +126,24 @@ function getRateLimit(): number {
 
 function rateLimited(ip: string): boolean {
   const now = Date.now();
-  const bucket = rateBuckets.get(ip);
+  let bucket = rateBuckets.get(ip);
+  
   if (!bucket || now - bucket.windowStart >= RATE_WINDOW_MS) {
-    rateBuckets.set(ip, { windowStart: now, count: 1 });
-    return false;
+    bucket = { windowStart: now, count: 1 };
+  } else {
+    bucket.count++;
   }
-  bucket.count++;
-  // Periodically prune stale buckets to bound memory.
+
+  // LRU behavior: remove and re-insert to move to the end (most recently used)
+  rateBuckets.delete(ip);
+  rateBuckets.set(ip, bucket);
+
+  // Evict oldest if we exceed the memory cap
   if (rateBuckets.size > 10_000) {
-    for (const [k, v] of rateBuckets) {
-      if (now - v.windowStart >= RATE_WINDOW_MS) rateBuckets.delete(k);
-    }
+    const oldestKey = rateBuckets.keys().next().value;
+    if (oldestKey !== undefined) rateBuckets.delete(oldestKey);
   }
+
   return bucket.count > getRateLimit();
 }
 
@@ -705,17 +711,24 @@ export async function startServer(portOverride?: number) {
 
       if (!upstreamResp.ok) {
         const errorJson = await upstreamResp.json().catch(() => ({}));
+        const errorMsg = errorJson.error?.message || `Upstream provider error: HTTP ${upstreamResp.status}`;
+        eventLog.record('error', 'upstream', errorMsg, {
+          model: resolvedModel,
+          requestedModel: rawModel,
+          status: upstreamResp.status,
+          budget,
+        });
         // Never fall back to Gemini for a Strict Free request when the provider
         // rejects the request (401/402/403). Only non-free requests may use
         // provider fallbacks, and those happen client-side via the policy layer.
         if (budget === 'free' && [401, 402, 403].includes(upstreamResp.status)) {
           return res.status(upstreamResp.status).json({
-            error: errorJson.error?.message || `Upstream provider error: HTTP ${upstreamResp.status}`,
+            error: errorMsg,
             freeModeBlocked: true,
           });
         }
         return res.status(upstreamResp.status).json({
-          error: errorJson.error?.message || `Upstream provider error: HTTP ${upstreamResp.status}`,
+          error: errorMsg,
         });
       }
 
@@ -800,6 +813,11 @@ export async function startServer(portOverride?: number) {
       }
     } catch (error: any) {
       clearTimeout(timeoutId);
+      eventLog.record('error', 'upstream', error?.message || 'Upstream LLM communication failure', {
+        model: resolvedModel,
+        requestedModel: rawModel,
+        name: error?.name,
+      });
       // Client disconnected or stream was cancelled — nothing left to respond to.
       if (res.writableEnded || res.destroyed) {
         return;
@@ -909,6 +927,27 @@ export async function startServer(portOverride?: number) {
     return res.json({ data: { cancelled: true } });
   });
 
+  // Diagnostics: recent server events and client-reported errors.
+  // Auth = council key or owner token. See HANDBOOK § Where the logs live.
+  app.get('/api/diagnostics/events', requireOwnerGate, requireRateLimit, (req, res) => {
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+    res.json({ events: eventLog.recent(limit), generatedAt: new Date().toISOString() });
+  });
+
+  app.post('/api/diagnostics/events', requireOwnerGate, requireRateLimit, (req, res) => {
+    try {
+      const { level, scope, message, meta } = req.body || {};
+      const validLevel = ['error', 'warn', 'info'].includes(level) ? level : 'info';
+      const validScope = typeof scope === 'string' && scope ? scope.slice(0, 50) : 'client';
+      const validMessage = typeof message === 'string' && message ? message.slice(0, 1000) : 'Client event';
+      const validMeta = meta && typeof meta === 'object' ? meta : undefined;
+      eventLog.record(validLevel, validScope, validMessage, validMeta);
+      res.status(200).json({ status: 'ok' });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to record event' });
+    }
+  });
+
   // 6. Client assets handling (Vite middleware in dev, static dist in production)
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
@@ -924,13 +963,6 @@ export async function startServer(portOverride?: number) {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
-
-  // Diagnostics: recent server events. Auth = council key (for agents like Hermes)
-  // or the owner token (your signed-in browser). See HANDBOOK § Where the logs live.
-  app.get('/api/diagnostics/events', requireOwnerGate, requireRateLimit, (req, res) => {
-    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
-    res.json({ events: eventLog.recent(limit), generatedAt: new Date().toISOString() });
-  });
 
   // Structured Error Middleware
   app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

@@ -1,4 +1,4 @@
-import { X, Cpu, Palette, Bell, User, Zap, BookmarkPlus, BookOpen } from 'lucide-react';
+import { X, Cpu, Palette, Bell, User, Zap, BookmarkPlus, BookOpen, Activity } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { authenticatedFetch } from '../lib/apiClient';
 import { Persona, NotificationPreferences } from '../types';
@@ -15,11 +15,12 @@ import { SettingsOracleBibleTab } from './settings/SettingsOracleBibleTab';
 import { SettingsThemeTab } from './settings/SettingsThemeTab';
 import { SettingsAccountTab } from './settings/SettingsAccountTab';
 import { SettingsNotificationsTab } from './settings/SettingsNotificationsTab';
+import { SettingsDiagnosticsTab } from './settings/SettingsDiagnosticsTab';
 
 interface SettingsPanelProps {
   isOpen: boolean;
   onClose: () => void;
-  initialTab?: 'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account';
+  initialTab?: 'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account' | 'diagnostics';
   personas: Persona[];
   setPersonas: (p: Persona[]) => void;
   synthesizer: Persona;
@@ -140,7 +141,7 @@ export function SettingsPanel({
   enableWeightTuning = false,
   setEnableWeightTuning,
 }: SettingsPanelProps) {
-  const [activeTab, setActiveTab] = useState<'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account'>(
+  const [activeTab, setActiveTab] = useState<'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account' | 'diagnostics'>(
     initialTab || 'personas'
   );
   const [usageData, setUsageData] = useState<{ usage: number; limit: number | null; remaining?: number | null } | null>(null);
@@ -240,6 +241,7 @@ export function SettingsPanel({
     { id: 'oracle_bible', label: 'Oracle Memory', icon: BookOpen },
     { id: 'theme', label: 'Theme', icon: Palette },
     { id: 'notifications', label: 'Alerts', icon: Bell },
+    { id: 'diagnostics', label: 'Diagnostics', icon: Activity },
     { id: 'account', label: 'Account', icon: User },
   ] as const;
 
@@ -370,6 +372,10 @@ export function SettingsPanel({
               notificationPreferences={notificationPreferences}
               onUpdateNotifications={onUpdateNotifications}
             />
+          )}
+
+          {activeTab === 'diagnostics' && (
+            <SettingsDiagnosticsTab />
           )}
 
           {activeTab === 'account' && (

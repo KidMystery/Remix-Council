@@ -16,7 +16,7 @@ export const ConsensusVisualizer: React.FC<ConsensusVisualizerProps> = ({
   // If no metric is provided, render nothing.
   if (!metric) return null;
 
-  const score = Math.min(100, Math.max(0, metric.agreementScore || 85));
+  const score = Math.min(100, Math.max(0, metric.agreementScore ?? 50));
   const delta = metric.iterationDelta ?? 0;
 
   // Determine score tone

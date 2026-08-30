@@ -632,7 +632,8 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
         synthCost = dollarGovernor.current.recordUsage(
           usage.promptTokens || 0,
           usage.completionTokens || 0,
-          { promptUSDPer1M: synthRates.prompt, completionUSDPer1M: synthRates.completion }
+          { promptUSDPer1M: synthRates.prompt, completionUSDPer1M: synthRates.completion },
+          res.grounding?.searchCost || 0
         );
       }
 
@@ -926,7 +927,8 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
             const costThisCall = dollarGovernor.current.recordUsage(
               res.usage.promptTokens || 0,
               res.usage.completionTokens || 0,
-              { promptUSDPer1M: rates.prompt, completionUSDPer1M: rates.completion }
+              { promptUSDPer1M: rates.prompt, completionUSDPer1M: rates.completion },
+              res.grounding?.searchCost || 0
             );
             res.cost = costThisCall;
           }
@@ -1162,7 +1164,8 @@ If the question contains code, documents, or attached files, treat them as avail
             const costThisCall = dollarGovernor.current.recordUsage(
               res.usage.promptTokens || 0,
               res.usage.completionTokens || 0,
-              { promptUSDPer1M: rates.prompt, completionUSDPer1M: rates.completion }
+              { promptUSDPer1M: rates.prompt, completionUSDPer1M: rates.completion },
+              res.grounding?.searchCost || 0
             );
             res.cost = costThisCall;
           }

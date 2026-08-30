@@ -2,6 +2,8 @@ import type { GroundingData } from '../types';
 import { parseWebSearchAnnotations } from './webGrounding';
 import { getAuthHeaders } from './apiClient';
 import { refreshOwnerTokenSilently } from './drivePersistence';
+import { isTransientError, sleep } from './retryUtils';
+import { recordError, recordWarn, recordInfo } from './eventLog';
 
 export class OwnerAuthError extends Error {
   isOwnerAuthError = true;
@@ -246,175 +248,226 @@ export async function streamOpenRouterCompletion(
 
   let grounding: GroundingData | undefined;
 
-  // Combined abort: the caller's signal (user Stop) OR our stall watchdog.
-  // A stalled upstream must surface as a visible error, never a silent hang —
-  // the reader loop below has no other way to unblock.
-  const combined = new AbortController();
-  const onOuterAbort = () => combined.abort(signal?.reason);
-  if (signal) {
-    if (signal.aborted) combined.abort(signal.reason);
-    else signal.addEventListener('abort', onOuterAbort);
-  }
-  const STALL_MS = 120_000; // server aborts upstream at 110s; this is the backstop
-  let stalled = false;
-  let stallTimer: ReturnType<typeof setTimeout> | undefined;
-  const armStallTimer = () => {
-    if (stallTimer) clearTimeout(stallTimer);
-    stallTimer = setTimeout(() => {
-      stalled = true;
-      combined.abort(new DOMException('Stream stalled', 'AbortError'));
-    }, STALL_MS);
-  };
+  const maxRetries = 2;
+  let attempt = 0;
+  let lastError: any = null;
 
-  try {
+  while (attempt <= maxRetries) {
+    // Combined abort: the caller's signal (user Stop) OR our stall watchdog.
+    const combined = new AbortController();
+    const onOuterAbort = () => combined.abort(signal?.reason);
+    if (signal) {
+      if (signal.aborted) combined.abort(signal.reason);
+      else signal.addEventListener('abort', onOuterAbort);
+    }
+    const STALL_MS = 120_000; // server aborts upstream at 110s; this is the backstop
+    let stalled = false;
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    const armStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        stalled = true;
+        combined.abort(new DOMException('Stream stalled', 'AbortError'));
+      }, STALL_MS);
+    };
+
     let attemptHeaders: Record<string, string> = {
       'Content-Type': 'application/json',
       ...getAuthHeaders(),
     };
 
-    let response = await fetch('/api/council', {
-      method: 'POST',
-      headers: attemptHeaders,
-      body: JSON.stringify(body),
-      signal: combined.signal,
-    });
-
-    if (response.status === 401) {
-      const errorData = await response.json().catch(() => ({}));
-      try {
-        await refreshOwnerTokenSilently();
-        attemptHeaders = {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        };
-        response = await fetch('/api/council', {
-          method: 'POST',
-          headers: attemptHeaders,
-          body: JSON.stringify(body),
-          signal: combined.signal,
-        });
-      } catch {
-        throw new OwnerAuthError(errorData.error || 'Sign in required (owner gate).');
-      }
-    }
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      if (errorData.costCeilingExceeded) {
-        throw new CostCeilingError(
-          errorData.error || 'Round cost ceiling reached on the server.',
-          errorData.roundCostUSD,
-          errorData.ceilingUSD
-        );
-      }
-      if (response.status === 401) {
-        throw new OwnerAuthError(errorData.error || 'Sign in required (owner gate).');
-      }
-      throw new Error(errorData.error || `HTTP ${response.status}: LLM streaming failure`);
-    }
-
-    if (!response.body) {
-      throw new Error('ReadableStream is not supported on response.');
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
     let accumulated = '';
     let buffer = '';
     let finishReason: string | undefined;
     let usage: StreamCompletionResult['usage'];
     let routedModel: string | undefined;
-
     let streamError: string | undefined;
+
     try {
-      while (true) {
-        armStallTimer();
-        const { done, value } = await reader.read();
-        if (done) break;
+      let response = await fetch('/api/council', {
+        method: 'POST',
+        headers: attemptHeaders,
+        body: JSON.stringify(body),
+        signal: combined.signal,
+      });
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data:')) continue;
-          if (trimmed === 'data: [DONE]') break;
-
-          try {
-            const json = JSON.parse(trimmed.replace(/^data:\s*/, ''));
-            // The server reports mid-stream upstream failures as an error
-            // frame — record it instead of treating the stream as complete.
-            if (json.error?.message) {
-              streamError = String(json.error.message);
-            }
-            const choice = json.choices?.[0];
-          const delta = choice?.delta?.content || '';
-          if (delta) {
-            accumulated += delta;
-            if (onToken) onToken(delta);
-          }
-          if (choice?.finish_reason) finishReason = choice.finish_reason;
-          if (typeof json.model === 'string' && json.model && json.model !== model.trim()) {
-            routedModel = json.model;
-          }
-          if (json.usage) {
-            usage = {
-              promptTokens: json.usage.prompt_tokens,
-              completionTokens: json.usage.completion_tokens,
-              totalTokens: json.usage.total_tokens,
-            };
-          }
-          if (json.annotations || json.choices?.[0]?.message?.annotations || json.tool_calls) {
-            const parsed = parseWebSearchAnnotations(json);
-            if ((parsed.sources && parsed.sources.length > 0) || (parsed.queries && parsed.queries.length > 0)) {
-              grounding = parsed;
-              if (onGrounding) onGrounding(parsed);
-            }
-          }
+      if (response.status === 401) {
+        const errorData = await response.json().catch(() => ({}));
+        try {
+          await refreshOwnerTokenSilently();
+          attemptHeaders = {
+            'Content-Type': 'application/json',
+            ...getAuthHeaders(),
+          };
+          response = await fetch('/api/council', {
+            method: 'POST',
+            headers: attemptHeaders,
+            body: JSON.stringify(body),
+            signal: combined.signal,
+          });
         } catch {
-          // Safe ignore of partial SSE frames
+          throw new OwnerAuthError(errorData.error || 'Sign in required (owner gate).');
         }
+      }
+
+      // Handle transient status codes (429 rate limit, 502/503/504 gateway error)
+      if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
+        const errorData = await response.json().catch(() => ({}));
+        const retryDelay = (attempt + 1) * 1200 + Math.random() * 400;
+        recordWarn(
+          'network',
+          `Transient HTTP ${response.status} from model stream`,
+          `Model ${model} returned ${response.status} (${errorData.error || 'Gateway/Provider failure'}). Retrying attempt ${attempt + 1}/${maxRetries} in ${Math.round(retryDelay)}ms...`,
+          { model, status: response.status, attempt, error: errorData.error },
+          model
+        );
+        attempt++;
+        await sleep(retryDelay, signal);
+        continue;
+      }
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        if (errorData.costCeilingExceeded) {
+          throw new CostCeilingError(
+            errorData.error || 'Round cost ceiling reached on the server.',
+            errorData.roundCostUSD,
+            errorData.ceilingUSD
+          );
+        }
+        if (response.status === 401) {
+          throw new OwnerAuthError(errorData.error || 'Sign in required (owner gate).');
+        }
+        throw new Error(errorData.error || `HTTP ${response.status}: LLM streaming failure`);
+      }
+
+      if (!response.body) {
+        throw new Error('ReadableStream is not supported on response.');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+
+      try {
+        while (true) {
+          armStallTimer();
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data:')) continue;
+            if (trimmed === 'data: [DONE]') break;
+
+            try {
+              const json = JSON.parse(trimmed.replace(/^data:\s*/, ''));
+              // The server reports mid-stream upstream failures as an error frame
+              if (json.error?.message) {
+                streamError = String(json.error.message);
+              }
+              const choice = json.choices?.[0];
+              const delta = choice?.delta?.content || '';
+              if (delta) {
+                accumulated += delta;
+                if (onToken) onToken(delta);
+              }
+              if (choice?.finish_reason) finishReason = choice.finish_reason;
+              if (typeof json.model === 'string' && json.model && json.model !== model.trim()) {
+                routedModel = json.model;
+              }
+              if (json.usage) {
+                usage = {
+                  promptTokens: json.usage.prompt_tokens,
+                  completionTokens: json.usage.completion_tokens,
+                  totalTokens: json.usage.total_tokens,
+                };
+              }
+              if (json.annotations || json.choices?.[0]?.message?.annotations || json.tool_calls) {
+                const parsed = parseWebSearchAnnotations(json);
+                if ((parsed.sources && parsed.sources.length > 0) || (parsed.queries && parsed.queries.length > 0)) {
+                  grounding = parsed;
+                  if (onGrounding) onGrounding(parsed);
+                }
+              }
+            } catch {
+              // Safe ignore of partial SSE frames
+            }
+            if (streamError) break;
+          }
           if (streamError) break;
         }
-        if (streamError) break;
+      } finally {
+        if (stallTimer) clearTimeout(stallTimer);
+        try {
+          await reader.cancel();
+        } catch {
+          // already closed
+        }
       }
+
+      if (streamError) {
+        throw new Error(streamError);
+      }
+
+      return {
+        content: accumulated,
+        actualModel: routedModel || model.trim(),
+        usage,
+        grounding,
+        finishReason,
+      };
+    } catch (error: any) {
+      if (stallTimer) clearTimeout(stallTimer);
+      if (signal) signal.removeEventListener('abort', onOuterAbort);
+
+      lastError = error;
+
+      if (stalled) {
+        lastError = new Error(
+          `No data from the model for ${Math.round(STALL_MS / 1000)}s — the stream stalled. Try again or switch models.`
+        );
+      }
+
+      // If user aborted or error is not retryable or we've already output tokens, don't auto-retry
+      if (error.name === 'AbortError' || (signal && signal.aborted) || error instanceof OwnerAuthError || (error as CostCeilingError).costCeilingExceeded) {
+        recordError('network', 'Stream stopped / auth required', lastError, { model }, model);
+        throw lastError;
+      }
+
+      // If tokens already started streaming to user, avoid duplicating chunks by re-fetching from zero
+      if (accumulated.length > 0) {
+        recordError('network', 'Stream interrupted mid-response', lastError, { model, bytesReceived: accumulated.length }, model);
+        throw lastError;
+      }
+
+      // Check if transient network / connection error and retries remain
+      if (attempt < maxRetries && (isTransientError(error) || error instanceof TypeError || stalled)) {
+        attempt++;
+        const retryDelay = attempt * 1200 + Math.random() * 400;
+        recordWarn(
+          'network',
+          `Network connection dropped, retrying...`,
+          `Connection to model ${model} failed (${lastError.message}). Retrying attempt ${attempt}/${maxRetries} in ${Math.round(retryDelay)}ms...`,
+          { model, attempt, error: lastError.message },
+          model
+        );
+        await sleep(retryDelay, signal);
+        continue;
+      }
+
+      recordError('network', 'Model Stream Failed', lastError, { model, attempts: attempt + 1 }, model);
+      throw lastError;
     } finally {
       if (stallTimer) clearTimeout(stallTimer);
-      try {
-        // cancel() returns a promise; on an errored/aborted stream it REJECTS.
-        // Await + swallow so the rejection can't surface as unhandled after
-        // the caller has already received the visible "stalled" error.
-        await reader.cancel();
-      } catch {
-        // already closed
-      }
+      if (signal) signal.removeEventListener('abort', onOuterAbort);
     }
-
-    if (streamError) {
-      throw new Error(streamError);
-    }
-
-    return {
-      content: accumulated,
-      actualModel: routedModel || model.trim(),
-      usage,
-      grounding,
-      finishReason,
-    };
-  } catch (error: any) {
-    // A watchdog abort (no bytes for STALL_MS) must surface as a visible
-    // error — not an AbortError, which callers treat as a user stop.
-    if (stalled) {
-      throw new Error(
-        `No data from the model for ${Math.round(STALL_MS / 1000)}s — the stream stalled. Try again or switch models.`
-      );
-    }
-    throw error;
-  } finally {
-    if (stallTimer) clearTimeout(stallTimer);
-    if (signal) signal.removeEventListener('abort', onOuterAbort);
   }
+
+  throw lastError || new Error(`Failed completion streaming after ${maxRetries + 1} attempts.`);
 }
 
 export async function fetchCouncilModels(): Promise<any[]> {

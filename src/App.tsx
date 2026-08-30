@@ -48,11 +48,11 @@ export default function App() {
   const [view, setView] = useState<AppViewMode>('chamber');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<
-    'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account'
+    'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account' | 'diagnostics'
   >('personas');
 
   const handleOpenSettingsTab = (
-    tab: 'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account' = 'personas'
+    tab: 'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account' | 'diagnostics' = 'personas'
   ) => {
     setSettingsInitialTab(tab);
     setIsSettingsOpen(true);

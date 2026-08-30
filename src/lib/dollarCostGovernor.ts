@@ -56,10 +56,11 @@ export class DollarCostGovernor {
    * Accumulates exact dollar spend from actual token usage reported by provider.
    * 0 / non-finite = unlimited — must not trip when cap is 0 (matches Settings slider).
    */
-  public recordUsage(promptTokens: number, completionTokens: number, pricing: { promptUSDPer1M: number; completionUSDPer1M: number }): number {
+  public recordUsage(promptTokens: number, completionTokens: number, pricing: { promptUSDPer1M: number; completionUSDPer1M: number }, searchCostUSD: number = 0): number {
     const callCostUSD =
       (promptTokens / 1_000_000) * pricing.promptUSDPer1M +
-      (completionTokens / 1_000_000) * pricing.completionUSDPer1M;
+      (completionTokens / 1_000_000) * pricing.completionUSDPer1M +
+      searchCostUSD;
 
     this.accruedSpendUSD += callCostUSD;
 

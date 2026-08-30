@@ -17,9 +17,15 @@ export const MAX_TOMBSTONES = 200;
 
 export function mergeTombstones(a: Tombstone[] = [], b: Tombstone[] = []): Tombstone[] {
   const latest = new Map<string, number>();
+  const now = Date.now();
   for (const t of [...a, ...b]) {
     if (!t || typeof t.id !== 'string' || !t.id.trim()) continue;
-    const at = typeof t.deletedAt === 'number' && Number.isFinite(t.deletedAt) ? t.deletedAt : 0;
+    let at = typeof t.deletedAt === 'number' && Number.isFinite(t.deletedAt) ? t.deletedAt : 0;
+    // Clock-skew defense for thread undelete: never trust a future tombstone
+    // from a device with a fast clock, as it would block local undeletes.
+    if (at > now) {
+      at = now;
+    }
     const prev = latest.get(t.id) || 0;
     if (at > prev) latest.set(t.id, at);
   }

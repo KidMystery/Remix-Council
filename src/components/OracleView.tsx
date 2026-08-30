@@ -31,7 +31,9 @@ import {
   AlertCircle,
   AlertTriangle,
   RotateCcw,
+  Activity,
 } from 'lucide-react';
+import { recordError, recordWarn, recordInfo } from '../lib/eventLog';
 import {
   OracleThread,
   OracleBible,
@@ -86,6 +88,7 @@ import { MAX_CHAT_ATTACHMENT_CHARS, screenChatAttachments } from '../lib/chatAtt
 import { summarizeTitle, isDefaultTitle, DEFAULT_ORACLE_TITLE, oracleThreadLabel, threadSummaryLine } from '../lib/titleUtils';
 import { useSpeech } from '../hooks/useSpeech';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
+import { sanitizeDictationInput } from '../lib/speechUtils';
 import { useOpenRouterCredits } from '../hooks/useOpenRouterCredits';
 import {
   saveOracleToDrive,
@@ -129,7 +132,7 @@ export interface OracleViewProps {
   isSignedIn?: boolean;
   catalog?: RawOpenRouterModel[];
   availableModels?: { id: string; name: string }[];
-  onOpenSettings?: (tab?: 'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account') => void;
+  onOpenSettings?: (tab?: 'personas' | 'presets' | 'advanced' | 'oracle_bible' | 'theme' | 'notifications' | 'account' | 'diagnostics') => void;
   onHandoffToChamber?: (handoff: ChamberHandoff) => void;
 }
 
@@ -995,6 +998,13 @@ export const OracleView: React.FC<OracleViewProps> = ({
         }
       } else {
         const rawErr = err?.message || String(err);
+        recordError('oracle', 'Oracle Generation Error', err, {
+          model: attemptedModel,
+          threadId: latest.id,
+          mode: latest.mode,
+          webEnabled: latest.webEnabled,
+          reflectEnabled: latest.reflectEnabled,
+        }, attemptedModel);
         const errMsg: OracleMessage = {
           id: `m_${now}_err`,
           role: 'assistant',
@@ -1590,6 +1600,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
                 onSpeak={(text, id) => (speakingId === id ? stop() : speak(text, id))}
                 onRetry={handleRetryMessage}
                 onDismiss={handleDismissMessage}
+                onOpenDiagnostics={onOpenSettings ? () => onOpenSettings('diagnostics') : undefined}
               />
             ))}
 
@@ -1632,6 +1643,7 @@ function MessageBubble({
   onSpeak,
   onRetry,
   onDismiss,
+  onOpenDiagnostics,
 }: {
   message: OracleMessage;
   copiedId: string | null;
@@ -1642,6 +1654,7 @@ function MessageBubble({
   onSpeak: (text: string, id: string) => void;
   onRetry?: (id: string, fallbackModel?: string) => void;
   onDismiss?: (id: string) => void;
+  onOpenDiagnostics?: () => void;
 }) {
   const isUser = message.role === 'user';
   const speakId = `speak-${message.id}`;
@@ -1699,6 +1712,17 @@ function MessageBubble({
                   <span>Retry via OpenRouter Auto</span>
                 </button>
               </>
+            )}
+            {onOpenDiagnostics && (
+              <button
+                type="button"
+                onClick={onOpenDiagnostics}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-cyan-300 hover:text-cyan-200 transition-colors border border-slate-700/70 cursor-pointer"
+                title="Inspect in Event Log & Diagnostics"
+              >
+                <Activity size={12} className="text-cyan-400" />
+                <span>Event Log</span>
+              </button>
             )}
             <button
               type="button"
@@ -1838,8 +1862,7 @@ function OracleComposer({
   const { supported: sttSupported, isListening, error: sttError, toggle: toggleDictation } = useSpeechRecognition(
     ({ transcript }) => {
       const base = preTextRef.current;
-      const separator = base && !base.endsWith(' ') && transcript ? ' ' : '';
-      setText(base + separator + transcript);
+      setText(sanitizeDictationInput(base, transcript));
     }
   );
   const handleMic = () => {

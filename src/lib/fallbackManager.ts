@@ -1,6 +1,7 @@
 import type { Persona, RawOpenRouterModel, GroundingData } from '../types';
 import { type ExecutionPolicy, isFreeModelId } from './executionPolicy';
 import { streamOpenRouterCompletion, type StreamOpenRouterCompletionOptions } from './openrouter';
+import { modelHasVision } from './modelScoring';
 
 export interface FallbackEvent {
   id: string;
@@ -83,6 +84,7 @@ export interface BackupCandidate {
   name: string;
   org?: string;
   isFree?: boolean;
+  hasVision?: boolean;
 }
 
 interface OrderedBackupOptions {
@@ -90,6 +92,7 @@ interface OrderedBackupOptions {
   failingPersonaId: string;
   rawModels?: RawOpenRouterModel[];
   isFreeOnlyPreset?: boolean;
+  requireVision?: boolean;
 }
 
 /**
@@ -99,25 +102,25 @@ interface OrderedBackupOptions {
  * re-validated at run time against the catalog when one exists.
  */
 const DEFAULT_PAID_BACKUPS: BackupCandidate[] = [
-  { model: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', org: 'google' },
-  { model: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', org: 'openai' },
-  { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', org: 'google' },
-  { model: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat', org: 'deepseek' },
-  { model: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct', org: 'meta-llama' },
+  { model: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', org: 'google', hasVision: true },
+  { model: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', org: 'openai', hasVision: true },
+  { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', org: 'google', hasVision: true },
+  { model: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat', org: 'deepseek', hasVision: false },
+  { model: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct', org: 'meta-llama', hasVision: false },
 ];
 
 const DEFAULT_FREE_BACKUPS: BackupCandidate[] = [
-  { model: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra 550B (Free)', org: 'nvidia', isFree: true },
-  { model: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (Free)', org: 'openai', isFree: true },
-  { model: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B (Free)', org: 'google', isFree: true },
-  { model: 'qwen/qwen3-next-80b-a3b-instruct:free', name: 'Qwen3 Next 80B (Free)', org: 'qwen', isFree: true },
+  { model: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra 550B (Free)', org: 'nvidia', isFree: true, hasVision: false },
+  { model: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (Free)', org: 'openai', isFree: true, hasVision: false },
+  { model: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B (Free)', org: 'google', isFree: true, hasVision: false },
+  { model: 'qwen/qwen3-next-80b-a3b-instruct:free', name: 'Qwen3 Next 80B (Free)', org: 'qwen', isFree: true, hasVision: false },
   // Last-resort router: OpenRouter picks a live free model for you.
-  { model: 'openrouter/free', name: 'Free Models Router', org: 'openrouter', isFree: true },
+  { model: 'openrouter/free', name: 'Free Models Router', org: 'openrouter', isFree: true, hasVision: true },
 ];
 
 /** Computes an ordered backup candidate list excluding failed/active models. */
 export function computeOrderedBackupList(options: OrderedBackupOptions): BackupCandidate[] {
-  const { activePersonas, failingPersonaId, rawModels, isFreeOnlyPreset = false } = options;
+  const { activePersonas, failingPersonaId, rawModels, isFreeOnlyPreset = false, requireVision = false } = options;
 
   const excluded = new Set<string>();
   const otherOrgs = new Set<string>();
@@ -141,6 +144,7 @@ export function computeOrderedBackupList(options: OrderedBackupOptions): BackupC
   if (rawModels && Array.isArray(rawModels) && rawModels.length > 0 && rawModels.some((m) => m?.id)) {
     const candidates: BackupCandidate[] = rawModels
       .filter((m) => m && m.id)
+      .filter((m) => requireVision ? modelHasVision(m) : true)
       .map((m) => {
         const isFree = isFreeModelId(m.id, rawModels);
         return {
@@ -162,6 +166,7 @@ export function computeOrderedBackupList(options: OrderedBackupOptions): BackupC
   // Hardcoded default pool fallback.
   const defaults = (isFreeOnly ? DEFAULT_FREE_BACKUPS : DEFAULT_PAID_BACKUPS)
     .filter((c) => !excluded.has(c.model.trim().toLowerCase()))
+    .filter((c) => requireVision ? c.hasVision : true)
     .sort((a, b) => rank(a) - rank(b));
   const unusedDefaults = defaults.filter((c) => rank(c) === 0);
   return unusedDefaults.length > 0 ? unusedDefaults : defaults;
@@ -209,6 +214,10 @@ export async function streamPersonaWithFallback(
 ): Promise<StreamPersonaWithFallbackResult> {
   const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding, disableFallback, roundKey, costCeilingUSD, plugins } = options;
 
+  const requireVision = messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((c: any) => c.type === 'image_url')
+  );
+
   const isFreeOnlyPreset = policy.budget === 'free';
   const originalModel = persona.model;
 
@@ -218,6 +227,7 @@ export async function streamPersonaWithFallback(
   // forbid paid upgrades; free→free swaps are always allowed.
   let startModel = originalModel;
   let policySubstituted = false;
+
   // Strict no-fallback mode: pin to the configured model and surface raw errors.
   if (disableFallback) {
     const strictRes = await streamOpenRouterCompletion({
@@ -238,12 +248,14 @@ export async function streamPersonaWithFallback(
     });
     return { ...strictRes, actualModel: strictRes.actualModel || originalModel, fallbackOccurred: false };
   }
+
   if (isFreeOnlyPreset && !isFreeModelId(originalModel, rawModels)) {
     const freeCandidates = computeOrderedBackupList({
       activePersonas: [persona],
       failingPersonaId: persona.id,
       rawModels,
       isFreeOnlyPreset: true,
+      requireVision,
     });
     const replacement = freeCandidates[0]?.model;
     if (!replacement) {
@@ -279,6 +291,7 @@ export async function streamPersonaWithFallback(
         failingPersonaId: persona.id,
         rawModels,
         isFreeOnlyPreset,
+        requireVision,
       })
     : [];
 

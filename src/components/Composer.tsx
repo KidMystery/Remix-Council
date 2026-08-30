@@ -17,6 +17,7 @@ import { ingestFile } from '../lib/evidenceIngest';
 import { collectRunBlockers } from '../lib/evidence';
 import { EvidenceDocket } from './EvidenceDocket';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
+import { sanitizeDictationInput } from '../lib/speechUtils';
 
 export interface ComposerProps {
   onSend: (query: string, attachedFiles: AttachedFile[], isFollowUp: boolean, evidence: EvidenceRecord[]) => void;
@@ -54,8 +55,7 @@ export const Composer: React.FC<ComposerProps> = ({
   const { supported: sttSupported, isListening, error: sttError, toggle: toggleDictation } = useSpeechRecognition(
     ({ transcript }) => {
       const base = preQueryRef.current;
-      const separator = base && !base.endsWith(' ') && transcript ? ' ' : '';
-      setQuery(base + separator + transcript);
+      setQuery(sanitizeDictationInput(base, transcript));
     }
   );
   const handleMic = () => {
