@@ -35,6 +35,14 @@ export const CURRENT_GEN_POOL: readonly CurrentGenModel[] = [
 export const CURRENT_GEN_POOL_IDS: readonly string[] = CURRENT_GEN_POOL.map((m) => m.id);
 
 /** 6-org auto-coding preset (no experimental seats). */
+/** Verified-live 4-org council per mission spec (anthropic/openai/google/deepseek). */
+export const NEXUS_MODEL_COUNCIL = [
+  'anthropic/claude-sonnet-4.5',
+  'openai/gpt-5.1-codex-max',
+  'google/gemini-2.5-pro',
+  'deepseek/deepseek-v3.2',
+] as const;
+
 export const AUTO_CODING_COUNCIL = [
   'anthropic/claude-opus-5-fast',
   'openai/gpt-5.6-luna-pro',
