@@ -16,6 +16,7 @@ import {
   type AgentJob,
 } from './src/server/agentLoop';
 import { createOracleServerStore } from './src/server/oracleServerStore';
+import { createNexusMissionStore } from './src/server/nexusMissions';
 
 // Works under both ESM (tsx dev) and the CJS production bundle (esbuild).
 const __filename =
@@ -1091,6 +1092,52 @@ export async function startServer(portOverride?: number) {
     } catch (err: any) {
       return res.status(400).json({ error: err?.message || 'Sync failed.' });
     }
+  });
+
+  // 5c. Nexus missions API (Phase 3) — server-side CSV upload + the
+  // pause/answer loop, wrapped around the existing agent loop. Gated like
+  // every other money route.
+  const nexusMissions = createNexusMissionStore(agentRunner, agentDataDir);
+
+  app.post('/api/nexus/missions', requireRateLimit, requireOwnerGate, (req, res) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const created = nexusMissions.create({ goal: body.goal, csv: body.csv, context: body.context });
+    if ('error' in created) return res.status(400).json({ error: created.error });
+    return res.status(201).json({ data: { missionId: created.id, status: 'running' } });
+  });
+
+  app.get('/api/nexus/missions', requireOwnerGate, requireRateLimit, (_req, res) => {
+    return res.json({ data: nexusMissions.list() });
+  });
+
+  app.get('/api/nexus/missions/:id', requireOwnerGate, requireRateLimit, (req, res) => {
+    const view = nexusMissions.get(String(req.params.id || ''));
+    if (!view) return res.status(404).json({ error: 'Nexus mission not found.' });
+    return res.json({ data: view });
+  });
+
+  app.post('/api/nexus/missions/:id/answers', requireOwnerGate, requireRateLimit, (req, res) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const result = nexusMissions.answer(String(req.params.id || ''), body.answers);
+    if (!result) return res.status(404).json({ error: 'Nexus mission not found.' });
+    if (!('id' in result)) {
+      const notAcceptable = /only accepted while/.test(result.error);
+      return res.status(notAcceptable ? 409 : 400).json({ error: result.error });
+    }
+    return res.json({ data: result });
+  });
+
+  app.post('/api/nexus/missions/:id/pause', requireOwnerGate, requireRateLimit, (req, res) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const view = nexusMissions.pause(String(req.params.id || ''), body.pendingQuestions);
+    if (!view) return res.status(404).json({ error: 'Nexus mission not found.' });
+    return res.json({ data: view });
+  });
+
+  app.post('/api/nexus/missions/:id/resume', requireOwnerGate, requireRateLimit, (req, res) => {
+    const view = nexusMissions.resume(String(req.params.id || ''));
+    if (!view) return res.status(404).json({ error: 'Nexus mission not found (or not resumable).' });
+    return res.json({ data: view });
   });
 
   // 6. Client assets handling (Vite middleware in dev, static dist in production)
