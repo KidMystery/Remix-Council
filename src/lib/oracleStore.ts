@@ -31,6 +31,8 @@ export interface OracleMessage {
   files?: OracleTextFile[];
   timestamp: number;
   model?: string;
+  /** Which actor appended this entry ("web" UI or an agent via x-agent-name). */
+  agent?: string;
   error?: boolean;
   /** Which rotating voice produced this reply (when voice rotation is on). */
   voice?: { id: string; name: string; avatar: string };

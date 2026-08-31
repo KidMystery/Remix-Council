@@ -80,7 +80,7 @@ describe('Nexus missions API (Phase 3)', () => {
     });
 
   it('create with CSV → 201 mission created, then state is complete with CSV metadata', async () => {
-    const port = await boot(4604);
+    const port = await boot(4624);
     const res = await call(port, 'POST', '/api/nexus/missions', { goal: 'Analyze the roster', csv: CSV });
     expect(res.status).toBe(201);
     const { data: created } = await res.json();
@@ -96,7 +96,7 @@ describe('Nexus missions API (Phase 3)', () => {
   });
 
   it('answers resume a paused mission (pause → awaiting_approval → answers → running/complete)', async () => {
-    const port = await boot(4605);
+    const port = await boot(4625);
     const { data: created } = (
       await (await call(port, 'POST', '/api/nexus/missions', { goal: 'Plan the launch', csv: CSV })).json()
     );
@@ -118,16 +118,16 @@ describe('Nexus missions API (Phase 3)', () => {
   });
 
   it('auth: bad key → 401, unconfigured key → 503 (fail closed)', async () => {
-    const port = await boot(4606);
+    const port = await boot(4626);
     expect((await call(port, 'POST', '/api/nexus/missions', { goal: 'g' }, 'wrong-key')).status).toBe(401);
 
     delete process.env.COUNCIL_ACCESS_KEY;
-    const port2 = await boot(4607);
+    const port2 = await boot(4627);
     expect((await call(port2, 'POST', '/api/nexus/missions', { goal: 'g' })).status).toBe(503);
   });
 
   it('bad CSV → 400 with a clear message', async () => {
-    const port = await boot(4608);
+    const port = await boot(4628);
     const res = await call(port, 'POST', '/api/nexus/missions', { goal: 'g', csv: '   \n \r\n' });
     expect(res.status).toBe(400);
     const body = await res.json();
@@ -135,14 +135,14 @@ describe('Nexus missions API (Phase 3)', () => {
   });
 
   it('unknown mission id → 404', async () => {
-    const port = await boot(4609);
+    const port = await boot(4629);
     expect((await call(port, 'GET', '/api/nexus/missions/nexus_nope')).status).toBe(404);
     expect((await call(port, 'POST', '/api/nexus/missions/nexus_nope/pause', {})).status).toBe(404);
     expect((await call(port, 'POST', '/api/nexus/missions/nexus_nope/answers', { answers: {} })).status).toBe(404);
   });
 
   it('list returns created missions', async () => {
-    const port = await boot(4610);
+    const port = await boot(4630);
     await call(port, 'POST', '/api/nexus/missions', { goal: 'Mission one' });
     const res = await call(port, 'GET', '/api/nexus/missions');
     expect(res.status).toBe(200);
