@@ -49,3 +49,9 @@ Every completed action, newest session block first. Format: date — what — wh
   Manager popup. Railway deploys only after that push. All local state is
   verified green (tsc 0 errors, 421/421 tests) — the push is the only step
   left.
+
+## Phase 4 — "the return wire" (Aug 31, 2026)
+
+- **Agent identity:** optional `x-agent-name` header on gated endpoints (metadata only, never auth; default `"web"`). Stored on nexus missions (`agent` field) and oracle entries (`OracleMessage.agent`), included in webhook payloads.
+- **Webhook notifier** (`src/server/webhookNotifier.ts`): when `HERMES_WEBHOOK_URL` is set, lifecycle events POST out fire-and-forget — 5s timeout, failures logged to diagnostics events, never thrown. Unset = fully disabled, zero behavior change. Events: `mission_completed` / `mission_paused` / `mission_failed` (fired on derived status transitions, deduped per mission+status), `oracle_entry_appended`, and `obligation_flagged` (schema reserved; fires on the dead-simple pattern: entry starts with `obligation:` or contains `TODO:`; optional `due:`/`action:` hints lifted into the payload).
+- **Tests:** `src/server/__tests__/webhookNotifier.test.ts` (mock HTTP endpoint: happy path, timeout swallowed, disabled-when-unset, obligation detection) + agent-identity persistence tests.
