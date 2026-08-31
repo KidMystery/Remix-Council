@@ -37,3 +37,15 @@ Every completed action, newest session block first. Format: date — what — wh
     between passes, and carries `previousSynthesis`. No change.
 - **Verification:** after docs edits, `npx tsc --noEmit` → 0 errors;
   `npm test` → 421/421. Docs-only change; no app behavior touched.
+- **Push to origin BLOCKED (honest report)** — local `main` is 4 commits ahead
+  of `origin/main` (provider-error work `08ce362`/`10cde00` + docs merge
+  `71f650a`) and branch `docs/truth-pass` exists locally. `git push` fails:
+  this machine has NO stored GitHub credentials (no GCM entry, no PAT, no gh
+  CLI; `git push` hangs on a credential prompt that cannot appear in an
+  agent shell). Fetch works only because the repo is public. **Morning
+  action for the operator:** in any normal terminal run
+  `cd C:/Users/kda11/Projects/Remix-Council && git push origin main --tags`
+  and `git push origin docs/truth-pass`, sign in once in the Git Credential
+  Manager popup. Railway deploys only after that push. All local state is
+  verified green (tsc 0 errors, 421/421 tests) — the push is the only step
+  left.
