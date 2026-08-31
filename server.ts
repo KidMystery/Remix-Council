@@ -1118,11 +1118,18 @@ export async function startServer(portOverride?: number) {
   const webhookNotifier = createWebhookNotifier(process.env.HERMES_WEBHOOK_URL, {
     log: (message, meta) => eventLog.record('warn', 'webhook', message, meta),
   });
-  const nexusMissions = createNexusMissionStore(agentRunner, agentDataDir, webhookNotifier);
+  const nexusMissions = createNexusMissionStore(agentRunner, agentDataDir, webhookNotifier, () => cachedCatalog || []);
 
   app.post('/api/nexus/missions', requireRateLimit, requireOwnerGate, (req, res) => {
     const body = (req.body || {}) as Record<string, unknown>;
-    const created = nexusMissions.create({ goal: body.goal, csv: body.csv, context: body.context, agent: res.locals.agent });
+    const created = nexusMissions.create({
+      goal: body.goal,
+      csv: body.csv,
+      context: body.context,
+      agent: res.locals.agent,
+      models: body.models,
+      taskType: body.taskType,
+    });
     if ('error' in created) return res.status(400).json({ error: created.error });
     return res.status(201).json({ data: { missionId: created.id, status: 'running' } });
   });
