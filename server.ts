@@ -361,6 +361,16 @@ export async function startServer(portOverride?: number) {
     res: express.Response,
     next: express.NextFunction
   ) => {
+    // HARDENING (Hermes bridge, Aug 2026): when NO council key is configured,
+    // every gated endpoint fails closed with 503. The old dev-mode fallback
+    // waved requests through unauthenticated — an open door on deployments
+    // that simply forgot to set COUNCIL_ACCESS_KEY/SECRET.
+    if (!COUNCIL_ACCESS_KEY) {
+      eventLog.record('warn', 'auth', 'Owner gate: server auth not configured — 503.', { path: req.path });
+      return res.status(503).json({
+        error: 'Server auth not configured. Set COUNCIL_ACCESS_KEY (or COUNCIL_ACCESS_SECRET) to enable gated endpoints.',
+      });
+    }
     const clientKey = req.header('x-council-key') || '';
     const token = req.header('x-owner-token') || '';
     const decision = decideOwnerGate({
@@ -914,6 +924,79 @@ export async function startServer(portOverride?: number) {
     // phase so a restart leaves an honest trail.
     void agentRunner.run(job);
     return res.status(202).json({ data: { id: job.id, status: job.status } });
+  });
+
+  // Hermes bridge (Aug 2026): synchronous chamber deliberation for agent
+  // callers. Runs the existing agent loop in 'chamber' mode and awaits the
+  // full transcript (120s ceiling) — browser /api/agent flows are untouched.
+  app.post('/api/council/deliberate', requireRateLimit, requireOwnerGate, async (req, res) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const participants = Array.isArray(body.participants)
+      ? (body.participants as unknown[]).filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+      : [];
+    if (body.participants !== undefined && !Array.isArray(body.participants)) {
+      return res.status(400).json({ error: 'participants must be an array of strings.' });
+    }
+    const context =
+      typeof body.context === 'string' && body.context.trim()
+        ? participants.length > 0
+          ? `${body.context}\n\nParticipants: ${participants.join(', ')}`
+          : body.context
+        : participants.length > 0
+          ? `Participants: ${participants.join(', ')}`
+          : undefined;
+    const spec = sanitizeAgentSpec({
+      goal: body.question,
+      mode: 'chamber',
+      context,
+      maxDeliberationPasses: body.rounds ?? body.maxPasses,
+    });
+    if ('error' in spec) {
+      return res.status(400).json({ error: spec.error });
+    }
+    const job: AgentJob = {
+      id: newAgentJobId(),
+      spec,
+      status: 'planning',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      plan: null,
+      research: [],
+      readings: [],
+      passes: [],
+      verdict: '',
+      citations: [],
+      usageUSD: 0,
+      progress: { phase: 'planning', detail: 'Sync deliberation accepted.' },
+    };
+    const timeoutMs = 120_000;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      agentRunner.cancel(job.id);
+    }, timeoutMs);
+    timer.unref?.();
+    try {
+      const result = await agentRunner.run(job);
+      if (timedOut || (!result.succeeded && job.status !== 'done')) {
+        return res.status(504).json({
+          error: timedOut ? `Deliberation timed out after ${timeoutMs / 1000}s.` : job.error || 'Deliberation failed.',
+          jobId: job.id,
+        });
+      }
+      return res.json({
+        jobId: job.id,
+        transcript: result.job.passes,
+        consensus: result.job.verdict,
+        citations: result.job.citations,
+        confidence: result.job.confidence,
+        usageUSD: Number(result.job.usageUSD.toFixed(6)),
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Deliberation failed.' });
+    } finally {
+      clearTimeout(timer);
+    }
   });
 
   app.get('/api/agent/jobs', requireOwnerGate, requireRateLimit, (_req, res) => {
