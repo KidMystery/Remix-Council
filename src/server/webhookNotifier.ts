@@ -101,8 +101,8 @@ export function detectObligation(text: string): boolean {
 
 /** Extracts optional due:/action: hints from an obligation text (best-effort). */
 export function parseObligationHints(text: string): { due?: string; action?: string } {
-  const due = /(?:^|\s)due:\s*([^\n]{1,120})/i.exec(text)?.[1]?.trim();
-  const action = /(?:^|\s)action:\s*([^\n]{1,200})/i.exec(text)?.[1]?.trim();
+  const due = /(?:^|\s)due:\s*([^\n]*?)(?=\s+action:|$)/i.exec(text)?.[1]?.trim();
+  const action = /(?:^|\s)action:\s*([^\n]+)/i.exec(text)?.[1]?.trim();
   return {
     ...(due ? { due } : {}),
     ...(action ? { action } : {}),
