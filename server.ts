@@ -15,6 +15,7 @@ import {
   DEFAULT_MAX_JOB_COST_USD,
   type AgentJob,
 } from './src/server/agentLoop';
+import { createOracleServerStore } from './src/server/oracleServerStore';
 
 // Works under both ESM (tsx dev) and the CJS production bundle (esbuild).
 const __filename =
@@ -1034,6 +1035,61 @@ export async function startServer(portOverride?: number) {
       res.status(200).json({ status: 'ok' });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to record event' });
+    }
+  });
+
+  // 5b. Oracle server persistence (Phase 2) — the server is the source of
+  // truth; the browser syncs against it. Data dir injectable for tests via
+  // ORACLE_DATA_DIR (defaults to <cwd>/data/oracle).
+  const oracleStore = createOracleServerStore(
+    process.env.ORACLE_DATA_DIR || path.join(process.cwd(), 'data', 'oracle')
+  );
+
+  app.get('/api/oracle/bible', requireOwnerGate, requireRateLimit, (_req, res) => {
+    return res.json({ data: oracleStore.getBible() });
+  });
+
+  app.get('/api/oracle/threads', requireOwnerGate, requireRateLimit, (_req, res) => {
+    return res.json({ data: oracleStore.getThreads() });
+  });
+
+  app.get('/api/oracle/threads/:id', requireOwnerGate, requireRateLimit, (req, res) => {
+    const thread = oracleStore.getThread(String(req.params.id || ''));
+    if (!thread) return res.status(404).json({ error: 'Oracle thread not found.' });
+    return res.json({ data: thread });
+  });
+
+  app.post('/api/oracle/entries', requireOwnerGate, requireRateLimit, (req, res) => {
+    const body = req.body || {};
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!text) return res.status(400).json({ error: 'text is required.' });
+    if (body.threadId !== undefined && typeof body.threadId !== 'string') {
+      return res.status(400).json({ error: 'threadId must be a string.' });
+    }
+    if (body.ts !== undefined && (typeof body.ts !== 'number' || !Number.isFinite(body.ts))) {
+      return res.status(400).json({ error: 'ts must be a number.' });
+    }
+    const thread = oracleStore.appendEntry({
+      threadId: body.threadId,
+      text,
+      ts: body.ts,
+    });
+    return res.status(201).json({ data: thread });
+  });
+
+  app.post('/api/oracle/sync', requireOwnerGate, requireRateLimit, (req, res) => {
+    const body = req.body || {};
+    if (!Array.isArray(body.threads)) {
+      return res.status(400).json({ error: 'threads array is required.' });
+    }
+    if (body.bible !== undefined && body.bible !== null && typeof body.bible !== 'object') {
+      return res.status(400).json({ error: 'bible must be an object.' });
+    }
+    try {
+      const merged = oracleStore.sync({ threads: body.threads, bible: body.bible ?? null });
+      return res.json({ data: merged });
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'Sync failed.' });
     }
   });
 
