@@ -34,14 +34,19 @@ export const CURRENT_GEN_POOL: readonly CurrentGenModel[] = [
 /** Convenience: just the slugs, pool order preserved. */
 export const CURRENT_GEN_POOL_IDS: readonly string[] = CURRENT_GEN_POOL.map((m) => m.id);
 
+/** 6-org auto-coding preset (no experimental seats). */
+export const AUTO_CODING_COUNCIL = [
+  'anthropic/claude-opus-5-fast',
+  'openai/gpt-5.6-luna-pro',
+  'google/gemini-3.7-flash',
+  'deepseek/deepseek-v4-pro-0813',
+  'x-ai/grok-4.6',
+  'qwen/qwen3.8-max',
+] as const;
+
 /** Named presets accepted in the mission `models` field. */
 export const MODEL_PRESETS: Record<string, readonly string[]> = {
-  'auto-coding': [
-    'anthropic/claude-sonnet-4.5',
-    'openai/gpt-5.1-codex-max',
-    'google/gemini-2.5-pro',
-    'deepseek/deepseek-v3.2',
-  ],
+  'auto-coding': AUTO_CODING_COUNCIL,
 };
 
 export const MAX_MISSION_MODELS = 8;
