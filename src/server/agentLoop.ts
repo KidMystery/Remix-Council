@@ -61,6 +61,15 @@ export interface AgentJobSpec {
    */
   exhibits?: AgentExhibit[];
   model?: string;
+  /**
+   * Multi-model council: when set (1-8 verified slugs), the deliberation
+   * phase runs one pass per model (sequential, same context) followed by a
+   * chair/synthesis pass on the first model. When unset, the loop runs
+   * maxDeliberationPasses on the single model exactly as before.
+   */
+  models?: string[];
+  /** Allocator task domain hint (e.g. "code") — accepted for bookkeeping. */
+  taskType?: string;
   budget?: 'free' | 'cheap' | 'quality';
   maxResearchQueries?: number;
   maxDeliberationPasses?: number;
@@ -279,9 +288,9 @@ export class AgentLoopRunner {
   private async complete(
     job: AgentJob,
     messages: Array<{ role: string; content: string }>,
-    opts: { tools?: boolean; temperature?: number; maxTokens?: number } = {}
+    opts: { tools?: boolean; temperature?: number; maxTokens?: number; model?: string } = {}
   ): Promise<{ content: string; citations: AgentSource[]; usageUSD: number }> {
-    const model = job.spec.model || this.deps.defaultModel();
+    const model = opts.model || job.spec.model || this.deps.defaultModel();
     const key = this.deps.openRouterKey();
     if (!key) throw new Error('OPENROUTER_API_KEY is not configured on the server.');
 
@@ -386,6 +395,26 @@ export class AgentLoopRunner {
       model = fallback?.id || model;
     }
     job.spec.model = model;
+
+    // Multi-model council: liveness-guard every requested seat. A model that
+    // has vanished from the catalog is substituted the same way the single
+    // model is (never silently seated dead).
+    let council: string[] = [];
+    if (Array.isArray(spec.models) && spec.models.length > 0) {
+      council = spec.models.map((requested) => {
+        if (
+          catalog.length === 0 ||
+          catalog.some((m: any) => String(m?.id || '').toLowerCase() === requested.toLowerCase())
+        ) {
+          return requested;
+        }
+        const fallback = free
+          ? catalog.find((m: any) => Number(m?.pricing?.prompt) === 0 && Number(m?.pricing?.completion) === 0)
+          : catalog.find((m: any) => String(m?.id || '').startsWith('google/'));
+        return fallback?.id || requested;
+      });
+      job.spec.models = council;
+    }
 
     // ---- 1. Planning ----
     this.setPhase(job, 'planning', spec.mode === 'nexus' ? 'Inventorying exhibits and drafting a plan...' : 'Assessing the question and drafting a plan...');
@@ -569,9 +598,24 @@ export class AgentLoopRunner {
       researchContext.length > 0 ? `\n\n[Research findings with sources]\n${researchContext.join('\n\n')}` : '';
     let previousConsensus = '';
     let previousScore: number | undefined;
-    for (let pass = 0; pass < maxPasses; pass++) {
+    // Council rounds: one pass per requested model, then a chair synthesis
+    // pass on the first model. Default path: the existing falsification loop.
+    const councilRounds =
+      council.length > 1
+        ? [
+            ...council.map((m, i) => ({ model: m, label: `Council pass ${i + 1} · ${m}` })),
+            { model: council[0], label: `Chair synthesis · ${council[0]}` },
+          ]
+        : null;
+    const totalRounds = councilRounds ? councilRounds.length : maxPasses;
+    for (let pass = 0; pass < totalRounds; pass++) {
       if (this.cancelled.has(job.id)) return this.finishBudgetOrCancel(job);
-      this.setPhase(job, 'deliberating', `Deliberation pass ${pass + 1}/${maxPasses}`);
+      const round = councilRounds ? councilRounds[pass] : null;
+      this.setPhase(
+        job,
+        'deliberating',
+        round ? `Council pass ${pass + 1}/${totalRounds} · ${round.model}` : `Deliberation pass ${pass + 1}/${maxPasses}`
+      );
       const falsifyBlock =
         pass > 0 && previousConsensus
           ? `\n\n[Self-falsification pass — do NOT repeat the previous consensus]\nPrevious consensus (${previousScore ?? 'unknown'}% agreement):\n${previousConsensus.slice(0, 3000)}\n\n1) Hunt for factual errors, unsupported claims, missing failure modes, overconfidence.\n2) Re-derive any claim you cannot defend from the research; prefer the cited sources.\n3) Only change the verdict where you have substantive justification.\n4) State explicitly what changed versus the previous pass and why.\n5) This pass, concentrate your falsification on: ${NIGHT_SHIFT_ESCALATION[pass % NIGHT_SHIFT_ESCALATION.length]}.`
@@ -587,11 +631,11 @@ export class AgentLoopRunner {
             { role: 'system', content: system },
             {
               role: 'user',
-              content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}${researchBlock}\n${spec.mode === 'nexus' ? `Plan: ${plan.summary}\nSteps: ${plan.steps.join('; ') || 'none'}\n\nPass ${pass + 1} of ${maxPasses}.${falsifyBlock}` : `Plan: ${plan.summary}${falsifyBlock}`}`,
-            },
-          ],
-          { maxTokens: 2200 }
-        );
+              content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}${researchBlock}\n${spec.mode === 'nexus' ? `Plan: ${plan.summary}\nSteps: ${plan.steps.join('; ') || 'none'}\n\nPass ${pass + 1} of ${totalRounds}.${falsifyBlock}` : `Plan: ${plan.summary}${falsifyBlock}`}`,
+                },
+              ],
+              { maxTokens: 2200, ...(round ? { model: round.model } : {}) }
+              );
         this.spend(job, res.usageUSD);
         if (this.overBudget(job)) return this.finishBudgetOrCancel(job);
         const parsed = extractJsonBlock(res.content);
@@ -599,7 +643,11 @@ export class AgentLoopRunner {
         const score = typeof parsed?.agreementScore === 'number' ? clampInt(parsed.agreementScore, 50, 0, 100) : undefined;
         job.passes.push({
           index: pass + 1,
-          label: spec.mode === 'nexus' ? `Falsification pass ${pass + 1}` : `Deliberation pass ${pass + 1}`,
+          label: round
+            ? round.label
+            : spec.mode === 'nexus'
+              ? `Falsification pass ${pass + 1}`
+              : `Deliberation pass ${pass + 1}`,
           consensus,
           agreementScore: score,
         });
@@ -608,8 +656,8 @@ export class AgentLoopRunner {
         this.persist();
 
         // Server-side pacing (Night Shift) — interruptible, survives tab close.
-        const paceMin = clampInt(spec.pacedMinutes, 0, 0, 180);
-        if (paceMin > 0 && pass < maxPasses - 1) {
+        const paceMin = councilRounds ? 0 : clampInt(spec.pacedMinutes, 0, 0, 180);
+        if (paceMin > 0 && pass < totalRounds - 1) {
           this.setPhase(job, 'deliberating', `Paced ${paceMin} min before the next falsification pass...`);
           const startedAt = (this.deps.now || Date.now)();
           while (!this.cancelled.has(job.id) && (this.deps.now || Date.now)() - startedAt < paceMin * 60_000) {
@@ -650,7 +698,7 @@ export class AgentLoopRunner {
             content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}\n\nResearch:\n${researchBlock || '(no live research — strict free budget or plan decided none was needed)'}\n\nDeliberation history:\n${job.passes.map((p) => `${p.label} (${p.agreementScore ?? 'n/a'}%): ${stripFencedJson(p.consensus).slice(0, 1500)}`).join('\n\n')}`,
           },
         ],
-        { maxTokens: 2400 }
+        { maxTokens: 2400, ...(council.length > 1 ? { model: council[0] } : {}) }
       );
       this.spend(job, finalRes.usageUSD);
       job.verdict = stripFencedJson(finalRes.content);
@@ -792,6 +840,17 @@ export function sanitizeAgentSpec(raw: any): AgentJobSpec | { error: string } {
   };
   if (typeof raw.model === 'string' && /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(:[a-zA-Z0-9_.-]+)?$/.test(raw.model)) {
     spec.model = raw.model;
+  }
+  if (Array.isArray(raw.models)) {
+    const models = raw.models.filter(
+      (m: unknown): m is string => typeof m === 'string' && /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(:[a-zA-Z0-9_.-]+)?$/.test(m.trim())
+    );
+    if (models.length > 0 && models.length <= 8 && models.length === raw.models.length) {
+      spec.models = models.map((m: string) => m.trim());
+    }
+  }
+  if (typeof raw.taskType === 'string' && raw.taskType.trim()) {
+    spec.taskType = raw.taskType.trim().slice(0, 64);
   }
   return spec;
 }
