@@ -161,6 +161,8 @@ export class NexusMissionStore {
       agent: typeof input.agent === 'string' && input.agent.trim() ? input.agent.trim().slice(0, 64) : 'web',
       context: typeof input.context === 'string' && input.context.trim() ? input.context : undefined,
       csvText,
+      ...(modelsRes.models.length > 0 ? { models: modelsRes.models } : {}),
+      ...(taskType ? { taskType } : {}),
       csvHeaders: parsed.headers,
       csvRowCount: parsed.rows.length,
       manualStatus: null,
