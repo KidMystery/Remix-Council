@@ -215,6 +215,75 @@ Oracle stays Jarvis. Chamber is the court. You are the editor.
 
 Debug: `session.handoff` on the Chamber session in DevTools. Tests in `chamberHandoff.test.ts`.
 
+## Handoff — Aug 30, 2026, overnight (docs truth pass; fixes already guarded)
+
+**Who this is for:** the next engineer (human or agent). Read the top of this
+handbook first — architecture, invariants, Drive contract, storage map — then
+this section for current state.
+
+### State of the world
+- `main` is at the **provider-error handling** merge (`10cde00`): real provider
+  errors are surfaced (status codes kept, not swallowed), retries are
+  classified (auth/quota errors are not retried blindly, transient ones are),
+  and DeepSeek slugs use `-latest` variants validated against the live catalog.
+- Verified this session: `npx tsc --noEmit` → **0 errors**; `npm test` →
+  **421 passed / 421 across 49 test files**. Do not believe older handoff
+  sections' test counts — they are historical snapshots.
+
+### Setup for a new engineer
+1. `npm ci` (lockfile is committed — keep it that way).
+2. Copy `.env.example` → `.env`. Vars, all server-side unless `VITE_`-prefixed:
+   - `OPENROUTER_API_KEY` — required, model calls through the proxy. On
+     Railway ONLY in production; never in the client bundle.
+   - `GEMINI_API_KEY` — only for the Gemini-native voice/image routes in `server.ts`.
+   - `OWNER_EMAIL` + `COUNCIL_ACCESS_KEY` (+ `VITE_COUNCIL_ACCESS_KEY`) — owner
+     gate and diagnostics access. Without them the money routes correctly refuse.
+   - `RATE_LIMIT_PER_MINUTE`, `AGENT_MAX_JOB_COST_USD`, `AGENT_DEFAULT_MODEL`,
+     `AGENT_DATA_DIR` — see the agent-loop section above.
+   - `VITE_GOOGLE_CLIENT_ID` — Google sign-in for Drive/profile.
+3. Run: `npm run dev` (tsx serves `server.ts` + Vite). Test: `npm test`.
+   Lint/type: `npx tsc --noEmit`. Build: `npm run build` → `npm start`.
+4. Deploy: push `main` → Railway auto-deploys. Never push experimental code
+   to `main`.
+
+### Module map (the short version)
+- `server.ts` — Express proxy, owner gate, rate limiting, diagnostics event
+  log (`GET /api/diagnostics/events`), cost ledgers; mounts `src/server/agentLoop.ts`.
+- `src/server/agentLoop.ts` — server agent jobs: plan → research → deliberate
+  (max 5 passes, hard $ cap, prior-consensus carry-over) → finalize.
+- `src/lib/` — model catalog/scoring (`modelScoring`, `modelCache`),
+  seating (`serverModelAllocator`, `autoRouter`), cost (`costGovernor`,
+  `dollarCostGovernor`), evidence (`evidence*`), sync (`syncContract`,
+  `drivePersistence`), Oracle memory (`oracleStore`, `bibleClaims`),
+  Nexus planning (`nexusMission`, `nexusExhibits`), fallback (`fallbackManager`).
+- `src/components/` — Chamber (`CouncilChamber`, `council/`), Nexus
+  (`NexusLabView`), Oracle (`OracleView`), settings (`settings/`, `SettingsPanel`).
+- `src/lib/archetypes.ts` — persona archetypes (fields: id, name, role,
+  avatar, color, systemPrompt, recommendedModel — **no `category` field**).
+
+### Audit notes from this session (all verified against code)
+- **Oracle bible size** is already guarded: `MAX_BIBLE_CHARS` (12,000) in
+  `bibleClaims.ts`, `capBible()` drops oldest-unsealed first (never sealed),
+  `renderBiblePrompt` caps working notes at 1,500 chars, and an over-cap
+  sealed-only bible throws honestly instead of dropping law. No further
+  compression needed — don't add a second mechanism.
+- **Nexus stop conditions** are already guarded: server loop clamps
+  `maxDeliberationPasses` to 1–5, checks the per-job cost cap after every
+  model call (`stopped_budget`), carries the previous consensus into each
+  falsification pass; the local in-tab loop is bounded by the plan length
+  (UI selects 3–8 Night Shift cycles), checks `pauseRequestedRef` between
+  passes, and carries `previousSynthesis` forward.
+- **`CouncilSettingsModal`** exists only on the `rescue-zip-only` branch. It
+  references `arch.category`, which no `PersonaArchetype` has, and nothing on
+  `main` imports it. It was **not** ported forward on purpose: landing it
+  means adding a type field + wiring a dead component — a feature decision,
+  not a bug fix. Port it only if the operator asks for that Settings modal.
+
+### House rules (unchanged, still enforced)
+Work on branches; `npx tsc --noEmit && npm test` green before any merge to
+`main`; push `main` after each green merge; never delete features, touch
+secrets, or break public behavior; log every action in `WORKLOG.md`.
+
 ## Handoff — Aug 28, 2026, 1pm (PR #11: completion token refresh, unbranded Nexus personas, cache vision preservation)
 
 **Who this is for:** the next agent working with the operator. He is a non-coder
