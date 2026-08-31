@@ -872,12 +872,12 @@ export async function startServer(portOverride?: number) {
   // 5b. Server-side Agent Loop — assess → plan → research → deliberate →
   //     fact-check → answer, entirely on the server. Jobs survive tab closes
   //     and are persisted to disk (bounded). Env knobs:
-  //       AGENT_DEFAULT_MODEL      (default google/gemini-2.5-flash)
+  //       AGENT_DEFAULT_MODEL      (default anthropic/claude-opus-5-fast)
   //       AGENT_MAX_JOB_COST_USD   (default 2.00)
   //       AGENT_DATA_DIR           (default ./data)
   const agentDataDir = process.env.AGENT_DATA_DIR?.trim() || path.join(process.cwd(), 'data');
   const getAgentDefaultModel = () =>
-    process.env.AGENT_DEFAULT_MODEL?.trim() || 'google/gemini-2.5-flash';
+    process.env.AGENT_DEFAULT_MODEL?.trim() || 'anthropic/claude-opus-5-fast';
   const getAgentMaxJobCost = () => {
     const raw = parseFloat(String(process.env.AGENT_MAX_JOB_COST_USD || ''));
     return !isNaN(raw) && raw > 0 ? raw : DEFAULT_MAX_JOB_COST_USD;
@@ -1118,11 +1118,18 @@ export async function startServer(portOverride?: number) {
   const webhookNotifier = createWebhookNotifier(process.env.HERMES_WEBHOOK_URL, {
     log: (message, meta) => eventLog.record('warn', 'webhook', message, meta),
   });
-  const nexusMissions = createNexusMissionStore(agentRunner, agentDataDir, webhookNotifier);
+  const nexusMissions = createNexusMissionStore(agentRunner, agentDataDir, webhookNotifier, () => cachedCatalog || []);
 
   app.post('/api/nexus/missions', requireRateLimit, requireOwnerGate, (req, res) => {
     const body = (req.body || {}) as Record<string, unknown>;
-    const created = nexusMissions.create({ goal: body.goal, csv: body.csv, context: body.context, agent: res.locals.agent });
+    const created = nexusMissions.create({
+      goal: body.goal,
+      csv: body.csv,
+      context: body.context,
+      agent: res.locals.agent,
+      models: body.models,
+      taskType: body.taskType,
+    });
     if ('error' in created) return res.status(400).json({ error: created.error });
     return res.status(201).json({ data: { missionId: created.id, status: 'running' } });
   });

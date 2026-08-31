@@ -41,24 +41,24 @@ interface DomainModelMapping {
  */
 export const DOMAIN_MODEL_MAPPINGS: Record<TaskDomain, DomainModelMapping> = {
   code: {
-    panelists: ['anthropic/claude-sonnet-4.5', 'deepseek/deepseek-r1', 'google/gemini-2.5-pro'],
-    synthesizer: 'anthropic/claude-sonnet-4.5',
+    panelists: ['anthropic/claude-opus-5-fast', 'deepseek/deepseek-v4-pro-0813', 'google/gemini-3.7-flash'],
+    synthesizer: 'anthropic/claude-opus-5-fast',
   },
   math: {
-    panelists: ['deepseek/deepseek-r1', 'anthropic/claude-sonnet-4.5', 'openai/gpt-5.1'],
-    synthesizer: 'deepseek/deepseek-r1',
+    panelists: ['deepseek/deepseek-v4-pro-0813', 'anthropic/claude-opus-5-fast', 'openai/gpt-5.6-luna-pro'],
+    synthesizer: 'deepseek/deepseek-v4-pro-0813',
   },
   finance: {
-    panelists: ['openai/gpt-5.1', 'google/gemini-2.5-flash', 'deepseek/deepseek-chat'],
-    synthesizer: 'google/gemini-2.5-pro',
+    panelists: ['openai/gpt-5.6-luna-pro', 'google/gemini-3.7-flash', 'deepseek/deepseek-v4-pro-0813'],
+    synthesizer: 'google/gemini-3.7-flash',
   },
   creative: {
-    panelists: ['google/gemini-2.5-pro', 'openai/gpt-5.1', 'meta-llama/llama-3.3-70b-instruct'],
-    synthesizer: 'google/gemini-2.5-pro',
+    panelists: ['google/gemini-3.7-flash', 'openai/gpt-5.6-luna-pro', 'x-ai/grok-4.6'],
+    synthesizer: 'google/gemini-3.7-flash',
   },
   general: {
-    panelists: ['google/gemini-2.5-flash', 'meta-llama/llama-3.3-70b-instruct', 'openai/gpt-4o-mini'],
-    synthesizer: 'google/gemini-2.5-flash',
+    panelists: ['google/gemini-3.7-flash', 'qwen/qwen3.8-max', 'moonshotai/kimi-k3'],
+    synthesizer: 'google/gemini-3.7-flash',
   },
 };
 

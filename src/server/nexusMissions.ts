@@ -22,6 +22,7 @@ import {
   type AgentJobSpec,
 } from './agentLoop';
 import { parseCsv } from './csvParse';
+import { expandModelsInput, validateModelsAgainstCatalog } from '../lib/modelCatalog';
 import type { WebhookNotifier } from './webhookNotifier';
 
 export type NexusMissionStatus = 'running' | 'paused' | 'awaiting_approval' | 'complete' | 'failed';
@@ -34,6 +35,10 @@ export interface NexusMissionRecord {
   context?: string;
   /** Raw CSV text — server-side only, redacted in disk/API views. */
   csvText: string;
+  /** Multi-model council seats (validated slugs); empty = single-model default. */
+  models?: string[];
+  /** Allocator task-domain hint (e.g. "code"). */
+  taskType?: string;
   csvHeaders: string[];
   csvRowCount: number;
   /** Set by pause(); cleared by resume(). When set, it wins over the job. */
@@ -63,6 +68,7 @@ export interface NexusMissionView {
   pendingQuestions: string[];
   answers: Record<string, string>;
   csv: { headers: string[]; rowCount: number } | null;
+  models?: string[];
   jobId: string | null;
   usageUSD: number;
   error?: string;
@@ -108,7 +114,9 @@ export class NexusMissionStore {
   constructor(
     private runner: AgentLoopRunner,
     private dataDir: string,
-    private notifier?: WebhookNotifier
+    private notifier?: WebhookNotifier,
+    /** Cached OpenRouter catalog accessor for create-time model validation. */
+    private catalog?: () => any[]
   ) {
     this.loadFromDisk();
   }
@@ -119,7 +127,7 @@ export class NexusMissionStore {
    * Validates and creates a mission. Returns either a record or an error
    * message for the route to turn into a 400.
    */
-  create(input: { goal?: unknown; csv?: unknown; context?: unknown; agent?: unknown }): NexusMissionRecord | { error: string } {
+  create(input: { goal?: unknown; csv?: unknown; context?: unknown; agent?: unknown; models?: unknown; taskType?: unknown }): NexusMissionRecord | { error: string } {
     const goal = typeof input.goal === 'string' ? input.goal.trim() : '';
     if (!goal) return { error: 'A goal is required.' };
 
@@ -136,7 +144,14 @@ export class NexusMissionStore {
       }
     }
 
-    const spec = this.buildSpec(goal, csvText, typeof input.context === 'string' ? input.context : undefined);
+    const modelsRes = expandModelsInput(input.models);
+    if ('error' in modelsRes) return { error: modelsRes.error };
+    const catalog = this.catalog?.() || [];
+    const catalogError = validateModelsAgainstCatalog(modelsRes.models, catalog);
+    if (catalogError) return { error: catalogError };
+    const taskType = typeof input.taskType === 'string' && input.taskType.trim() ? input.taskType.trim().slice(0, 64) : undefined;
+
+    const spec = this.buildSpec(goal, csvText, typeof input.context === 'string' ? input.context : undefined, modelsRes.models, taskType);
     if ('error' in spec) return { error: spec.error };
 
     const parsed = csvText ? parseCsv(csvText) : { headers: [], rows: [] as string[][] };
@@ -146,6 +161,8 @@ export class NexusMissionStore {
       agent: typeof input.agent === 'string' && input.agent.trim() ? input.agent.trim().slice(0, 64) : 'web',
       context: typeof input.context === 'string' && input.context.trim() ? input.context : undefined,
       csvText,
+      ...(modelsRes.models.length > 0 ? { models: modelsRes.models } : {}),
+      ...(taskType ? { taskType } : {}),
       csvHeaders: parsed.headers,
       csvRowCount: parsed.rows.length,
       manualStatus: null,
@@ -164,7 +181,7 @@ export class NexusMissionStore {
     return record;
   }
 
-  private buildSpec(goal: string, csvText: string, context?: string): AgentJobSpec | { error: string } {
+  private buildSpec(goal: string, csvText: string, context?: string, models?: string[], taskType?: string): AgentJobSpec | { error: string } {
     const exhibits = csvText
       ? [{ name: 'uploaded-exhibit.csv', content: csvText }]
       : undefined;
@@ -172,6 +189,8 @@ export class NexusMissionStore {
       goal,
       mode: 'nexus',
       context,
+      ...(models && models.length > 0 ? { models } : {}),
+      ...(taskType ? { taskType } : {}),
       ...(exhibits ? { exhibits } : {}),
     });
   }
@@ -269,6 +288,7 @@ export class NexusMissionStore {
       csv: m.csvText
         ? { headers: m.csvHeaders, rowCount: m.csvRowCount }
         : null,
+      ...(m.models && m.models.length > 0 ? { models: m.models } : {}),
       jobId: m.jobId,
       usageUSD: job ? Number(job.usageUSD.toFixed(6)) : 0,
       error: m.error || job?.error,
@@ -336,7 +356,9 @@ export class NexusMissionStore {
     const spec = this.buildSpec(
       m.goal,
       m.csvText,
-      [m.context, prior, answerBlock].filter(Boolean).join('\n') || undefined
+      [m.context, prior, answerBlock].filter(Boolean).join('\n') || undefined,
+      m.models,
+      m.taskType
     );
     if ('error' in spec) {
       m.error = spec.error;
@@ -422,7 +444,8 @@ export class NexusMissionStore {
 export function createNexusMissionStore(
   runner: AgentLoopRunner,
   dataDir: string,
-  notifier?: WebhookNotifier
+  notifier?: WebhookNotifier,
+  catalog?: () => any[]
 ): NexusMissionStore {
-  return new NexusMissionStore(runner, dataDir, notifier);
+  return new NexusMissionStore(runner, dataDir, notifier, catalog);
 }
