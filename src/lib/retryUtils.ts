@@ -46,7 +46,12 @@ export function isTransientError(error: any): boolean {
   const msg = (error.message || error.toString() || '').toLowerCase();
   const status = error.status || (typeof error.status === 'number' ? error.status : null);
 
-  if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || status === 520 || status === 524) {
+  // Permanent client errors — never retry, fail fast.
+  if (status === 400 || status === 401 || status === 402 || status === 403 || status === 404) {
+    return false;
+  }
+
+  if (status === 408 || status === 409 || status === 429 || (typeof status === 'number' && status >= 500)) {
     return true;
   }
 

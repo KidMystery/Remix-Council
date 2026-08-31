@@ -11,7 +11,7 @@ import { chunkDocuments } from '../../lib/documentChunker';
 /** Deterministic catalog entry for rate math. */
 const CATALOG = [
   { id: 'google/gemini-2.5-flash', pricing: { prompt: '0.0000003', completion: '0.0000025' } },
-  { id: 'deepseek/deepseek-v4-flash-0731', pricing: { prompt: '0.00000004', completion: '0.00000008' } },
+  { id: 'deepseek/deepseek-v4-flash-latest', pricing: { prompt: '0.00000004', completion: '0.00000008' } },
   { id: 'free/free-model', pricing: { prompt: '0', completion: '0' } },
 ];
 

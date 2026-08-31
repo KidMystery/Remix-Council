@@ -9,7 +9,7 @@ import {
 const PAID_CATALOG = [
   { id: 'google/gemini-2.5-flash', pricing: { prompt: '0.0000003', completion: '0.0000025' } },
   { id: 'openai/gpt-5.1', pricing: { prompt: '0.00000125', completion: '0.00001' } },
-  { id: 'deepseek/deepseek-v4-flash-0731:free', pricing: { prompt: '0', completion: '0' } },
+  { id: 'deepseek/deepseek-v4-flash-latest:free', pricing: { prompt: '0', completion: '0' } },
 ];
 
 describe('shouldAutoCreateInitialSession (blank-thread race guard)', () => {
@@ -49,8 +49,8 @@ describe('reconcileFreePresetWithModels (manual picks win)', () => {
   it('stays in free mode when every model is verified zero-cost', () => {
     const result = reconcileFreePresetWithModels({
       activePresetId: 'fast_and_free',
-      personaModels: ['deepseek/deepseek-v4-flash-0731:free'],
-      synthesizerModel: 'deepseek/deepseek-v4-flash-0731:free',
+      personaModels: ['deepseek/deepseek-v4-flash-latest:free'],
+      synthesizerModel: 'deepseek/deepseek-v4-flash-latest:free',
       catalog: PAID_CATALOG,
     });
     expect(result.switchToPresetId).toBeNull();
