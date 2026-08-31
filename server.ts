@@ -361,6 +361,16 @@ export async function startServer(portOverride?: number) {
     res: express.Response,
     next: express.NextFunction
   ) => {
+    // HARDENING (Hermes bridge, Aug 2026): when NO council key is configured,
+    // every gated endpoint fails closed with 503. The old dev-mode fallback
+    // waved requests through unauthenticated — an open door on deployments
+    // that simply forgot to set COUNCIL_ACCESS_KEY/SECRET.
+    if (!COUNCIL_ACCESS_KEY) {
+      eventLog.record('warn', 'auth', 'Owner gate: server auth not configured — 503.', { path: req.path });
+      return res.status(503).json({
+        error: 'Server auth not configured. Set COUNCIL_ACCESS_KEY (or COUNCIL_ACCESS_SECRET) to enable gated endpoints.',
+      });
+    }
     const clientKey = req.header('x-council-key') || '';
     const token = req.header('x-owner-token') || '';
     const decision = decideOwnerGate({
