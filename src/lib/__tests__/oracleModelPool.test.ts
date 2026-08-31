@@ -58,7 +58,7 @@ const CATALOG = [
   mk('z-ai/glm-5.3', ['text']),
   mk('meta/muse-spark-1.2', ['text', 'image']),
   mk('anthropic/claude-fable-5', ['text', 'image', 'file']),
-  mk('deepseek/deepseek-v4-flash-0731', ['text']),
+  mk('deepseek/deepseek-v4-flash-latest', ['text']),
 ];
 
 describe('normalizeModelId', () => {

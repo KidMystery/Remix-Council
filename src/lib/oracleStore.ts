@@ -147,7 +147,7 @@ export const DEFAULT_ROTATION_ROSTER: string[] = [
   'openai/gpt-5.1',
   'google/gemini-2.5-pro',
   'google/gemini-3.7-flash',
-  'deepseek/deepseek-v4-flash-0731',
+  'deepseek/deepseek-v4-flash-latest',
 ];
 
 /**
@@ -164,7 +164,7 @@ export const ORACLE_MODEL_OPTIONS: { id: string; name: string; tag?: string; vis
   { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', tag: 'Fast Workhorse', vision: true },
   { id: 'meta/muse-spark-1.2', name: 'Muse Spark 1.2', tag: 'Frontier', vision: true },
   { id: 'z-ai/glm-5.3', name: 'GLM 5.3', tag: 'Reasoning', vision: false },
-  { id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek V4 Flash', tag: 'Fast Frontier', vision: false },
+  { id: 'deepseek/deepseek-v4-flash-latest', name: 'DeepSeek V4 Flash', tag: 'Fast Frontier', vision: false },
 ];
 
 /**

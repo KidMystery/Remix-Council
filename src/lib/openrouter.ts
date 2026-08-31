@@ -63,13 +63,15 @@ export async function streamOpenRouter({
         signal,
       });
 
-      // Handle transient upstream rate limits or overload with backoff
-      if ((response.status === 429 || response.status === 503) && attempt < maxRetries) {
-        attempt++;
-        const backoffMs = attempt * 1500;
-        console.warn(`[TalkEngine] HTTP ${response.status}. Retrying attempt ${attempt}/${maxRetries} in ${backoffMs}ms...`);
-        await new Promise((resolve) => setTimeout(resolve, backoffMs));
-        continue;
+      // Retry only on transient statuses; client errors (4xx below) fail fast.
+      if ([408, 409, 429].includes(response.status) || response.status >= 500) {
+        if (attempt < maxRetries) {
+          attempt++;
+          const backoffMs = attempt * 1500;
+          console.warn(`[TalkEngine] HTTP ${response.status}. Retrying attempt ${attempt}/${maxRetries} in ${backoffMs}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
       }
 
       if (response.status === 401) {
@@ -102,7 +104,6 @@ export async function streamOpenRouter({
       if (!response.body) {
         throw new Error('ReadableStream is not supported on response.');
       }
-
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let accumulated = '';
@@ -282,6 +283,9 @@ export async function streamOpenRouterCompletion(
     let usage: StreamCompletionResult['usage'];
     let routedModel: string | undefined;
     let streamError: string | undefined;
+    let streamErrorStatus: number | undefined;
+    let streamErrorCode: string | number | undefined;
+    let streamErrorMetadata: unknown;
 
     try {
       let response = await fetch('/api/council', {
@@ -310,8 +314,8 @@ export async function streamOpenRouterCompletion(
         }
       }
 
-      // Handle transient status codes (429 rate limit, 502/503/504 gateway error)
-      if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
+      // Handle transient status codes (408/409 timeouts & conflicts, 429 rate limit, 5xx gateway errors)
+      if (([408, 409, 429].includes(response.status) || response.status >= 500) && attempt < maxRetries) {
         const errorData = await response.json().catch(() => ({}));
         const retryDelay = (attempt + 1) * 1200 + Math.random() * 400;
         recordWarn(
@@ -337,6 +341,18 @@ export async function streamOpenRouterCompletion(
         }
         if (response.status === 401) {
           throw new OwnerAuthError(errorData.error || 'Sign in required (owner gate).');
+        }
+        // Client errors (400/402/403/404) are permanent — fail fast with a clear message.
+        if ([400, 402, 403, 404].includes(response.status)) {
+          const providerMsg = errorData.error || errorData.providerCode || `HTTP ${response.status}`;
+          const rejectErr = new Error(
+            `Model ${model} rejected the request (${response.status}): ${providerMsg}`
+          ) as Error & { status?: number; providerCode?: unknown; providerMetadata?: unknown; model?: string };
+          rejectErr.status = response.status;
+          rejectErr.providerCode = errorData.providerCode ?? errorData.error?.code;
+          rejectErr.providerMetadata = errorData.providerMetadata ?? errorData.error?.metadata;
+          rejectErr.model = model.trim();
+          throw rejectErr;
         }
         throw new Error(errorData.error || `HTTP ${response.status}: LLM streaming failure`);
       }
@@ -368,6 +384,9 @@ export async function streamOpenRouterCompletion(
               // The server reports mid-stream upstream failures as an error frame
               if (json.error?.message) {
                 streamError = String(json.error.message);
+                streamErrorStatus = typeof json.status === 'number' ? json.status : undefined;
+                streamErrorCode = json.error.code ?? json.providerCode;
+                streamErrorMetadata = json.providerMetadata ?? json.error.metadata;
               }
               const choice = json.choices?.[0];
               const delta = choice?.delta?.content || '';
@@ -410,7 +429,17 @@ export async function streamOpenRouterCompletion(
       }
 
       if (streamError) {
-        throw new Error(streamError);
+        const providerErr = new Error(streamError) as Error & {
+          status?: number;
+          providerCode?: string | number;
+          providerMetadata?: unknown;
+          model?: string;
+        };
+        providerErr.status = streamErrorStatus;
+        providerErr.providerCode = streamErrorCode;
+        providerErr.providerMetadata = streamErrorMetadata;
+        providerErr.model = model.trim();
+        throw providerErr;
       }
 
       return {

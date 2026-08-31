@@ -725,10 +725,16 @@ export async function startServer(portOverride?: number) {
           return res.status(upstreamResp.status).json({
             error: errorMsg,
             freeModeBlocked: true,
+            status: upstreamResp.status,
+            providerCode: errorJson.error?.code,
+            providerMetadata: errorJson.error?.metadata ?? errorJson.metadata,
           });
         }
         return res.status(upstreamResp.status).json({
           error: errorMsg,
+          status: upstreamResp.status,
+          providerCode: errorJson.error?.code,
+          providerMetadata: errorJson.error?.metadata ?? errorJson.metadata,
         });
       }
 
