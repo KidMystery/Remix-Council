@@ -10,17 +10,38 @@
  * instead of failing mid-overnight.
  */
 
-/** Verified-live 4-org council (anthropic / openai / google / deepseek). */
-export const NEXUS_MODEL_COUNCIL = [
-  'anthropic/claude-sonnet-4.5',
-  'openai/gpt-5.1-codex-max',
-  'google/gemini-2.5-pro',
-  'deepseek/deepseek-v3.2',
+/**
+ * Current-gen verified pool (swept live against the OpenRouter catalog,
+ * 2026-08-31 — every id confirmed present, 395-model snapshot). One entry
+ * per org, coding-stable variants preferred over experimental ones.
+ */
+export interface CurrentGenModel {
+  id: string;
+  org: string;
+}
+
+export const CURRENT_GEN_POOL: readonly CurrentGenModel[] = [
+  { id: 'anthropic/claude-opus-5-fast', org: 'anthropic' },
+  { id: 'openai/gpt-5.6-luna-pro', org: 'openai' },
+  { id: 'google/gemini-3.7-flash', org: 'google' },
+  { id: 'deepseek/deepseek-v4-pro-0813', org: 'deepseek' },
+  { id: 'x-ai/grok-4.6', org: 'x-ai' },
+  { id: 'qwen/qwen3.8-max', org: 'qwen' },
+  { id: 'z-ai/glm-5.3-flash', org: 'z-ai' },
+  { id: 'moonshotai/kimi-k3', org: 'moonshotai' },
 ] as const;
+
+/** Convenience: just the slugs, pool order preserved. */
+export const CURRENT_GEN_POOL_IDS: readonly string[] = CURRENT_GEN_POOL.map((m) => m.id);
 
 /** Named presets accepted in the mission `models` field. */
 export const MODEL_PRESETS: Record<string, readonly string[]> = {
-  'auto-coding': NEXUS_MODEL_COUNCIL,
+  'auto-coding': [
+    'anthropic/claude-sonnet-4.5',
+    'openai/gpt-5.1-codex-max',
+    'google/gemini-2.5-pro',
+    'deepseek/deepseek-v3.2',
+  ],
 };
 
 export const MAX_MISSION_MODELS = 8;
