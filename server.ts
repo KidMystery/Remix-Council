@@ -363,6 +363,10 @@ export async function startServer(portOverride?: number) {
     res: express.Response,
     next: express.NextFunction
   ) => {
+    // Agent identity (Phase 4 "return wire"): callers MAY declare who they are
+    // via x-agent-name (e.g. "hermes"). It is metadata only — never auth — and
+    // defaults to "web" for browser callers.
+    res.locals.agent = (req.header('x-agent-name') || 'web').trim().slice(0, 64) || 'web';
     // HARDENING (Hermes bridge, Aug 2026): when NO council key is configured,
     // every gated endpoint fails closed with 503. The old dev-mode fallback
     // waved requests through unauthenticated — an open door on deployments
@@ -1074,6 +1078,7 @@ export async function startServer(portOverride?: number) {
       threadId: body.threadId,
       text,
       ts: body.ts,
+      agent: res.locals.agent,
     });
     return res.status(201).json({ data: thread });
   });
@@ -1101,7 +1106,7 @@ export async function startServer(portOverride?: number) {
 
   app.post('/api/nexus/missions', requireRateLimit, requireOwnerGate, (req, res) => {
     const body = (req.body || {}) as Record<string, unknown>;
-    const created = nexusMissions.create({ goal: body.goal, csv: body.csv, context: body.context });
+    const created = nexusMissions.create({ goal: body.goal, csv: body.csv, context: body.context, agent: res.locals.agent });
     if ('error' in created) return res.status(400).json({ error: created.error });
     return res.status(201).json({ data: { missionId: created.id, status: 'running' } });
   });

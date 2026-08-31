@@ -28,6 +28,8 @@ export type NexusMissionStatus = 'running' | 'paused' | 'awaiting_approval' | 'c
 export interface NexusMissionRecord {
   id: string;
   goal: string;
+  /** Actor that created the mission (x-agent-name header, default "web"). */
+  agent: string;
   context?: string;
   /** Raw CSV text — server-side only, redacted in disk/API views. */
   csvText: string;
@@ -51,6 +53,7 @@ export interface NexusMissionFinding {
 export interface NexusMissionView {
   id: string;
   goal: string;
+  agent: string;
   status: NexusMissionStatus;
   currentPass: number;
   latestPassLabel?: string;
@@ -112,7 +115,7 @@ export class NexusMissionStore {
    * Validates and creates a mission. Returns either a record or an error
    * message for the route to turn into a 400.
    */
-  create(input: { goal?: unknown; csv?: unknown; context?: unknown }): NexusMissionRecord | { error: string } {
+  create(input: { goal?: unknown; csv?: unknown; context?: unknown; agent?: unknown }): NexusMissionRecord | { error: string } {
     const goal = typeof input.goal === 'string' ? input.goal.trim() : '';
     if (!goal) return { error: 'A goal is required.' };
 
@@ -136,6 +139,7 @@ export class NexusMissionStore {
     const record: NexusMissionRecord = {
       id: newMissionId(),
       goal,
+      agent: typeof input.agent === 'string' && input.agent.trim() ? input.agent.trim().slice(0, 64) : 'web',
       context: typeof input.context === 'string' && input.context.trim() ? input.context : undefined,
       csvText,
       csvHeaders: parsed.headers,
@@ -221,6 +225,7 @@ export class NexusMissionStore {
     return {
       id: m.id,
       goal: m.goal,
+      agent: m.agent || 'web',
       status: this.statusOf(m),
       currentPass: job ? job.passes.length : 0,
       latestPassLabel: lastPass?.label,

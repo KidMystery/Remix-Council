@@ -23,6 +23,8 @@ export interface OracleAppendEntryInput {
   threadId?: string;
   text: string;
   ts?: number;
+  /** Optional actor identity from the x-agent-name header (default "web"). */
+  agent?: string;
 }
 
 export interface OracleSyncInput {
@@ -99,7 +101,7 @@ export function createOracleServerStore(dataDir: string): OracleServerStore {
 
     getBible: () => loadBible(),
 
-    appendEntry: ({ threadId, text, ts }) => {
+    appendEntry: ({ threadId, text, ts, agent }) => {
       const now = Date.now();
       const when = typeof ts === 'number' && ts > 0 ? ts : now;
       const threads = loadThreads();
@@ -108,6 +110,7 @@ export function createOracleServerStore(dataDir: string): OracleServerStore {
         role: 'user',
         content: text,
         timestamp: when,
+        agent: typeof agent === 'string' && agent.trim() ? agent.trim().slice(0, 64) : 'web',
       };
       let target =
         threadId && typeof threadId === 'string'
