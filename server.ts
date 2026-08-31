@@ -17,6 +17,7 @@ import {
 } from './src/server/agentLoop';
 import { createOracleServerStore } from './src/server/oracleServerStore';
 import { createNexusMissionStore } from './src/server/nexusMissions';
+import { createWebhookNotifier, detectObligation, parseObligationHints } from './src/server/webhookNotifier';
 
 // Works under both ESM (tsx dev) and the CJS production bundle (esbuild).
 const __filename =
@@ -1080,6 +1081,16 @@ export async function startServer(portOverride?: number) {
       ts: body.ts,
       agent: res.locals.agent,
     });
+    // Return wire: announce the appended entry; simple obligation pattern
+    // (starts with "obligation:" or contains "TODO:") reserves the
+    // obligation_flagged event. Kept dead simple on purpose — see
+    // webhookNotifier.ts.
+    if (webhookNotifier.enabled) {
+      webhookNotifier.notify({ event: 'oracle_entry_appended', threadId: thread.id, agent: res.locals.agent, ts: Date.now() });
+      if (detectObligation(text)) {
+        webhookNotifier.notify({ event: 'obligation_flagged', text, ts: Date.now(), ...parseObligationHints(text) });
+      }
+    }
     return res.status(201).json({ data: thread });
   });
 
@@ -1102,7 +1113,12 @@ export async function startServer(portOverride?: number) {
   // 5c. Nexus missions API (Phase 3) — server-side CSV upload + the
   // pause/answer loop, wrapped around the existing agent loop. Gated like
   // every other money route.
-  const nexusMissions = createNexusMissionStore(agentRunner, agentDataDir);
+  // Phase 4 "return wire": outbound webhook is fully disabled unless
+  // HERMES_WEBHOOK_URL is set — no env var, zero behavior change.
+  const webhookNotifier = createWebhookNotifier(process.env.HERMES_WEBHOOK_URL, {
+    log: (message, meta) => eventLog.record('warn', 'webhook', message, meta),
+  });
+  const nexusMissions = createNexusMissionStore(agentRunner, agentDataDir, webhookNotifier);
 
   app.post('/api/nexus/missions', requireRateLimit, requireOwnerGate, (req, res) => {
     const body = (req.body || {}) as Record<string, unknown>;

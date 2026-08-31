@@ -22,6 +22,7 @@ import {
   type AgentJobSpec,
 } from './agentLoop';
 import { parseCsv } from './csvParse';
+import type { WebhookNotifier } from './webhookNotifier';
 
 export type NexusMissionStatus = 'running' | 'paused' | 'awaiting_approval' | 'complete' | 'failed';
 
@@ -101,10 +102,13 @@ function jobToStatus(status: string): NexusMissionStatus | null {
 
 export class NexusMissionStore {
   private missions = new Map<string, NexusMissionRecord>();
+  /** missionId:status keys already reported over the webhook (dedupe). */
+  private notified = new Set<string>();
 
   constructor(
     private runner: AgentLoopRunner,
-    private dataDir: string
+    private dataDir: string,
+    private notifier?: WebhookNotifier
   ) {
     this.loadFromDisk();
   }
@@ -193,14 +197,43 @@ export class NexusMissionStore {
   // ── reads ───────────────────────────────────────────────────────────────
 
   list(): NexusMissionView[] {
-    return Array.from(this.missions.values())
+    const views = Array.from(this.missions.values())
       .sort((a, b) => b.createdAt - a.createdAt)
       .map((m) => this.view(m));
+    for (const m of this.missions.values()) this.reportTransitions(m);
+    return views;
   }
 
   get(id: string): NexusMissionView | null {
     const m = this.missions.get(id);
-    return m ? this.view(m) : null;
+    if (!m) return null;
+    const view = this.view(m);
+    this.reportTransitions(m);
+    return view;
+  }
+
+  /**
+   * Phase 4 "return wire": mission completion/pause/fail are derived states
+   * (computed from the live job), so transition events fire lazily on read —
+   * get()/list()/pause() — deduped per (mission, status). Fire-and-forget.
+   */
+  private reportTransitions(m: NexusMissionRecord): void {
+    if (!this.notifier) return;
+    const status = this.statusOf(m);
+    if (status !== 'complete' && status !== 'failed' && status !== 'paused' && status !== 'awaiting_approval') return;
+    const key = `${m.id}:${status}`;
+    if (this.notified.has(key)) return;
+    this.notified.add(key);
+    const paused = status === 'paused' || status === 'awaiting_approval';
+    this.notifier.notify({
+      event: status === 'complete' ? 'mission_completed' : status === 'failed' ? 'mission_failed' : 'mission_paused',
+      missionId: m.id,
+      goal: m.goal,
+      ...(paused && m.pendingQuestions.length > 0 ? { pendingQuestions: [...m.pendingQuestions] } : {}),
+      status,
+      ts: Date.now(),
+      agent: m.agent || 'web',
+    });
   }
 
   /** Status resolution: manual override wins; otherwise the live job maps it. */
@@ -260,6 +293,7 @@ export class NexusMissionStore {
     m.manualStatus = m.pendingQuestions.length > 0 ? 'awaiting_approval' : 'paused';
     m.updatedAt = Date.now();
     this.persist();
+    this.reportTransitions(m);
     return this.view(m);
   }
 
@@ -385,6 +419,10 @@ export class NexusMissionStore {
   }
 }
 
-export function createNexusMissionStore(runner: AgentLoopRunner, dataDir: string): NexusMissionStore {
-  return new NexusMissionStore(runner, dataDir);
+export function createNexusMissionStore(
+  runner: AgentLoopRunner,
+  dataDir: string,
+  notifier?: WebhookNotifier
+): NexusMissionStore {
+  return new NexusMissionStore(runner, dataDir, notifier);
 }
