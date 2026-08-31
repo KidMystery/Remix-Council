@@ -46,7 +46,7 @@ export const AUTO_CODING_COUNCIL = [
 
 /** Named presets accepted in the mission `models` field. */
 export const MODEL_PRESETS: Record<string, readonly string[]> = {
-  'auto-coding': AUTO_CODING_COUNCIL,
+  'auto-coding': NEXUS_MODEL_COUNCIL,
 };
 
 export const MAX_MISSION_MODELS = 8;
