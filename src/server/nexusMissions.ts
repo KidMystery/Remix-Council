@@ -39,6 +39,8 @@ export interface NexusMissionRecord {
   models?: string[];
   /** Allocator task-domain hint (e.g. "code"). */
   taskType?: string;
+  /** 'free' = strict zero-cost run (:free models only, cost logged as $0). */
+  budget?: 'free' | 'paid';
   maxJobCostUSD?: number;
   /** How oversized context/exhibits are split: auto (default), csv-rows, none. */
   chunkStrategy?: 'auto' | 'none' | 'csv-rows';
@@ -72,6 +74,7 @@ export interface NexusMissionView {
   answers: Record<string, string>;
   csv: { headers: string[]; rowCount: number } | null;
   models?: string[];
+  budget?: 'free' | 'paid';
   jobId: string | null;
   usageUSD: number;
   /** Total exhibit+context chars the job is working through. */
@@ -123,7 +126,9 @@ export class NexusMissionStore {
     private dataDir: string,
     private notifier?: WebhookNotifier,
     /** Cached OpenRouter catalog accessor for create-time model validation. */
-    private catalog?: () => any[]
+    private catalog?: () => any[],
+    /** Resolved default model accessor — validates budget:'free' seats. */
+    private defaultModel?: () => string
   ) {
     this.loadFromDisk();
   }
@@ -134,7 +139,7 @@ export class NexusMissionStore {
    * Validates and creates a mission. Returns either a record or an error
    * message for the route to turn into a 400.
    */
-  create(input: { goal?: unknown; csv?: unknown; context?: unknown; agent?: unknown; models?: unknown; taskType?: unknown; chunkStrategy?: unknown; maxJobCostUSD?: unknown }): NexusMissionRecord | { error: string } {
+  create(input: { goal?: unknown; csv?: unknown; context?: unknown; agent?: unknown; models?: unknown; taskType?: unknown; chunkStrategy?: unknown; maxJobCostUSD?: unknown; budget?: unknown }): NexusMissionRecord | { error: string } {
     const goal = typeof input.goal === 'string' ? input.goal.trim() : '';
     if (!goal) return { error: 'A goal is required.' };
 
@@ -165,7 +170,18 @@ export class NexusMissionStore {
       typeof input.maxJobCostUSD === 'number' && isFinite(input.maxJobCostUSD)
         ? Math.min(50, Math.max(0.1, input.maxJobCostUSD))
         : undefined;
-    const spec = this.buildSpec(goal, csvText, typeof input.context === 'string' ? input.context : undefined, modelsRes.models, taskType, chunkStrategy, maxJobCostUSD);
+    if (input.budget !== undefined && input.budget !== null && input.budget !== 'free' && input.budget !== 'paid') {
+      return { error: "budget must be 'free' or 'paid'." };
+    }
+    const budget: 'free' | 'paid' = input.budget === 'free' ? 'free' : 'paid';
+    if (budget === 'free') {
+      const seats = modelsRes.models.length > 0 ? modelsRes.models : [this.defaultModel?.() || ''].filter(Boolean);
+      const paidSeat = seats.find((m) => !String(m).toLowerCase().endsWith(':free'));
+      if (paidSeat) {
+        return { error: `model ${paidSeat} is not free-tier; use budget='paid' or pick a :free model` };
+      }
+    }
+    const spec = this.buildSpec(goal, csvText, typeof input.context === 'string' ? input.context : undefined, modelsRes.models, taskType, chunkStrategy, maxJobCostUSD, budget);
     if ('error' in spec) return { error: spec.error };
 
     const parsed = csvText ? parseCsv(csvText) : { headers: [], rows: [] as string[][] };
@@ -177,6 +193,7 @@ export class NexusMissionStore {
       csvText,
       ...(modelsRes.models.length > 0 ? { models: modelsRes.models } : {}),
       ...(taskType ? { taskType } : {}),
+      ...(budget === 'free' ? { budget: 'free' as const } : {}),
       ...(maxJobCostUSD !== undefined ? { maxJobCostUSD } : {}),
       ...(chunkStrategy ? { chunkStrategy } : {}),
       csvHeaders: parsed.headers,
@@ -197,7 +214,7 @@ export class NexusMissionStore {
     return record;
   }
 
-  private buildSpec(goal: string, csvText: string, context?: string, models?: string[], taskType?: string, chunkStrategy?: 'auto' | 'none' | 'csv-rows', maxJobCostUSD?: number): AgentJobSpec | { error: string } {
+  private buildSpec(goal: string, csvText: string, context?: string, models?: string[], taskType?: string, chunkStrategy?: 'auto' | 'none' | 'csv-rows', maxJobCostUSD?: number, budget?: 'free' | 'paid'): AgentJobSpec | { error: string } {
     const exhibits = csvText
       ? [{ name: 'uploaded-exhibit.csv', content: csvText }]
       : undefined;
@@ -209,6 +226,7 @@ export class NexusMissionStore {
       ...(taskType ? { taskType } : {}),
       ...(chunkStrategy ? { chunkStrategy } : {}),
       ...(maxJobCostUSD !== undefined ? { maxJobCostUSD } : {}),
+      ...(budget === 'free' ? { budget: 'free' } : {}),
       ...(exhibits ? { exhibits } : {}),
     });
   }
@@ -307,6 +325,7 @@ export class NexusMissionStore {
         ? { headers: m.csvHeaders, rowCount: m.csvRowCount }
         : null,
       ...(m.models && m.models.length > 0 ? { models: m.models } : {}),
+      ...(m.budget ? { budget: m.budget } : {}),
       jobId: m.jobId,
       usageUSD: job ? Number(job.usageUSD.toFixed(6)) : 0,
       ...(job?.totalContextChars ? { totalContextChars: job.totalContextChars } : {}),
@@ -380,7 +399,8 @@ export class NexusMissionStore {
       m.models,
       m.taskType,
       m.chunkStrategy,
-      m.maxJobCostUSD
+      m.maxJobCostUSD,
+      m.budget === 'free' ? 'free' : undefined
     );
     if ('error' in spec) {
       m.error = spec.error;
@@ -467,7 +487,8 @@ export function createNexusMissionStore(
   runner: AgentLoopRunner,
   dataDir: string,
   notifier?: WebhookNotifier,
-  catalog?: () => any[]
+  catalog?: () => any[],
+  defaultModel?: () => string
 ): NexusMissionStore {
-  return new NexusMissionStore(runner, dataDir, notifier, catalog);
+  return new NexusMissionStore(runner, dataDir, notifier, catalog, defaultModel);
 }
