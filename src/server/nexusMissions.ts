@@ -39,6 +39,8 @@ export interface NexusMissionRecord {
   models?: string[];
   /** Allocator task-domain hint (e.g. "code"). */
   taskType?: string;
+  /** How oversized context/exhibits are split: auto (default), csv-rows, none. */
+  chunkStrategy?: 'auto' | 'none' | 'csv-rows';
   csvHeaders: string[];
   csvRowCount: number;
   /** Set by pause(); cleared by resume(). When set, it wins over the job. */
@@ -71,6 +73,10 @@ export interface NexusMissionView {
   models?: string[];
   jobId: string | null;
   usageUSD: number;
+  /** Total exhibit+context chars the job is working through. */
+  totalContextChars?: number;
+  /** Chunking progress (x/y chunks read) when the docket was split. */
+  chunkProgress?: { done: number; total: number };
   error?: string;
   createdAt: number;
   updatedAt: number;
@@ -127,7 +133,7 @@ export class NexusMissionStore {
    * Validates and creates a mission. Returns either a record or an error
    * message for the route to turn into a 400.
    */
-  create(input: { goal?: unknown; csv?: unknown; context?: unknown; agent?: unknown; models?: unknown; taskType?: unknown }): NexusMissionRecord | { error: string } {
+  create(input: { goal?: unknown; csv?: unknown; context?: unknown; agent?: unknown; models?: unknown; taskType?: unknown; chunkStrategy?: unknown }): NexusMissionRecord | { error: string } {
     const goal = typeof input.goal === 'string' ? input.goal.trim() : '';
     if (!goal) return { error: 'A goal is required.' };
 
@@ -150,8 +156,11 @@ export class NexusMissionStore {
     const catalogError = validateModelsAgainstCatalog(modelsRes.models, catalog);
     if (catalogError) return { error: catalogError };
     const taskType = typeof input.taskType === 'string' && input.taskType.trim() ? input.taskType.trim().slice(0, 64) : undefined;
+    const chunkStrategy = input.chunkStrategy === 'none' || input.chunkStrategy === 'csv-rows' || input.chunkStrategy === 'auto'
+      ? input.chunkStrategy
+      : undefined;
 
-    const spec = this.buildSpec(goal, csvText, typeof input.context === 'string' ? input.context : undefined, modelsRes.models, taskType);
+    const spec = this.buildSpec(goal, csvText, typeof input.context === 'string' ? input.context : undefined, modelsRes.models, taskType, chunkStrategy);
     if ('error' in spec) return { error: spec.error };
 
     const parsed = csvText ? parseCsv(csvText) : { headers: [], rows: [] as string[][] };
@@ -163,6 +172,7 @@ export class NexusMissionStore {
       csvText,
       ...(modelsRes.models.length > 0 ? { models: modelsRes.models } : {}),
       ...(taskType ? { taskType } : {}),
+      ...(chunkStrategy ? { chunkStrategy } : {}),
       csvHeaders: parsed.headers,
       csvRowCount: parsed.rows.length,
       manualStatus: null,
@@ -181,7 +191,7 @@ export class NexusMissionStore {
     return record;
   }
 
-  private buildSpec(goal: string, csvText: string, context?: string, models?: string[], taskType?: string): AgentJobSpec | { error: string } {
+  private buildSpec(goal: string, csvText: string, context?: string, models?: string[], taskType?: string, chunkStrategy?: 'auto' | 'none' | 'csv-rows'): AgentJobSpec | { error: string } {
     const exhibits = csvText
       ? [{ name: 'uploaded-exhibit.csv', content: csvText }]
       : undefined;
@@ -191,6 +201,7 @@ export class NexusMissionStore {
       context,
       ...(models && models.length > 0 ? { models } : {}),
       ...(taskType ? { taskType } : {}),
+      ...(chunkStrategy ? { chunkStrategy } : {}),
       ...(exhibits ? { exhibits } : {}),
     });
   }
@@ -291,6 +302,8 @@ export class NexusMissionStore {
       ...(m.models && m.models.length > 0 ? { models: m.models } : {}),
       jobId: m.jobId,
       usageUSD: job ? Number(job.usageUSD.toFixed(6)) : 0,
+      ...(job?.totalContextChars ? { totalContextChars: job.totalContextChars } : {}),
+      ...(job?.chunkProgress ? { chunkProgress: job.chunkProgress } : {}),
       error: m.error || job?.error,
       createdAt: m.createdAt,
       updatedAt: m.updatedAt,
@@ -358,7 +371,8 @@ export class NexusMissionStore {
       m.csvText,
       [m.context, prior, answerBlock].filter(Boolean).join('\n') || undefined,
       m.models,
-      m.taskType
+      m.taskType,
+      m.chunkStrategy
     );
     if ('error' in spec) {
       m.error = spec.error;
