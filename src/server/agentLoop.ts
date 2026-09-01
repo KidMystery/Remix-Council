@@ -35,6 +35,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { chunkDocuments } from '../lib/documentChunker';
+import { validateChunkPayloads } from '../lib/chunkAssembly';
 import { chunkContext } from './exhibitChunking';
 
 export type AgentMode = 'nexus' | 'oracle' | 'chamber';
@@ -140,6 +141,10 @@ export interface AgentJob {
   chunkProgress?: { done: number; total: number };
   /** Total exhibit+context chars the job is working through. */
   totalContextChars?: number;
+  /** Output token budget requested for the finalize call (logged for diagnosis). */
+  outputTokenBudget?: number;
+  /** Total prompt chars the largest single call assembled (deliberation). */
+  maxPromptChars?: number;
 }
 
 const CALL_TIMEOUT_MS = 110_000;
@@ -532,6 +537,21 @@ export class AgentLoopRunner {
           }
         }
         const chunks = parts;
+        // v9 assembly gate: every chunk list — A, B, C alike — must pass the
+        // same pre-send validation (non-empty, no forbidden control chars /
+        // lone surrogates, per-chunk size cap). A genuinely broken payload now
+        // fails loudly with a diagnosis instead of producing an empty model
+        // response downstream.
+        const assemblyCheck = validateChunkPayloads(chunks);
+        if (!assemblyCheck.ok) {
+          job.status = 'failed';
+          job.error = `Chunk assembly failed validation: ${assemblyCheck.error}`;
+          job.updatedAt = Date.now();
+          job.finishedAt = Date.now();
+          job.progress = { phase: 'failed', detail: job.error };
+          this.persist();
+          return { job, succeeded: false };
+        }
         const totalParts = chunks.length;
         job.totalContextChars = exhibitChars + (spec.context?.length || 0);
         const noteCap = Math.max(
@@ -717,11 +737,21 @@ export class AgentLoopRunner {
         let parsed = extractJsonBlock(res.content);
         let consensus = stripFencedJson(res.content);
         // Empty-consensus guard: a genuinely empty model response must never
-        // count as a pass. Retry once with a hard directive; a second empty
-        // response fails the job instead of stamping a hollow completion.
-        if (!(res.content || '').trim()) {
-          this.setPhase(job, 'deliberating', 'Empty response — retrying this pass...');
+        // count as a pass. v8 finding: missions A and B failed after exactly
+        // ONE immediate retry (same error on two different free models while
+        // C passed) — consistent with transient provider empty responses under
+        // free-tier load. Retry up to 3 times with escalating backoff, and
+        // report the last upstream error instead of a bare 'no verdict'.
+        const EMPTY_DIRECTIVE =
+          '\n\nYour previous response was empty — you MUST output either a verdict or an explicit list of missing data. Do not return an empty message.';
+        for (let emptyRetry = 0; emptyRetry < 3 && !(res.content || '').trim(); emptyRetry++) {
+          this.setPhase(
+            job,
+            'deliberating',
+            `Empty response — retrying this pass (attempt ${emptyRetry + 1}/3) after backoff...`
+          );
           this.persist();
+          await (this.deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms))))(500 * (emptyRetry + 1));
           try {
             const retry = await this.complete(
               job,
@@ -729,22 +759,25 @@ export class AgentLoopRunner {
                 { role: 'system', content: system },
                 {
                   role: 'user',
-                  content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}${researchBlock}\\n\\nYour previous response was empty — you MUST output either a verdict or an explicit list of missing data. Do not return an empty message.`,
+                  content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}${researchBlock}${EMPTY_DIRECTIVE}`,
                 },
               ],
               { maxTokens: 2200, ...(round ? { model: round.model } : {}) }
             );
             this.spend(job, retry.usageUSD);
             if (this.overBudget(job)) return this.finishBudgetOrCancel(job);
+            res.content = retry.content;
             parsed = extractJsonBlock(retry.content);
             consensus = stripFencedJson(retry.content);
-          } catch {
+          } catch (retryErr: any) {
+            job.error = `Deliberation retry failed upstream: ${retryErr?.message || retryErr}`;
             consensus = '';
           }
         }
         if (!(consensus || '').trim() && !(res.content || '').trim()) {
+          const upstream = job.error ? ` Last upstream error: ${job.error}` : '';
           job.status = 'failed';
-          job.error = 'Empty consensus: the model returned no verdict even after a retry.';
+          job.error = `Empty consensus: the model returned no verdict after 1 initial call + 3 backoff retries.${upstream}`;
           job.updatedAt = Date.now();
           job.finishedAt = Date.now();
           job.progress = { phase: 'failed', detail: job.error };
@@ -795,21 +828,29 @@ export class AgentLoopRunner {
     }
 
     // ---- 4. Finalize (fact-check + verdict + confidence) ----
+    // v9: multi-section nexus verdicts (verdict + debt table + income-vs-spend
+    // + phased plan + odds) were truncated at the old 2400-token budget — v8's
+    // 3503-byte response died mid "Income vs Spend". Raise the finalize output
+    // budget for nexus, log it on the job record, and scaffold verdict-first so
+    // even a truncated response retains the verdict and plan early.
     this.setPhase(job, 'finalizing', 'Fact-checking against the research and writing the final verdict...');
+    const finalizeBudget = spec.mode === 'nexus' ? 4500 : 2400;
+    job.outputTokenBudget = finalizeBudget;
+    console.log(`[agent] ${job.id} finalize output token budget: ${finalizeBudget}`);
     try {
       const finalRes = await this.complete(
         job,
         [
           {
             role: 'system',
-            content: `${SYSTEM_PROMPTS[spec.mode]}\nYou are in the FINALIZE phase. Verify the verdict against the exhibits first, then any cited research. Inventing a file is a failure. Output exactly these markdown sections:\n## Verdict\n## What I verified\n## What I could not verify\n## Confidence\n(honest — what supports it, what would raise it; never oversell)${spec.mode === 'nexus' ? '\n## What changed across passes\n(initial consensus -> reversals -> final position, with reasons)' : ''}\nEnd with:\n## Sources\n(only sources actually relied upon)`,
+            content: `${SYSTEM_PROMPTS[spec.mode]}\nYou are in the FINALIZE phase. Verify the verdict against the exhibits first, then any cited research. Inventing a file is a failure. VERDICT FIRST: begin your response immediately with '## Verdict' and keep it fully self-contained in the first third of the output — later sections may be truncated without losing the verdict. Output exactly these markdown sections:\n## Verdict\n## What I verified\n## What I could not verify\n## Confidence\n(honest — what supports it, what would raise it; never oversell)${spec.mode === 'nexus' ? '\n## What changed across passes\n(initial consensus -> reversals -> final position, with reasons)' : ''}\nEnd with:\n## Sources\n(only sources actually relied upon)`,
           },
           {
             role: 'user',
             content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}\n\nResearch:\n${researchBlock || '(no live research — strict free budget or plan decided none was needed)'}\n\nDeliberation history:\n${job.passes.map((p) => `${p.label} (${p.agreementScore ?? 'n/a'}%): ${stripFencedJson(p.consensus).slice(0, 1500)}`).join('\n\n')}`,
           },
         ],
-        { maxTokens: 2400, ...(council.length > 1 ? { model: council[0] } : {}) }
+        { maxTokens: finalizeBudget, ...(council.length > 1 ? { model: council[0] } : {}) }
       );
       this.spend(job, finalRes.usageUSD);
       job.verdict = stripFencedJson(finalRes.content);
