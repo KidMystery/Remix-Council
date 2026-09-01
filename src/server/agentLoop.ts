@@ -678,10 +678,10 @@ export class AgentLoopRunner {
         if (this.overBudget(job)) return this.finishBudgetOrCancel(job);
         let parsed = extractJsonBlock(res.content);
         let consensus = stripFencedJson(res.content);
-        // Empty-consensus guard: an empty response must never count as a pass.
-        // Retry once with a hard directive; a second empty response fails the
-        // job instead of stamping a hollow completion.
-        if (!consensus.trim()) {
+        // Empty-consensus guard: a genuinely empty model response must never
+        // count as a pass. Retry once with a hard directive; a second empty
+        // response fails the job instead of stamping a hollow completion.
+        if (!(res.content || '').trim()) {
           this.setPhase(job, 'deliberating', 'Empty response — retrying this pass...');
           this.persist();
           try {
@@ -704,7 +704,7 @@ export class AgentLoopRunner {
             consensus = '';
           }
         }
-        if (!consensus.trim()) {
+        if (!(consensus || '').trim() && !(res.content || '').trim()) {
           job.status = 'failed';
           job.error = 'Empty consensus: the model returned no verdict even after a retry.';
           job.updatedAt = Date.now();
