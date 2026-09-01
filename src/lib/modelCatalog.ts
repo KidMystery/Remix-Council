@@ -29,20 +29,13 @@ export const CURRENT_GEN_POOL: readonly CurrentGenModel[] = [
   { id: 'qwen/qwen3.8-max', org: 'qwen' },
   { id: 'z-ai/glm-5.3-flash', org: 'z-ai' },
   { id: 'moonshotai/kimi-k3', org: 'moonshotai' },
+  { id: 'meta/muse-spark-1.2-20260805', org: 'meta' },
 ] as const;
 
 /** Convenience: just the slugs, pool order preserved. */
 export const CURRENT_GEN_POOL_IDS: readonly string[] = CURRENT_GEN_POOL.map((m) => m.id);
 
 /** 6-org auto-coding preset (no experimental seats). */
-/** Verified-live 4-org council per mission spec (anthropic/openai/google/deepseek). */
-export const NEXUS_MODEL_COUNCIL = [
-  'anthropic/claude-sonnet-4.5',
-  'openai/gpt-5.1-codex-max',
-  'google/gemini-2.5-pro',
-  'deepseek/deepseek-v3.2',
-] as const;
-
 export const AUTO_CODING_COUNCIL = [
   'anthropic/claude-opus-5-fast',
   'openai/gpt-5.6-luna-pro',
@@ -50,11 +43,12 @@ export const AUTO_CODING_COUNCIL = [
   'deepseek/deepseek-v4-pro-0813',
   'x-ai/grok-4.6',
   'qwen/qwen3.8-max',
+  'meta/muse-spark-1.2-20260805',
 ] as const;
 
 /** Named presets accepted in the mission `models` field. */
 export const MODEL_PRESETS: Record<string, readonly string[]> = {
-  'auto-coding': NEXUS_MODEL_COUNCIL,
+  'auto-coding': AUTO_CODING_COUNCIL,
 };
 
 export const MAX_MISSION_MODELS = 8;
