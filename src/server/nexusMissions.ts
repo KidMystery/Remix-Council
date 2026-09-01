@@ -79,6 +79,8 @@ export interface NexusMissionView {
   usageUSD: number;
   /** Total exhibit+context chars the job is working through. */
   totalContextChars?: number;
+  /** Finalize output token budget requested for the underlying job (v9). */
+  outputTokenBudget?: number;
   /** Chunking progress (x/y chunks read) when the docket was split. */
   chunkProgress?: { done: number; total: number };
   error?: string;
@@ -329,6 +331,7 @@ export class NexusMissionStore {
       jobId: m.jobId,
       usageUSD: job ? Number(job.usageUSD.toFixed(6)) : 0,
       ...(job?.totalContextChars ? { totalContextChars: job.totalContextChars } : {}),
+      ...(job?.outputTokenBudget ? { outputTokenBudget: job.outputTokenBudget } : {}),
       ...(job?.chunkProgress ? { chunkProgress: job.chunkProgress } : {}),
       error: m.error || job?.error,
       createdAt: m.createdAt,
