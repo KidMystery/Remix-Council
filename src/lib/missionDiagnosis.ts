@@ -18,8 +18,14 @@
 
 // ── Tier definitions ────────────────────────────────────────────────────────
 
-/** Opus-class frontier models. Diagnosis-path ONLY — never default seating. */
+/**
+ * Opus-class frontier models + muse-spark lead. Diagnosis-path ONLY — never
+ * default seating. Candidates are tried IN ORDER: when one fails with a
+ * 400/5xx/provider error, the next is attempted (see runDiagnosisWithFallback)
+ * before any error reaches the user.
+ */
 export const DIAGNOSIS_MODEL_CANDIDATES: readonly string[] = [
+  'meta/muse-spark-1.2',
   'anthropic/claude-opus-5-fast',
   'anthropic/claude-opus-4.1',
 ] as const;
@@ -204,6 +210,122 @@ export class DiagnosisBudget {
   }
 }
 
+// ── Premier-model fallback chain ─────────────────────────────────────────────
+
+/** One attempted diagnosis call that did not succeed. */
+export interface DiagnosisAttemptLog {
+  model: string;
+  error_type: 'http_4xx' | 'http_5xx' | 'provider_error' | 'network' | 'unknown';
+  status?: number;
+  message: string;
+}
+
+export class DiagnosisFallbackError extends Error {
+  readonly attempts: DiagnosisAttemptLog[];
+  constructor(attempts: DiagnosisAttemptLog[]) {
+    super(
+      `All diagnosis model candidates failed (${attempts.length} attempts): ` +
+        attempts.map((a) => `${a.model}${a.status ? ` [${a.status}]` : ''} ${a.error_type}: ${a.message.slice(0, 160)}`).join(' | ')
+    );
+    this.name = 'DiagnosisFallbackError';
+    this.attempts = attempts;
+  }
+}
+
+// ── Session-level unhealthy registry (known muse-spark family bug) ──────────
+
+const UNHEALTHY_TTL_MS = 30 * 60 * 1000; // 30 minutes, then re-admitted
+const unhealthyUntil = new Map<string, number>();
+
+function isUnhealthy(model: string): boolean {
+  const until = unhealthyUntil.get(model);
+  if (until === undefined) return false;
+  if (Date.now() >= until) {
+    unhealthyUntil.delete(model);
+    return false;
+  }
+  return true;
+}
+
+function markUnhealthy(model: string, ttlMs = UNHEALTHY_TTL_MS): void {
+  unhealthyUntil.set(model, Date.now() + ttlMs);
+  console.warn(`[DiagnosisFallback] model "${model}" marked unhealthy for ${Math.round(ttlMs / 60000)}min (known family bug pattern).`);
+}
+
+/** Test/reset hook: clears the session-level unhealthy registry. */
+export function resetUnhealthyModels(): void {
+  unhealthyUntil.clear();
+}
+
+export function isModelUnhealthy(model: string): boolean {
+  return isUnhealthy(model);
+}
+
+/**
+ * Known muse-spark family bug patterns (observed 2026-09-01: 400 "Provider
+ * returned error" on diagnosis calls):
+ *  - provider rejects because the tool call is missing the 'arguments' field
+ *  - function/tool name exceeds the 64-char limit
+ */
+export function isKnownFamilyBug(err: unknown): boolean {
+  const msg = String((err as any)?.message ?? err ?? '');
+  return (
+    /missing.{0,24}'?arguments'?/i.test(msg) ||
+    /'arguments'.{0,24}(missing|required|expected)/i.test(msg) ||
+    /function name.{0,40}(exceed|longer than|>)?.{0,6}64/i.test(msg) ||
+    /name.{0,24}exceeds.{0,24}64.{0,12}(char|byte)/i.test(msg)
+  );
+}
+
+function classifyAttemptError(err: any): { error_type: DiagnosisAttemptLog['error_type']; status?: number } {
+  const status = typeof err?.status === 'number' ? err.status : undefined;
+  if (status && status >= 500) return { error_type: 'http_5xx', status };
+  if (status && status >= 400) return { error_type: 'http_4xx', status };
+  const msg = String(err?.message ?? err ?? '');
+  if (/provider|upstream|openrouter/i.test(msg)) return { error_type: 'provider_error' };
+  if (/fetch|network|timeout|aborted?/i.test(msg)) return { error_type: 'network' };
+  return { error_type: 'unknown' };
+}
+
+/**
+ * Runs the diagnosis call across ALL candidates in order. On a candidate
+ * failure (400/5xx/provider/network), logs the attempt and moves to the next
+ * candidate. muse-spark models that fail with a known family-bug 400 are
+ * marked unhealthy for the session and skipped on subsequent calls. Only when
+ * every candidate fails is a structured DiagnosisFallbackError surfaced.
+ */
+export async function runDiagnosisWithFallback(
+  call: Omit<DiagnosisModelCall, 'model' | 'candidates'>,
+  runDiagnosis: (c: DiagnosisModelCall) => Promise<{ raw: string; promptTokens: number; completionTokens: number }>,
+  candidates: readonly string[] = DIAGNOSIS_MODEL_CANDIDATES
+): Promise<{ raw: string; promptTokens: number; completionTokens: number; attempts: DiagnosisAttemptLog[] }> {
+  const attempts: DiagnosisAttemptLog[] = [];
+  for (const model of candidates) {
+    if (isUnhealthy(model)) {
+      attempts.push({ model, error_type: 'provider_error', message: 'skipped — marked unhealthy earlier this session (known family bug)' });
+      continue;
+    }
+    try {
+      const res = await runDiagnosis({ ...call, model, candidates });
+      if (attempts.length > 0) {
+        console.info(`[DiagnosisFallback] diagnosis succeeded on candidate "${model}" after ${attempts.length} failed attempt(s).`);
+      }
+      return { ...res, attempts };
+    } catch (err: any) {
+      const { error_type, status } = classifyAttemptError(err);
+      const message = String(err?.message ?? err ?? 'unknown error');
+      attempts.push({ model, error_type, status, message });
+      console.error(`[DiagnosisFallback] candidate "${model}" failed: ${error_type}${status ? ` HTTP ${status}` : ''} — ${message.slice(0, 300)}`);
+      const family = model.includes('muse-spark');
+      if (family && status === 400 && isKnownFamilyBug(err)) {
+        markUnhealthy(model);
+      }
+      // Any other error: try the next candidate.
+    }
+  }
+  throw new DiagnosisFallbackError(attempts);
+}
+
 // ── Orchestrator (worker tier does the work; oracle only diagnoses) ────────
 
 export interface DiagnosisModelCall {
@@ -250,7 +372,6 @@ export async function runMissionWithDiagnosis(
   const guard = new MissionSpendGuard(opts.spend ?? {});
   const budget = new DiagnosisBudget(1);
   const workers = opts.workerModels ?? WORKER_MODEL_CANDIDATES;
-  const diagnosisModel = DIAGNOSIS_MODEL_CANDIDATES[0];
   let passes = 0;
   let estimatedCostUSD = 0;
   const estimated = (est: (() => number) | undefined, fallback: number) =>
@@ -289,19 +410,29 @@ export async function runMissionWithDiagnosis(
     consensus_empty: !attempt.consensus.trim(),
     consensus_excerpt: attempt.consensus.slice(0, 2000),
   });
-  const { raw, promptTokens, completionTokens } = await deps.runDiagnosis({
-    model: diagnosisModel,
-    system: DIAGNOSIS_SYSTEM_PROMPT,
-    user: failureContext,
-    candidates: DIAGNOSIS_MODEL_CANDIDATES,
-  });
-  const diagActual = estimateDiagnosisCostUSD(promptTokens, completionTokens);
-  guard.recordPass('diagnosis', diagActual);
-  estimatedCostUSD += diagActual;
-
-  const diagnosis = parseDiagnosisOutput(raw);
-  if (!diagnosis) {
-    return { status: 'stopped', reason: 'diagnosis output unparseable — stopping instead of re-running', estimatedCostUSD };
+  let diagnosis: DiagnosisReport | null = null;
+  try {
+    const { raw, promptTokens, completionTokens } = await runDiagnosisWithFallback(
+      { system: DIAGNOSIS_SYSTEM_PROMPT, user: failureContext },
+      deps.runDiagnosis,
+      DIAGNOSIS_MODEL_CANDIDATES
+    );
+    const diagActual = estimateDiagnosisCostUSD(promptTokens, completionTokens);
+    guard.recordPass('diagnosis', diagActual);
+    estimatedCostUSD += diagActual;
+    diagnosis = parseDiagnosisOutput(raw);
+    if (!diagnosis) {
+      return { status: 'stopped', reason: 'diagnosis output unparseable — stopping instead of re-running', estimatedCostUSD };
+    }
+  } catch (err: any) {
+    if (err instanceof DiagnosisFallbackError) {
+      return {
+        status: 'stopped',
+        reason: `diagnosis failed on all model candidates — ${err.message}`,
+        estimatedCostUSD,
+      };
+    }
+    throw err;
   }
 
   // ── Worker tier: apply the prescription ──
