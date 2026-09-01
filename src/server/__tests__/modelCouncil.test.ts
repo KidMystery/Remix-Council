@@ -6,12 +6,15 @@ import { sanitizeAgentSpec } from '../agentLoop';
 const COUNCIL = [...MODEL_PRESETS['auto-coding']];
 
 describe('modelCatalog presets + validation', () => {
-  it('expands "auto-coding" to the 7-org mission council', () => {
+  it('expands "auto-coding" to the worker-tier 6-org mission council (opus-class excluded)', () => {
     const res = expandModelsInput('auto-coding');
     expect(res).toEqual({ models: COUNCIL });
-    expect(COUNCIL).toHaveLength(7);
+    expect(COUNCIL).toHaveLength(6);
     const orgs = new Set(COUNCIL.map((m) => m.split('/')[0]));
-    expect(orgs).toEqual(new Set(['anthropic', 'openai', 'google', 'deepseek', 'x-ai', 'qwen', 'meta']));
+    expect(orgs).toEqual(new Set(['openai', 'google', 'deepseek', 'x-ai', 'qwen', 'meta']));
+    for (const opus of ['anthropic/claude-opus-5-fast', 'anthropic/claude-opus-4.1']) {
+      expect(COUNCIL).not.toContain(opus);
+    }
   });
 
   it('rejects unknown presets and malformed input', () => {

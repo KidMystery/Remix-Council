@@ -21,7 +21,6 @@ export interface CurrentGenModel {
 }
 
 export const CURRENT_GEN_POOL: readonly CurrentGenModel[] = [
-  { id: 'anthropic/claude-opus-5-fast', org: 'anthropic' },
   { id: 'openai/gpt-5.6-luna-pro', org: 'openai' },
   { id: 'google/gemini-3.7-flash', org: 'google' },
   { id: 'deepseek/deepseek-v4-pro-0813', org: 'deepseek' },
@@ -35,9 +34,17 @@ export const CURRENT_GEN_POOL: readonly CurrentGenModel[] = [
 /** Convenience: just the slugs, pool order preserved. */
 export const CURRENT_GEN_POOL_IDS: readonly string[] = CURRENT_GEN_POOL.map((m) => m.id);
 
-/** 6-org auto-coding preset (no experimental seats). */
-export const AUTO_CODING_COUNCIL = [
+/**
+ * Opus-class frontier models — OPT-IN via the diagnosis path ONLY
+ * (see src/lib/missionDiagnosis.ts). Never seat these in a default council.
+ */
+export const DIAGNOSIS_ONLY_MODELS: readonly string[] = [
   'anthropic/claude-opus-5-fast',
+  'anthropic/claude-opus-4.1',
+] as const;
+
+/** Worker-tier auto-coding council (penny bench; opus-class removed). */
+export const AUTO_CODING_COUNCIL = [
   'openai/gpt-5.6-luna-pro',
   'google/gemini-3.7-flash',
   'deepseek/deepseek-v4-pro-0813',
