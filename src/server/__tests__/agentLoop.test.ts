@@ -7,6 +7,7 @@ import {
   type AgentLoopDeps,
 } from '../agentLoop';
 import { chunkDocuments } from '../../lib/documentChunker';
+import { chunkContext } from '../exhibitChunking';
 
 /** Deterministic catalog entry for rate math. */
 const CATALOG = [
@@ -324,19 +325,23 @@ describe('AgentLoopRunner exhibit reading walk', () => {
     expect(planBody).toContain('repo/tree.txt');
     expect(planBody).not.toContain('Para 5 ');
 
-    // Deliberation works from the reading ledger, not the raw bodies.
+    // v7 fix: deliberation receives the FULL chunk text inline (the
+    // ledger-only delivery was the v6 blocker — rows never reached the
+    // prompt) plus the ledger as a cross-part index.
     const passBody = String(
       log.find((c) => String(c.body.messages?.[0]?.content || '').includes('DELIBERATION phase'))?.body.messages?.[1]?.content || ''
     );
-    expect(passBody).toContain('reading ledger');
+    expect(passBody).toContain('FULL text of every part');
+    expect(passBody).toContain('Para 5 ');
     expect(passBody).toContain('widget count 41');
-    expect(passBody).not.toContain('Para 5 ');
+    expect(passBody).toContain('reading ledger');
 
-    // Finalize also verifies against the ledger.
+    // Finalize verifies against the full text + ledger too.
     const finalBody = String(
       log.find((c) => String(c.body.messages?.[0]?.content || '').includes('FINALIZE phase'))?.body.messages?.[1]?.content || ''
     );
     expect(finalBody).toContain('reading ledger');
+    expect(finalBody).toContain('Para 5 ');
   });
 
   it('reads small exhibits inline in one pass (no reading phase)', async () => {
@@ -418,5 +423,79 @@ describe('AgentLoopRunner exhibit reading walk', () => {
     expect(redacted.spec.exhibits?.[0].content).toMatch(/read server-side/);
     // The live job still holds its bodies for the run itself.
     expect(j.spec.exhibits?.[0].content).toBe('SECRET-BODY-9137');
+  });
+});
+
+describe('AgentLoopRunner chunk-inline render (v7 regression: CSV rows must reach the prompt)', () => {
+  // CSV exhibit well over both the 50k inline threshold and the 100k
+  // CHUNK_TARGET_CHARS → chunked walk with multiple parts. ~260 rows of
+  // ~443 chars ≈ 115KB; header + body rows with balances/APRs (the exact
+  // data v6 missions A/B/C could not see).
+  const HEADER = 'card,balance_usd,apr_pct,statement,notes\n';
+  const ROWS = Array.from(
+    { length: 260 },
+    (_, i) => `card-${i},${(1200 + i * 7.77).toFixed(2)},${(15 + (i % 15)).toFixed(2)},2026-0${(i % 6) + 1},${'x'.repeat(400)}`
+  );
+  const CSV = HEADER + ROWS.join('\n');
+  expect(CSV.length).toBeGreaterThan(100_000);
+
+  function csvRouter(body: any): any {
+    const sys = String(body?.messages?.[0]?.content || '');
+    if (sys.includes('READING phase')) return readingCall;
+    if (sys.includes('PLANNING phase')) return planCall;
+    if (sys.includes('DELIBERATION phase')) return passCall(70);
+    return finalCall;
+  }
+
+  it('renders full CSV body rows into the deliberation and finalize prompts (a)', async () => {
+    const exhibits = [{ name: 'uploaded-exhibit.csv', content: CSV }];
+    const { fetchFn, log } = makeFetchMock((_i, body) => csvRouter(body));
+    const runner = makeRunner(fetchFn);
+    const result = await runner.run(job({ exhibits, maxResearchQueries: 0, maxDeliberationPasses: 1 }));
+
+    expect(result.succeeded).toBe(true);
+    expect(result.job.status).toBe('done');
+
+    const passBody = String(
+      log.find((c) => String(c.body.messages?.[0]?.content || '').includes('DELIBERATION phase'))?.body.messages?.[1]?.content || ''
+    );
+    // Actual body rows — first AND last — appear verbatim in the prompt the
+    // model deliberates over (guards against head-only/ledger-only delivery).
+    expect(passBody).toContain(ROWS[0]);
+    expect(passBody).toContain(ROWS[ROWS.length - 1]);
+    expect(passBody).toContain('uploaded-exhibit.csv');
+    expect(passBody).toContain('FULL text of every part');
+
+    const finalBody = String(
+      log.find((c) => String(c.body.messages?.[0]?.content || '').includes('FINALIZE phase'))?.body.messages?.[1]?.content || ''
+    );
+    expect(finalBody).toContain(ROWS[0]);
+    expect(finalBody).toContain(ROWS[ROWS.length - 1]);
+  });
+
+  it('no rendered part is header-only and every row is delivered exactly once (b, c)', async () => {
+    const exhibits = [{ name: 'uploaded-exhibit.csv', content: CSV }];
+    const { fetchFn, log } = makeFetchMock((_i, body) => csvRouter(body));
+    const runner = makeRunner(fetchFn);
+    const result = await runner.run(job({ exhibits, maxResearchQueries: 0, maxDeliberationPasses: 1 }));
+    expect(result.succeeded).toBe(true);
+
+    const readingBodies = log
+      .filter((c) => String(c.body.messages?.[0]?.content || '').includes('READING phase'))
+      .map((c) => String(c.body.messages?.[1]?.content || ''));
+    expect(readingBodies.length).toBeGreaterThan(1);
+    // (b) every part carries body rows — none is header-only. The mock's
+    // reading notes and the goal contain no 'card-' strings, so any 'card-'
+    // hit comes from the chunk body itself.
+    for (const b of readingBodies) expect(b).toContain('card-');
+
+    // (c) row-count preservation: every row appears exactly once across the
+    // reading prompts, and the chunker reassembles the exhibit exactly.
+    for (const r of ROWS) {
+      expect(readingBodies.filter((b) => b.includes(r))).toHaveLength(1);
+    }
+    const plan = chunkContext(CSV, { strategy: 'csv-rows' });
+    expect(plan.length).toBeGreaterThan(1);
+    expect(plan.map((c) => c.content).join('')).toBe(CSV);
   });
 });
