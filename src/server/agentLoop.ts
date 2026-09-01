@@ -592,8 +592,22 @@ export class AgentLoopRunner {
           this.persist();
           return { job, succeeded: false };
         }
+        // v7 chunk-inline render fix (v6 blocker): deliberation and finalize
+        // must SEE the full text of every chunk — headers AND all body rows —
+        // not just the distilled reading ledger. The ledger alone left the
+        // model without the actual data (v6: it tried to tool-read the
+        // attachment; balances/APRs never reached the prompt). Each chunk is
+        // already capped at ~100KB by the chunker, so the block stays within
+        // the per-chunk budget; the ledger rides after it as a cross-part index.
         evidenceBlock =
-          `\n\n[Exhibit reading ledger — every part was read in its own pass before deliberation]\n${manifest}\n\n` +
+          `\n\n[Attached exhibits — FULL text of every part, delivered inline (no attachment-only references)]\n${manifest}\n\n` +
+          chunks
+            .map(
+              (c) =>
+                `--- File: ${c.sourceName} — part ${c.index + 1}/${c.total} (full text) ---\n${c.content}`
+            )
+            .join('\n\n') +
+          `\n\n[Exhibit reading ledger — cross-part notes distilled from the full text above]\n` +
           job.readings.map((r) => `### ${r.label} · ${r.sourceName} (section ${r.section})\n${r.notes}`).join('\n\n');
       }
     }
