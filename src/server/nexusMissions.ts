@@ -39,6 +39,7 @@ export interface NexusMissionRecord {
   models?: string[];
   /** Allocator task-domain hint (e.g. "code"). */
   taskType?: string;
+  maxJobCostUSD?: number;
   /** How oversized context/exhibits are split: auto (default), csv-rows, none. */
   chunkStrategy?: 'auto' | 'none' | 'csv-rows';
   csvHeaders: string[];
@@ -133,7 +134,7 @@ export class NexusMissionStore {
    * Validates and creates a mission. Returns either a record or an error
    * message for the route to turn into a 400.
    */
-  create(input: { goal?: unknown; csv?: unknown; context?: unknown; agent?: unknown; models?: unknown; taskType?: unknown; chunkStrategy?: unknown }): NexusMissionRecord | { error: string } {
+  create(input: { goal?: unknown; csv?: unknown; context?: unknown; agent?: unknown; models?: unknown; taskType?: unknown; chunkStrategy?: unknown; maxJobCostUSD?: unknown }): NexusMissionRecord | { error: string } {
     const goal = typeof input.goal === 'string' ? input.goal.trim() : '';
     if (!goal) return { error: 'A goal is required.' };
 
@@ -160,7 +161,11 @@ export class NexusMissionStore {
       ? input.chunkStrategy
       : undefined;
 
-    const spec = this.buildSpec(goal, csvText, typeof input.context === 'string' ? input.context : undefined, modelsRes.models, taskType, chunkStrategy);
+    const maxJobCostUSD =
+      typeof input.maxJobCostUSD === 'number' && isFinite(input.maxJobCostUSD)
+        ? Math.min(50, Math.max(0.1, input.maxJobCostUSD))
+        : undefined;
+    const spec = this.buildSpec(goal, csvText, typeof input.context === 'string' ? input.context : undefined, modelsRes.models, taskType, chunkStrategy, maxJobCostUSD);
     if ('error' in spec) return { error: spec.error };
 
     const parsed = csvText ? parseCsv(csvText) : { headers: [], rows: [] as string[][] };
@@ -172,6 +177,7 @@ export class NexusMissionStore {
       csvText,
       ...(modelsRes.models.length > 0 ? { models: modelsRes.models } : {}),
       ...(taskType ? { taskType } : {}),
+      ...(maxJobCostUSD !== undefined ? { maxJobCostUSD } : {}),
       ...(chunkStrategy ? { chunkStrategy } : {}),
       csvHeaders: parsed.headers,
       csvRowCount: parsed.rows.length,
@@ -191,7 +197,7 @@ export class NexusMissionStore {
     return record;
   }
 
-  private buildSpec(goal: string, csvText: string, context?: string, models?: string[], taskType?: string, chunkStrategy?: 'auto' | 'none' | 'csv-rows'): AgentJobSpec | { error: string } {
+  private buildSpec(goal: string, csvText: string, context?: string, models?: string[], taskType?: string, chunkStrategy?: 'auto' | 'none' | 'csv-rows', maxJobCostUSD?: number): AgentJobSpec | { error: string } {
     const exhibits = csvText
       ? [{ name: 'uploaded-exhibit.csv', content: csvText }]
       : undefined;
@@ -202,6 +208,7 @@ export class NexusMissionStore {
       ...(models && models.length > 0 ? { models } : {}),
       ...(taskType ? { taskType } : {}),
       ...(chunkStrategy ? { chunkStrategy } : {}),
+      ...(maxJobCostUSD !== undefined ? { maxJobCostUSD } : {}),
       ...(exhibits ? { exhibits } : {}),
     });
   }
@@ -372,7 +379,8 @@ export class NexusMissionStore {
       [m.context, prior, answerBlock].filter(Boolean).join('\n') || undefined,
       m.models,
       m.taskType,
-      m.chunkStrategy
+      m.chunkStrategy,
+      m.maxJobCostUSD
     );
     if ('error' in spec) {
       m.error = spec.error;
