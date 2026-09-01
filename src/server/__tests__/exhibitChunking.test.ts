@@ -31,8 +31,15 @@ describe('chunkContext', () => {
     }
     // indices are 1..n
     expect(chunks.map((c) => c.index)).toEqual(chunks.map((_, i) => i));
-    expect(chunks.every((c) => c.total === chunks.length)).toBe(true);
-  });
+        expect(chunks.every((c) => c.total === chunks.length)).toBe(true);
+        // no chunk is header-only: each carries body rows summing to the total
+        const totalRows = 5080;
+        const rowsPerChunk = chunks.map(
+          (c) => c.content.split('\n').filter((l) => l.startsWith('2026-08-01,')).length
+        );
+        for (const n of rowsPerChunk) expect(n).toBeGreaterThan(0);
+        expect(rowsPerChunk.reduce((a, b) => a + b, 0)).toBe(totalRows);
+      });
 
   it('splits paragraph text at paragraph boundaries', () => {
     const para = 'The quarterly revenue rose 12% because of expansion into two new regions and higher retention.\n\n';

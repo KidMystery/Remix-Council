@@ -355,6 +355,39 @@ describe('AgentLoopRunner exhibit reading walk', () => {
     expect(passBody).toContain('2026-01-01,40');
   });
 
+  it('delivers chunked context-only bodies when there are no exhibits (regression: header-only delivery)', async () => {
+    // 160 unique ~800-char CSV-style rows → ~128k chars: over both the 50k
+        // MAX_CONTEXT_CHARS cap and the 100k CHUNK_TARGET_CHARS so it splits
+        // into multiple chunks, with NO exhibits — context-only docket.
+    const ROWS = Array.from({ length: 160 }, (_, i) => `row${i},acct-${i},${1000 + i},${'d'.repeat(700)}`);
+    const CONTEXT = 'section,data,amount,notes\n' + ROWS.join('\n');
+    expect(CONTEXT.length).toBeGreaterThan(50_000);
+
+    const { fetchFn, log } = makeFetchMock((_i, body) => phaseRouter(body));
+    const runner = makeRunner(fetchFn);
+    const result = await runner.run(job({ context: CONTEXT, maxResearchQueries: 0, maxDeliberationPasses: 1 }));
+
+    expect(result.succeeded).toBe(true);
+    expect(result.job.status).toBe('done');
+    // Context-only chunked missions must run the reading walk too.
+    expect(result.job.readings.length).toBeGreaterThan(1);
+
+    // Every reading call carried actual body rows, not just the header line.
+    const readingBodies = log
+      .filter((c) => String(c.body.messages?.[0]?.content || '').includes('READING phase'))
+      .map((c) => String(c.body.messages?.[1]?.content || ''));
+    for (const r of ROWS) {
+      expect(readingBodies.filter((b) => b.includes(r))).toHaveLength(1);
+    }
+
+    // Deliberation sees the reading ledger facts, not just the first 50k head.
+    const passBody = String(
+      log.find((c) => String(c.body.messages?.[0]?.content || '').includes('DELIBERATION phase'))?.body.messages?.[1]?.content || ''
+    );
+    expect(passBody).toContain('widget count 41');
+    expect(passBody).toContain('row0,');
+  });
+
   it('fails honestly when every exhibit part fails to read', async () => {
     const exhibits = [{ name: 'tree.txt', content: 'x'.repeat(70_000) }];
     const { fetchFn } = makeFetchMock((_i, body) => {
