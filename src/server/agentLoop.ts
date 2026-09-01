@@ -132,6 +132,8 @@ export interface AgentJob {
   citations: AgentSource[];
   confidence?: string;
   usageUSD: number;
+  /** Cumulative token counts (logged even when free-budget zeroes the cost). */
+  usageTokens?: { prompt: number; completion: number };
   error?: string;
   progress: { phase: string; detail: string };
   /** Chunking progress (x chunks read of y total) when the docket was split. */
@@ -347,11 +349,26 @@ export class AgentLoopRunner {
 
       const usage = data?.usage || {};
       const rates = this.ratesFor(model);
+      const promptTokens = Number(usage.prompt_tokens) || 0;
+      const completionTokens = Number(usage.completion_tokens) || 0;
+      if (promptTokens > 0 || completionTokens > 0) {
+        job.usageTokens = {
+          prompt: (job.usageTokens?.prompt || 0) + promptTokens,
+          completion: (job.usageTokens?.completion || 0) + completionTokens,
+        };
+      }
+      // Free-budget invariant: a :free model under budget:'free' never logs a
+      // token cost — but the token counts above are still recorded/logged for
+      // visibility.
+      const freeBudget = job.spec.budget === 'free' && model.toLowerCase().endsWith(':free');
+      if (freeBudget && (promptTokens > 0 || completionTokens > 0)) {
+        console.log(`[agent] free-budget ${model}: tokens in=${promptTokens} out=${completionTokens} — cost logged as $0`);
+      }
       const tokenCost =
-        (Number(usage.prompt_tokens) || 0) * rates.promptPerM +
-        (Number(usage.completion_tokens) || 0) * rates.completionPerM;
+        promptTokens * rates.promptPerM +
+        completionTokens * rates.completionPerM;
       const searchCost = Number(usage.web_search_cost || usage.search_cost || 0);
-      const usageUSD = tokenCost / 1_000_000 + searchCost;
+      const usageUSD = freeBudget ? 0 : tokenCost / 1_000_000 + searchCost;
 
       return { content, citations, usageUSD };
     } finally {
@@ -372,6 +389,9 @@ export class AgentLoopRunner {
   }
 
   private overBudget(job: AgentJob): boolean {
+    // Free-budget path: the mission-create guard already rejects paid models,
+    // so a :free model under budget:'free' never trips the spend cap.
+    if (job.spec.budget === 'free' && String(job.spec.model || '').toLowerCase().endsWith(':free')) return false;
     const cap = job.spec.maxJobCostUSD || this.deps.defaultMaxJobCostUSD();
     return job.usageUSD >= cap;
   }
