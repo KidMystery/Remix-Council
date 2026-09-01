@@ -676,8 +676,43 @@ export class AgentLoopRunner {
               );
         this.spend(job, res.usageUSD);
         if (this.overBudget(job)) return this.finishBudgetOrCancel(job);
-        const parsed = extractJsonBlock(res.content);
-        const consensus = stripFencedJson(res.content);
+        let parsed = extractJsonBlock(res.content);
+        let consensus = stripFencedJson(res.content);
+        // Empty-consensus guard: an empty response must never count as a pass.
+        // Retry once with a hard directive; a second empty response fails the
+        // job instead of stamping a hollow completion.
+        if (!consensus.trim()) {
+          this.setPhase(job, 'deliberating', 'Empty response — retrying this pass...');
+          this.persist();
+          try {
+            const retry = await this.complete(
+              job,
+              [
+                { role: 'system', content: system },
+                {
+                  role: 'user',
+                  content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}${researchBlock}\\n\\nYour previous response was empty — you MUST output either a verdict or an explicit list of missing data. Do not return an empty message.`,
+                },
+              ],
+              { maxTokens: 2200, ...(round ? { model: round.model } : {}) }
+            );
+            this.spend(job, retry.usageUSD);
+            if (this.overBudget(job)) return this.finishBudgetOrCancel(job);
+            parsed = extractJsonBlock(retry.content);
+            consensus = stripFencedJson(retry.content);
+          } catch {
+            consensus = '';
+          }
+        }
+        if (!consensus.trim()) {
+          job.status = 'failed';
+          job.error = 'Empty consensus: the model returned no verdict even after a retry.';
+          job.updatedAt = Date.now();
+          job.finishedAt = Date.now();
+          job.progress = { phase: 'failed', detail: job.error };
+          this.persist();
+          return { job, succeeded: false };
+        }
         const score = typeof parsed?.agreementScore === 'number' ? clampInt(parsed.agreementScore, 50, 0, 100) : undefined;
         job.passes.push({
           index: pass + 1,
