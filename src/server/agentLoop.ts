@@ -488,8 +488,12 @@ export class AgentLoopRunner {
       contextChunks = chunkContext(spec.context, { strategy: spec.chunkStrategy });
     }
     let evidenceBlock = '';
-    if (exhibits.length > 0) {
-      if (exhibitChars <= EXHIBIT_INLINE_CHARS && contextChunks.length === 0) {
+        // Walk when there are exhibits OR when the context itself was chunked —
+        // context-only missions must still deliver every chunk body (a bare
+        // `exhibits.length > 0` gate dropped chunk bodies and left deliberation
+        // reading only the first 50k head, i.e. headers with zero rows).
+        if (exhibits.length > 0 || contextChunks.length > 0) {
+          if (exhibitChars <= EXHIBIT_INLINE_CHARS && contextChunks.length === 0) {
         evidenceBlock =
           `\n\n[Attached exhibits]\n${manifest}\n\n` +
           exhibits.map((e) => `--- File: ${e.name} ---\n${e.content}`).join('\n\n');
