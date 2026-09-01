@@ -537,11 +537,12 @@ export const NexusLabView: React.FC<NexusLabViewProps> = ({
     setEditingSeat(null);
   };
 
-  /** Model palette offered to the per-seat personality editor. */
-  const rosterModelOptions = [
-    ...CURATED_NEXUS_MODELS.map((m) => ({ id: m.id, name: m.name })),
-    ...catalog.slice(0, 50).map((c: RawOpenRouterModel) => ({ id: c.id, name: (c as any).name || c.id })),
-  ];
+  /** Model palette offered to the per-seat personality editor.
+   *  FULL live catalog from /api/council/models — no curated subset cap.
+   *  Falls back to the curated list only when the live catalog is empty. */
+  const rosterModelOptions = catalog.length > 0
+    ? catalog.map((c: RawOpenRouterModel) => ({ id: c.id, name: (c as any).name || c.id }))
+    : CURATED_NEXUS_MODELS.map((m) => ({ id: m.id, name: m.name }));
   const [enableWebGrounding, setEnableWebGrounding] = useState(false);
   const [enableCodeSandbox, setEnableCodeSandbox] = useState(true);
   const [deepDocumentMode, setDeepDocumentMode] = useState(false);

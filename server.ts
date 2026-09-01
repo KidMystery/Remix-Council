@@ -1129,6 +1129,7 @@ export async function startServer(portOverride?: number) {
       agent: res.locals.agent,
       models: body.models,
       taskType: body.taskType,
+      chunkStrategy: body.chunkStrategy,
     });
     if ('error' in created) return res.status(400).json({ error: created.error });
     return res.status(201).json({ data: { missionId: created.id, status: 'running' } });

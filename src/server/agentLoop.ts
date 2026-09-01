@@ -35,6 +35,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { chunkDocuments } from '../lib/documentChunker';
+import { chunkContext } from './exhibitChunking';
 
 export type AgentMode = 'nexus' | 'oracle' | 'chamber';
 export type AgentJobStatus =
@@ -71,6 +72,13 @@ export interface AgentJobSpec {
   /** Allocator task domain hint (e.g. "code") — accepted for bookkeeping. */
   taskType?: string;
   budget?: 'free' | 'cheap' | 'quality';
+  /**
+   * Chunking strategy for oversized context/exhibits:
+   *  auto  — split at natural boundaries automatically (default)
+   *  csv-rows — split on CSV row boundaries
+   *  none  — legacy behavior (context head-truncated to the cap)
+   */
+  chunkStrategy?: 'auto' | 'none' | 'csv-rows';
   maxResearchQueries?: number;
   maxDeliberationPasses?: number;
   maxJobCostUSD?: number;
@@ -126,6 +134,10 @@ export interface AgentJob {
   usageUSD: number;
   error?: string;
   progress: { phase: string; detail: string };
+  /** Chunking progress (x chunks read of y total) when the docket was split. */
+  chunkProgress?: { done: number; total: number };
+  /** Total exhibit+context chars the job is working through. */
+  totalContextChars?: number;
 }
 
 const CALL_TIMEOUT_MS = 110_000;
@@ -467,27 +479,51 @@ export class AgentLoopRunner {
     // Small sets ride inline in a single read. Anything bigger is walked
     // part-by-part — the same ~20-page chunker as local Autonomous — and
     // distilled into a bounded ledger. Every part is read; none is dropped.
+    // When chunking is on (default), each part also receives a running
+    // summary of everything read before it, so the final synthesis keeps
+    // the middle data that plain truncation used to destroy.
+    const chunkingOn = (spec.chunkStrategy ?? 'auto') !== 'none';
+    let contextChunks: ReturnType<typeof chunkContext> = [];
+    if (chunkingOn && spec.context && spec.context.length > MAX_CONTEXT_CHARS) {
+      contextChunks = chunkContext(spec.context, { strategy: spec.chunkStrategy });
+    }
     let evidenceBlock = '';
     if (exhibits.length > 0) {
-      if (exhibitChars <= EXHIBIT_INLINE_CHARS) {
+      if (exhibitChars <= EXHIBIT_INLINE_CHARS && contextChunks.length === 0) {
         evidenceBlock =
           `\n\n[Attached exhibits]\n${manifest}\n\n` +
           exhibits.map((e) => `--- File: ${e.name} ---\n${e.content}`).join('\n\n');
       } else {
-        const docPlan = chunkDocuments(
-          exhibits.map((e) => ({ name: e.name, content: e.content })),
-          { pagesPerChunk: 20, maxChunks: MAX_EXHIBIT_CHUNKS }
-        );
-        const chunks = docPlan.chunks;
+        const parts: Array<{ sourceName: string; index: number; total: number; content: string; estimatedPages: number }> = [];
+        for (const c of contextChunks) {
+          parts.push({ sourceName: 'context', index: c.index, total: c.total, content: c.content, estimatedPages: Math.max(1, Math.round(c.content.length / 3000)) });
+        }
+        if (exhibits.length > 0) {
+          const docPlan = chunkDocuments(
+            exhibits.map((e) => ({ name: e.name, content: e.content })),
+            { pagesPerChunk: 20, maxChunks: MAX_EXHIBIT_CHUNKS }
+          );
+          for (const c of docPlan.chunks) {
+            parts.push({ sourceName: c.sourceName, index: c.index, total: c.total, content: c.content, estimatedPages: c.estimatedPages });
+          }
+        }
+        const chunks = parts;
+        const totalParts = chunks.length;
+        job.totalContextChars = exhibitChars + (spec.context?.length || 0);
         const noteCap = Math.max(
           600,
           Math.min(READING_NOTE_CHARS, Math.floor(READING_LEDGER_CHARS / Math.max(1, chunks.length)))
         );
+        let runningSummary = '';
         for (let i = 0; i < chunks.length; i++) {
           const c = chunks[i];
           if (this.cancelled.has(job.id)) return this.finishBudgetOrCancel(job);
+          job.chunkProgress = { done: i, total: totalParts };
           this.setPhase(job, 'reading', `Reading exhibit part ${i + 1}/${chunks.length} · ${c.sourceName} section ${c.index + 1}/${c.total} (~${c.estimatedPages} pages)...`);
           try {
+            const summaryBlock = runningSummary
+              ? `\n\n[Running summary of the parts read so far — keep these facts and build on them, do not repeat them verbatim]\n${runningSummary}`
+              : '';
             const res = await this.complete(
               job,
               [
@@ -497,7 +533,7 @@ export class AgentLoopRunner {
                 },
                 {
                   role: 'user',
-                  content: `Directive (context only — do not answer it yet): ${spec.goal.slice(0, MAX_GOAL_CHARS)}\n\n[Exhibit part ${i + 1} of ${chunks.length} — ${c.sourceName}, section ${c.index + 1}/${c.total}, ~${c.estimatedPages} pages]\n${c.content}\n\nReport the facts from this part only. Other parts follow in later passes.`,
+                  content: `Directive (context only — do not answer it yet): ${spec.goal.slice(0, MAX_GOAL_CHARS)}${summaryBlock}\n\n[Exhibit part ${i + 1} of ${chunks.length} — ${c.sourceName}, section ${c.index + 1}/${c.total}, ~${c.estimatedPages} pages]\n${c.content}\n\nReport the facts from this part only. Other parts follow in later passes.`,
                 },
               ],
               { maxTokens: 1600 }
@@ -505,15 +541,17 @@ export class AgentLoopRunner {
             this.spend(job, res.usageUSD);
             if (this.overBudget(job)) return this.finishBudgetOrCancel(job);
             job.readings.push({
-              label: `Part ${i + 1}/${chunks.length}`,
+              label: `Part ${i + 1}/${totalParts}`,
               sourceName: c.sourceName,
               section: `${c.index + 1}/${c.total}`,
               notes: stripFencedJson(res.content).slice(0, noteCap),
             });
+            runningSummary = [runningSummary, `${c.sourceName} (part ${i + 1}/${totalParts}): ${stripFencedJson(res.content).slice(0, 600)}`].filter(Boolean).join('\n');
+            job.chunkProgress = { done: i + 1, total: totalParts };
             this.persist();
           } catch (err: any) {
             job.readings.push({
-              label: `Part ${i + 1}/${chunks.length}`,
+              label: `Part ${i + 1}/${totalParts}`,
               sourceName: c.sourceName,
               section: `${c.index + 1}/${c.total}`,
               notes: `[Reading failed: ${err?.message}]`,
@@ -638,8 +676,43 @@ export class AgentLoopRunner {
               );
         this.spend(job, res.usageUSD);
         if (this.overBudget(job)) return this.finishBudgetOrCancel(job);
-        const parsed = extractJsonBlock(res.content);
-        const consensus = stripFencedJson(res.content);
+        let parsed = extractJsonBlock(res.content);
+        let consensus = stripFencedJson(res.content);
+        // Empty-consensus guard: a genuinely empty model response must never
+        // count as a pass. Retry once with a hard directive; a second empty
+        // response fails the job instead of stamping a hollow completion.
+        if (!(res.content || '').trim()) {
+          this.setPhase(job, 'deliberating', 'Empty response — retrying this pass...');
+          this.persist();
+          try {
+            const retry = await this.complete(
+              job,
+              [
+                { role: 'system', content: system },
+                {
+                  role: 'user',
+                  content: `Task: ${spec.goal.slice(0, MAX_GOAL_CHARS)}${baseCtx}${researchBlock}\\n\\nYour previous response was empty — you MUST output either a verdict or an explicit list of missing data. Do not return an empty message.`,
+                },
+              ],
+              { maxTokens: 2200, ...(round ? { model: round.model } : {}) }
+            );
+            this.spend(job, retry.usageUSD);
+            if (this.overBudget(job)) return this.finishBudgetOrCancel(job);
+            parsed = extractJsonBlock(retry.content);
+            consensus = stripFencedJson(retry.content);
+          } catch {
+            consensus = '';
+          }
+        }
+        if (!(consensus || '').trim() && !(res.content || '').trim()) {
+          job.status = 'failed';
+          job.error = 'Empty consensus: the model returned no verdict even after a retry.';
+          job.updatedAt = Date.now();
+          job.finishedAt = Date.now();
+          job.progress = { phase: 'failed', detail: job.error };
+          this.persist();
+          return { job, succeeded: false };
+        }
         const score = typeof parsed?.agreementScore === 'number' ? clampInt(parsed.agreementScore, 50, 0, 100) : undefined;
         job.passes.push({
           index: pass + 1,
@@ -824,12 +897,14 @@ export function sanitizeAgentSpec(raw: any): AgentJobSpec | { error: string } {
   const exhibits = sanitizeExhibits(raw.exhibits);
   if ('error' in exhibits) return { error: exhibits.error };
   const budget = raw.budget === 'free' || raw.budget === 'quality' ? raw.budget : 'cheap';
+  const chunkStrategy = raw.chunkStrategy === 'none' || raw.chunkStrategy === 'csv-rows' ? raw.chunkStrategy : undefined;
   const spec: AgentJobSpec = {
     goal,
     mode,
     context,
     ...(exhibits.exhibits ? { exhibits: exhibits.exhibits } : {}),
     budget,
+    ...(chunkStrategy ? { chunkStrategy } : {}),
     maxResearchQueries: clampInt(raw.maxResearchQueries, 4, 0, MAX_RESEARCH_QUERIES),
     maxDeliberationPasses: clampInt(raw.maxDeliberationPasses, 3, 1, MAX_DELIBERATION_PASSES),
     pacedMinutes: clampInt(raw.pacedMinutes, 0, 0, 180),
