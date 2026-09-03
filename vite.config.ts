@@ -11,6 +11,14 @@ export default defineConfig((): UserConfig => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    define: {
+      'process.env.VITE_COUNCIL_ACCESS_KEY': JSON.stringify(
+        process.env.VITE_COUNCIL_ACCESS_KEY || process.env.COUNCIL_ACCESS_KEY || ''
+      ),
+      'import.meta.env.VITE_COUNCIL_ACCESS_KEY': JSON.stringify(
+        process.env.VITE_COUNCIL_ACCESS_KEY || process.env.COUNCIL_ACCESS_KEY || ''
+      ),
+    },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify — file watching is disabled to prevent flickering during agent edits.

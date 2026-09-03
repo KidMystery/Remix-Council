@@ -188,10 +188,27 @@ async function resolveTokenEmail(token: string): Promise<string | null> {
       }
     }
   } catch {
+    // Continue to tokeninfo fallback
+  }
+
+  // 2. Try Google OAuth tokeninfo endpoint
+  try {
+    const infoResp = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`
+    );
+    if (infoResp.ok) {
+      const infoData = await infoResp.json();
+      const email = (infoData?.email as string) || null;
+      if (email) {
+        ownerVerifyCache.set(token, { email, expiresAt: Date.now() + OWNER_VERIFY_TTL_MS });
+        return email;
+      }
+    }
+  } catch {
     // Continue to Drive endpoint fallback
   }
 
-  // 2. Try Google Drive about endpoint (succeeds when token holds Drive permissions)
+  // 3. Try Google Drive about endpoint (succeeds when token holds Drive permissions)
   try {
     const driveResp = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
       headers: { Authorization: `Bearer ${token}` },
@@ -205,10 +222,22 @@ async function resolveTokenEmail(token: string): Promise<string | null> {
       }
     }
   } catch {
-    // Both endpoints failed
+    // Endpoints failed
   }
 
   return null;
+}
+
+function extractCookie(cookieHeader: string | undefined, name: string): string {
+  if (!cookieHeader) return '';
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match ? decodeURIComponent(match[1]).trim() : '';
+}
+
+function extractBearerToken(authHeader: string | undefined): string {
+  if (!authHeader) return '';
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : '';
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
@@ -325,7 +354,14 @@ export async function startServer(portOverride?: number) {
     next: express.NextFunction
   ) => {
     if (COUNCIL_ACCESS_KEY) {
-      const clientKey = req.header('x-council-key') || '';
+      const clientKey = (
+        req.header('x-council-key') ||
+        extractCookie(req.headers.cookie, 'council_access_key') ||
+        extractBearerToken(req.header('authorization')) ||
+        (typeof req.query.key === 'string' ? req.query.key : '') ||
+        (typeof req.query.access_key === 'string' ? req.query.access_key : '') ||
+        (typeof req.query.council_key === 'string' ? req.query.council_key : '')
+      ).trim();
       if (clientKey !== COUNCIL_ACCESS_KEY) {
         eventLog.record('warn', 'auth', 'Council access key rejected (401).', { path: req.path });
         return res.status(401).json({ error: 'Invalid council access key.' });
@@ -378,8 +414,18 @@ export async function startServer(portOverride?: number) {
         error: 'Server auth not configured. Set COUNCIL_ACCESS_KEY (or COUNCIL_ACCESS_SECRET) to enable gated endpoints.',
       });
     }
-    const clientKey = req.header('x-council-key') || '';
-    const token = req.header('x-owner-token') || '';
+    const clientKey = (
+      req.header('x-council-key') ||
+      extractCookie(req.headers.cookie, 'council_access_key') ||
+      extractBearerToken(req.header('authorization')) ||
+      (typeof req.query.key === 'string' ? req.query.key : '') ||
+      (typeof req.query.access_key === 'string' ? req.query.access_key : '') ||
+      (typeof req.query.council_key === 'string' ? req.query.council_key : '')
+    ).trim();
+    const token = (
+      req.header('x-owner-token') ||
+      extractCookie(req.headers.cookie, 'owner_token')
+    ).trim();
     const decision = decideOwnerGate({
       councilKeyConfigured: Boolean(COUNCIL_ACCESS_KEY),
       clientKey,

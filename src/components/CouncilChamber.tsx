@@ -347,8 +347,17 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
     : { total: { tracked: 0, resolved: 0, correct: 0, wrong: 0 }, byPersona: {}, byModel: {}, byDomain: {} };
 
   /** Human-readable error text (AbortError => clean "Stopped" message). */
-  const friendlyError = (err: any): string =>
-    err?.name === 'AbortError' ? 'Stopped by user' : (err?.message || String(err));
+  const friendlyError = (err: any): string => {
+    if (err?.name === 'AbortError') return 'Stopped by user';
+    const raw = err?.message || String(err);
+    if (/sign in required \(owner gate\)/i.test(raw)) {
+      return 'Sign in required: Please sign in with your authorized Google account or enter the Council Access Key in Settings.';
+    }
+    if (/restricted to its owner/i.test(raw)) {
+      return 'Access restricted: Your signed-in account is not on the authorized owner list.';
+    }
+    return raw;
+  };
 
   /** Fire Alerts-tab chimes / desktop notifications when a round actually finishes. */
   const announceRoundOutcome = (round: CouncilRound) => {

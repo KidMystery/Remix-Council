@@ -11,6 +11,7 @@
  * and asynchronously synced to the server event log.
  */
 import { useState, useEffect } from 'react';
+import { authenticatedFetch } from './apiClient';
 
 export type EventLevel = 'error' | 'warn' | 'info' | 'success';
 export type EventScope =
@@ -89,7 +90,7 @@ function persist() {
 async function syncToServer(event: DiagnosticEvent) {
   try {
     if (typeof fetch === 'function' && event.level === 'error') {
-      await fetch('/api/diagnostics/events', {
+      await authenticatedFetch('/api/diagnostics/events', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

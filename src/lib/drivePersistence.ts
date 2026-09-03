@@ -30,6 +30,8 @@ export type { Tombstone };
 export const DRIVE_SCOPES = [
   'https://www.googleapis.com/auth/drive.appdata',
   'https://www.googleapis.com/auth/drive.file',
+  'email',
+  'profile',
 ];
 
 const DRIVE_SCOPE_STRING = DRIVE_SCOPES.join(' ');

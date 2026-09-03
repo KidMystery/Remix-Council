@@ -1,5 +1,12 @@
+// @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { isSameOriginUrl, authenticatedFetch, getAuthHeaders } from '../apiClient';
+import {
+  isSameOriginUrl,
+  authenticatedFetch,
+  getAuthHeaders,
+  setCouncilAccessKey,
+  getCouncilAccessKey,
+} from '../apiClient';
 
 describe('apiClient & Access Key Safety', () => {
   beforeEach(() => {
@@ -69,6 +76,25 @@ describe('apiClient & Access Key Safety', () => {
       } finally {
         vi.unstubAllEnvs();
       }
+    });
+
+    it('retrieves access key from localStorage when env var is unset', () => {
+      localStorage.setItem('council_access_key', 'local-stored-key');
+      try {
+        const headers = getAuthHeaders();
+        expect(headers['x-council-key']).toBe('local-stored-key');
+      } finally {
+        localStorage.removeItem('council_access_key');
+      }
+    });
+
+    it('setCouncilAccessKey persists to localStorage and clears on empty', () => {
+      setCouncilAccessKey('new-test-key');
+      expect(localStorage.getItem('council_access_key')).toBe('new-test-key');
+      expect(getCouncilAccessKey()).toBe('new-test-key');
+
+      setCouncilAccessKey('');
+      expect(localStorage.getItem('council_access_key')).toBeNull();
     });
   });
 });

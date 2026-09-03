@@ -1,21 +1,85 @@
 import { getGoogleAccessToken } from './drivePersistence';
 
-function getCouncilAccessKey(): string {
+export const COUNCIL_KEY_STORAGE = 'council_access_key';
+
+export function getCouncilAccessKey(): string {
   try {
     if (typeof process !== 'undefined' && (process.env as any)?.VITE_COUNCIL_ACCESS_KEY !== undefined) {
       const fromProcess = (process.env as any).VITE_COUNCIL_ACCESS_KEY;
-      if (fromProcess) return fromProcess;
+      if (fromProcess && typeof fromProcess === 'string' && fromProcess.trim()) return fromProcess.trim();
     }
   } catch {
     // ignore
   }
   try {
     const fromImportMeta = (import.meta as any).env?.VITE_COUNCIL_ACCESS_KEY;
-    if (fromImportMeta) return fromImportMeta;
+    if (fromImportMeta && typeof fromImportMeta === 'string' && fromImportMeta.trim()) return fromImportMeta.trim();
   } catch {
     // ignore
   }
+  if (typeof window !== 'undefined') {
+    try {
+      const stored =
+        localStorage.getItem(COUNCIL_KEY_STORAGE) ||
+        localStorage.getItem('COUNCIL_ACCESS_KEY') ||
+        localStorage.getItem('council_key') ||
+        sessionStorage.getItem(COUNCIL_KEY_STORAGE);
+      if (stored && stored.trim()) return stored.trim();
+    } catch {
+      // ignore
+    }
+    try {
+      const match = typeof document !== 'undefined' && document.cookie
+        ? document.cookie.match(/(?:^|;\s*)council_access_key=([^;]+)/)
+        : null;
+      if (match && match[1]) return decodeURIComponent(match[1]).trim();
+    } catch {
+      // ignore
+    }
+  }
   return '';
+}
+
+export function setCouncilAccessKey(key: string): void {
+  const trimmed = (key || '').trim();
+  if (typeof window === 'undefined') return;
+  try {
+    if (trimmed) {
+      localStorage.setItem(COUNCIL_KEY_STORAGE, trimmed);
+      if (typeof document !== 'undefined') {
+        document.cookie = `council_access_key=${encodeURIComponent(trimmed)}; path=/; max-age=31536000; SameSite=Lax`;
+      }
+    } else {
+      localStorage.removeItem(COUNCIL_KEY_STORAGE);
+      localStorage.removeItem('COUNCIL_ACCESS_KEY');
+      localStorage.removeItem('council_key');
+      sessionStorage.removeItem(COUNCIL_KEY_STORAGE);
+      if (typeof document !== 'undefined') {
+        document.cookie = 'council_access_key=; path=/; max-age=0; SameSite=Lax';
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+// In browser environments: capture access key from URL (?key=... or ?access_key=...)
+if (typeof window !== 'undefined' && window.location) {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const keyParam = params.get('key') || params.get('council_key') || params.get('access_key');
+    if (keyParam && keyParam.trim()) {
+      setCouncilAccessKey(keyParam.trim());
+      params.delete('key');
+      params.delete('council_key');
+      params.delete('access_key');
+      const newSearch = params.toString();
+      const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+      window.history.replaceState({}, '', newUrl);
+    }
+  } catch {
+    // ignore
+  }
 }
 
 /**

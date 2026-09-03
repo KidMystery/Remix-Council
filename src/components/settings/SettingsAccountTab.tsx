@@ -1,6 +1,7 @@
-import React from 'react';
-import { RefreshCw, LogIn, LogOut } from 'lucide-react';
+import React, { useState } from 'react';
+import { RefreshCw, LogIn, LogOut, Key, Check } from 'lucide-react';
 import { getCurrentUserEmail } from '../../lib/drivePersistence';
+import { getCouncilAccessKey, setCouncilAccessKey } from '../../lib/apiClient';
 
 interface SettingsAccountTabProps {
   usageData: { usage: number; limit: number | null; remaining?: number | null } | null;
@@ -25,13 +26,28 @@ export const SettingsAccountTab: React.FC<SettingsAccountTabProps> = ({
         : null;
   const pct = usageData && usageData.limit ? Math.min(100, (usageData.usage / usageData.limit) * 100) : null;
   const email = getCurrentUserEmail();
+  const [accessKey, setAccessKey] = useState(() => getCouncilAccessKey());
+  const [keySaved, setKeySaved] = useState(false);
+
+  const handleSaveKey = () => {
+    setCouncilAccessKey(accessKey);
+    setKeySaved(true);
+    setTimeout(() => setKeySaved(false), 2000);
+  };
+
+  const handleClearKey = () => {
+    setAccessKey('');
+    setCouncilAccessKey('');
+    setKeySaved(true);
+    setTimeout(() => setKeySaved(false), 2000);
+  };
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
       {/* Profile identity */}
       <section className="space-y-4">
-        <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Profile</h3>
-        <div className="p-4 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800 rounded-xl">
+        <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Profile & Auth</h3>
+        <div className="p-4 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800 rounded-xl space-y-3">
           {isSignedIn ? (
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
@@ -39,7 +55,7 @@ export const SettingsAccountTab: React.FC<SettingsAccountTabProps> = ({
                   {email || 'Signed in with Google'}
                 </p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Profile & Drive sync are linked to this Google account. Your API keys stay server-side.
+                  Profile & Drive sync are linked to this Google account. Authorized owner sessions unlock all gates.
                 </p>
               </div>
               {onSignOut && (
@@ -56,7 +72,7 @@ export const SettingsAccountTab: React.FC<SettingsAccountTabProps> = ({
           ) : (
             <div className="flex items-center justify-between gap-3">
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Sign in with Google to sync your sessions and profile to Drive.
+                Sign in with Google to sync your sessions to Drive and unlock owner-gated routes.
               </p>
               {onSignIn && (
                 <button
@@ -70,6 +86,48 @@ export const SettingsAccountTab: React.FC<SettingsAccountTabProps> = ({
               )}
             </div>
           )}
+
+          {/* Owner Access Key */}
+          <div className="pt-3 border-t border-slate-200 dark:border-slate-700/60">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                <Key size={13} className="text-cyan-500" />
+                Council Access Key
+              </span>
+              {accessKey.trim() && (
+                <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">Configured</span>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-2">
+              If your deployment has an owner access key set (<code className="text-[10px] px-1 py-0.5 bg-slate-200 dark:bg-slate-700 rounded">COUNCIL_ACCESS_KEY</code>), provide it here to authenticate requests.
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="password"
+                value={accessKey}
+                onChange={(e) => setAccessKey(e.target.value)}
+                placeholder="Enter COUNCIL_ACCESS_KEY"
+                className="flex-1 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
+              />
+              <button
+                type="button"
+                onClick={handleSaveKey}
+                className="inline-flex items-center gap-1 text-xs font-medium text-white bg-cyan-600 hover:bg-cyan-500 px-3 py-1.5 rounded-lg transition-colors cursor-pointer shrink-0"
+              >
+                {keySaved ? <Check size={12} /> : null}
+                {keySaved ? 'Saved' : 'Save'}
+              </button>
+              {accessKey.trim() && (
+                <button
+                  type="button"
+                  onClick={handleClearKey}
+                  className="text-xs text-slate-500 hover:text-slate-400 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer shrink-0"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       </section>
 
