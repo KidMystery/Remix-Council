@@ -401,9 +401,15 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
   const makeCallController = (timeoutMs: number) => {
     const ctrl = new AbortController();
     const runSignal = abortRef.current?.signal;
-    const onAbort = () => ctrl.abort();
-    if (runSignal) runSignal.addEventListener('abort', onAbort);
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const onAbort = () => ctrl.abort(runSignal?.reason || new DOMException('Deliberation stopped', 'AbortError'));
+    if (runSignal) {
+      if (runSignal.aborted) {
+        ctrl.abort(runSignal.reason || new DOMException('Deliberation stopped', 'AbortError'));
+      } else {
+        runSignal.addEventListener('abort', onAbort);
+      }
+    }
+    const t = setTimeout(() => ctrl.abort(new DOMException('Call timed out', 'TimeoutError')), timeoutMs);
     return {
       signal: ctrl.signal,
       cleanup: () => {
@@ -461,7 +467,7 @@ export const CouncilChamber: React.FC<CouncilChamberProps> = ({
 
   const handleStop = () => {
     if (abortRef.current) {
-      abortRef.current.abort();
+      abortRef.current.abort(new DOMException('Stopped by user', 'AbortError'));
       showToast?.('Stopping deliberation…', 'warning');
     }
   };

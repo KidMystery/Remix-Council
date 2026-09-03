@@ -144,3 +144,28 @@ describe('streamOpenRouterCompletion 401 owner-gate recovery', () => {
     ).rejects.toThrow(/Sign in required/);
   });
 });
+
+describe('streamOpenRouterCompletion abort behavior', () => {
+  it('throws AbortError and does not record network error on abort', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: any, init: any) => {
+        if (init?.signal?.aborted) {
+          throw init.signal.reason || new DOMException('Aborted', 'AbortError');
+        }
+        return { ok: true, status: 200, body: null } as any;
+      })
+    );
+
+    const controller = new AbortController();
+    controller.abort(new DOMException('Stopped by user', 'AbortError'));
+
+    await expect(
+      streamOpenRouterCompletion({
+        model: 'test/model',
+        messages: [{ role: 'user', content: 'hi' }],
+        signal: controller.signal,
+      })
+    ).rejects.toThrow(/Stopped by user/);
+  });
+});
