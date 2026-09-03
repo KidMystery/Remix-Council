@@ -299,4 +299,76 @@ describe('Fallback Manager tests', () => {
       expect(mockedStream).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('streamPersonaWithFallback abort handling', () => {
+    const persona: Persona = {
+      id: 'skeptic',
+      name: 'Skeptic',
+      role: 'Critic',
+      avatar: '🛡️',
+      model: 'google/gemini-2.5-flash',
+      systemPrompt: '',
+      color: '',
+    };
+
+    beforeEach(() => {
+      mockedStream.mockReset();
+      clearStoredFallbackEvents();
+    });
+
+    it('immediately exits on AbortError without cascading through backup models', async () => {
+      const abortError = new DOMException('The operation was aborted', 'AbortError');
+      mockedStream.mockRejectedValueOnce(abortError);
+
+      await expect(
+        streamPersonaWithFallback({
+          persona,
+          messages: [{ role: 'user', content: 'hi' }],
+          policy: DEFAULT_POLICY, // allowProviderFallback is true
+        })
+      ).rejects.toThrow();
+
+      // Exactly one attempt — must NOT try backup candidates
+      expect(mockedStream).toHaveBeenCalledTimes(1);
+      // Must NOT log fallback events to storage on abort
+      expect(getStoredFallbackEvents()).toHaveLength(0);
+    });
+
+    it('immediately throws without calling stream when signal is already aborted', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        streamPersonaWithFallback({
+          persona,
+          messages: [{ role: 'user', content: 'hi' }],
+          policy: DEFAULT_POLICY,
+          signal: controller.signal,
+        })
+      ).rejects.toThrow();
+
+      expect(mockedStream).toHaveBeenCalledTimes(0);
+      expect(getStoredFallbackEvents()).toHaveLength(0);
+    });
+
+    it('immediately exits if signal.aborted becomes true during stream failure', async () => {
+      const controller = new AbortController();
+      mockedStream.mockImplementationOnce(async () => {
+        controller.abort();
+        throw new Error('Connection aborted by user');
+      });
+
+      await expect(
+        streamPersonaWithFallback({
+          persona,
+          messages: [{ role: 'user', content: 'hi' }],
+          policy: DEFAULT_POLICY,
+          signal: controller.signal,
+        })
+      ).rejects.toThrow();
+
+      expect(mockedStream).toHaveBeenCalledTimes(1);
+      expect(getStoredFallbackEvents()).toHaveLength(0);
+    });
+  });
 });

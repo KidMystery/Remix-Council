@@ -299,10 +299,20 @@ export async function streamPersonaWithFallback(
     new Set([startModel, ...backups.map((b) => b.model)])
   );
 
+  if (signal?.aborted) {
+    const abortErr = new DOMException('The operation was aborted', 'AbortError');
+    throw abortErr;
+  }
+
   let attempts = 0;
   let lastError: any = null;
 
   for (const currentModel of attemptChain) {
+    if (signal?.aborted) {
+      const abortErr = new DOMException('The operation was aborted', 'AbortError');
+      throw abortErr;
+    }
+
     // Enforce policy per attempt: in free mode, skip (don't abort on) any
     // candidate that isn't verified free in the live catalog.
     if (isFreeOnlyPreset && !isFreeModelId(currentModel, rawModels)) {
@@ -354,6 +364,19 @@ export async function streamPersonaWithFallback(
         cost: streamResult.cost,
       };
     } catch (error: any) {
+      // Abort / cancellation: user or caller aborted the request.
+      // Immediately exit without fallback recursion or cycling backup models.
+      if (
+        signal?.aborted ||
+        error?.name === 'AbortError' ||
+        error?.code === 'ABORT_ERR' ||
+        error?.message === 'The operation was aborted' ||
+        error?.message?.includes('aborted') ||
+        error?.message?.includes('AbortError')
+      ) {
+        throw error;
+      }
+
       // A cost-governor refusal is a budget guard, not a model failure: never
       // try backup models, surface it to the run loop untouched. Same for owner gate
       // auth rejection: backup models cannot fix a 401.
