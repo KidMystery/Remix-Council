@@ -638,7 +638,7 @@ export async function startServer(portOverride?: number) {
       });
     }
 
-    const {
+    let {
       model: rawModel,
       messages,
       temperature,
@@ -801,6 +801,8 @@ export async function startServer(portOverride?: number) {
         });
       }
 
+      stream = stream ?? true;
+
       if (stream && upstreamResp.body) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
@@ -865,7 +867,62 @@ export async function startServer(portOverride?: number) {
           req.off('close', onClientClose);
         }
       } else {
-        const json = await upstreamResp.json();
+        const rawText = await upstreamResp.text();
+        let json: any;
+        const cleanText = rawText
+          .split('\n')
+          .filter((line) => !line.trim().startsWith(':'))
+          .join('\n')
+          .trim();
+
+        try {
+          json = JSON.parse(cleanText);
+        } catch {
+          // OpenRouter may send SSE chunks (e.g. lines with "data: ...") or comments.
+          // Reconstruct the completion object from SSE data lines if present.
+          const dataLines = rawText
+            .split('\n')
+            .map((l) => l.trim())
+            .filter((l) => l.startsWith('data:') && !l.includes('[DONE]'));
+
+          if (dataLines.length > 0) {
+            let combinedContent = '';
+            let lastParsed: any = null;
+            let role = 'assistant';
+
+            for (const line of dataLines) {
+              try {
+                const chunkJson = JSON.parse(line.replace(/^data:\s*/, ''));
+                lastParsed = chunkJson;
+                const delta = chunkJson.choices?.[0]?.delta;
+                if (delta?.role) role = delta.role;
+                if (delta?.content) combinedContent += delta.content;
+              } catch {
+                /* ignore unparseable chunk */
+              }
+            }
+
+            if (lastParsed) {
+              json = {
+                ...lastParsed,
+                choices: [
+                  {
+                    index: 0,
+                    message: {
+                      role,
+                      content: combinedContent,
+                    },
+                    finish_reason: lastParsed.choices?.[0]?.finish_reason || 'stop',
+                  },
+                ],
+              };
+            }
+          }
+
+          if (!json) {
+            throw new Error(`Upstream LLM returned invalid JSON: ${rawText.slice(0, 200)}`);
+          }
+        }
         if (resolvedModel !== rawModel) {
           json.resolved_model = resolvedModel;
           json.requested_model = rawModel;
