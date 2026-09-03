@@ -539,7 +539,7 @@ export const OracleView: React.FC<OracleViewProps> = ({
   };
 
   const handleStop = () => {
-    abortRef.current?.abort();
+    abortRef.current?.abort(new DOMException('Stopped by user', 'AbortError'));
   };
 
   const handleDismissMessage = (msgId: string) => {

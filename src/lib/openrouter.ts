@@ -256,9 +256,9 @@ export async function streamOpenRouterCompletion(
   while (attempt <= maxRetries) {
     // Combined abort: the caller's signal (user Stop) OR our stall watchdog.
     const combined = new AbortController();
-    const onOuterAbort = () => combined.abort(signal?.reason);
+    const onOuterAbort = () => combined.abort(signal?.reason || new DOMException('Stopped by user', 'AbortError'));
     if (signal) {
-      if (signal.aborted) combined.abort(signal.reason);
+      if (signal.aborted) combined.abort(signal.reason || new DOMException('Stopped by user', 'AbortError'));
       else signal.addEventListener('abort', onOuterAbort);
     }
     const STALL_MS = 120_000; // server aborts upstream at 110s; this is the backstop
@@ -462,8 +462,18 @@ export async function streamOpenRouterCompletion(
       }
 
       // If user aborted or error is not retryable or we've already output tokens, don't auto-retry
-      if (error.name === 'AbortError' || (signal && signal.aborted) || error instanceof OwnerAuthError || (error as CostCeilingError).costCeilingExceeded) {
-        recordError('network', 'Stream stopped / auth required', lastError, { model }, model);
+      if (error.name === 'AbortError' || (signal && signal.aborted)) {
+        recordInfo('network', 'Stream stopped by user or aborted', lastError?.message || 'aborted', { model }, model);
+        throw lastError;
+      }
+
+      if (error instanceof OwnerAuthError) {
+        recordError('auth', 'Authentication Required (Owner Gate)', lastError, { model }, model);
+        throw lastError;
+      }
+
+      if ((error as CostCeilingError).costCeilingExceeded) {
+        recordError('governor', 'Cost Ceiling Reached', lastError, { model }, model);
         throw lastError;
       }
 
