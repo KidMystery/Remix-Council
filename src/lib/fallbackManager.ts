@@ -1,7 +1,10 @@
-import type { Persona, RawOpenRouterModel, GroundingData } from '../types';
-import { type ExecutionPolicy, isFreeModelId } from './executionPolicy';
-import { streamOpenRouterCompletion, type StreamOpenRouterCompletionOptions } from './openrouter';
-import { modelHasVision } from './modelScoring';
+import type { Persona, RawOpenRouterModel, GroundingData } from "../types";
+import { type ExecutionPolicy, isFreeModelId } from "./executionPolicy";
+import {
+  streamOpenRouterCompletion,
+  type StreamOpenRouterCompletionOptions,
+} from "./openrouter";
+import { modelHasVision } from "./modelScoring";
 
 export interface FallbackEvent {
   id: string;
@@ -14,10 +17,21 @@ export interface FallbackEvent {
   errorMessage: string;
   replacementModel: string;
   replacementModelName: string;
-  status: 'fallback_success' | 'fallback_failed' | 'no_fallback';
+  status: "fallback_success" | "fallback_failed" | "no_fallback";
 }
 
-const FALLBACK_EVENTS_STORAGE_KEY = 'council_fallback_events_v1';
+const FALLBACK_EVENTS_STORAGE_KEY = "council_fallback_events_v1";
+
+/**
+ * Hard cap on sequential provider-fallback attempts per persona request.
+ * Without this, a single failure (e.g. one 400 or 429) can sweep the ENTIRE
+ * live OpenRouter catalog (~169 models), each costing a real upstream call.
+ * A 400/429 cascade is a quota/provider condition, not a model-selection
+ * problem — burning N more models will not fix it. Stop early, surface the
+ * last error, and let the caller retry or degrade. (Spend-guard, added
+ * 2026-09-05 per Council cost-fix audit.)
+ */
+export const MAX_FALLBACK_ATTEMPTS = 5;
 
 export function getStoredFallbackEvents(): FallbackEvent[] {
   try {
@@ -26,7 +40,7 @@ export function getStoredFallbackEvents(): FallbackEvent[] {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
   } catch (err) {
-    console.error('Failed to load fallback events:', err);
+    console.error("Failed to load fallback events:", err);
     return [];
   }
 }
@@ -37,7 +51,7 @@ export function saveFallbackEvent(event: FallbackEvent): FallbackEvent[] {
   try {
     localStorage.setItem(FALLBACK_EVENTS_STORAGE_KEY, JSON.stringify(updated));
   } catch (err) {
-    console.error('Failed to save fallback event:', err);
+    console.error("Failed to save fallback event:", err);
   }
   return updated;
 }
@@ -46,37 +60,52 @@ export function clearStoredFallbackEvents(): void {
   try {
     localStorage.removeItem(FALLBACK_EVENTS_STORAGE_KEY);
   } catch (err) {
-    console.error('Failed to clear fallback events:', err);
+    console.error("Failed to clear fallback events:", err);
   }
 }
 
 /** Classifies the human-readable trigger reason for a failed model attempt. */
-export function classifyTriggerReason(error: any, content?: string | null): string {
-  if (!error && !content) return 'Invalid Response';
+export function classifyTriggerReason(
+  error: any,
+  content?: string | null,
+): string {
+  if (!error && !content) return "Invalid Response";
 
-  const message = (error?.message || error?.toString?.() || '').toLowerCase();
+  const message = (error?.message || error?.toString?.() || "").toLowerCase();
 
-  if (message.includes('429') || message.includes('rate limit') || message.includes('too many requests')) {
-    return 'HTTP 429 (Rate Limit)';
-  }
-  if (message.includes('timed out') || message.includes('timeout') || message.includes('aborterror')) {
-    return 'Timeout';
+  if (
+    message.includes("429") ||
+    message.includes("rate limit") ||
+    message.includes("too many requests")
+  ) {
+    return "HTTP 429 (Rate Limit)";
   }
   if (
-    message.includes('502') ||
-    message.includes('503') ||
-    message.includes('504') ||
-    message.includes('service unavailable') ||
-    message.includes('bad gateway') ||
-    message.includes('overloaded') ||
-    message.includes('temporarily unavailable')
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("aborterror")
   ) {
-    return 'Temporary Unavailability';
+    return "Timeout";
   }
-  if (!content || content.trim().length === 0 || message.includes('invalid response')) {
-    return 'Invalid Response';
+  if (
+    message.includes("502") ||
+    message.includes("503") ||
+    message.includes("504") ||
+    message.includes("service unavailable") ||
+    message.includes("bad gateway") ||
+    message.includes("overloaded") ||
+    message.includes("temporarily unavailable")
+  ) {
+    return "Temporary Unavailability";
   }
-  return 'Unknown Error';
+  if (
+    !content ||
+    content.trim().length === 0 ||
+    message.includes("invalid response")
+  ) {
+    return "Invalid Response";
+  }
+  return "Unknown Error";
 }
 
 export interface BackupCandidate {
@@ -102,32 +131,95 @@ interface OrderedBackupOptions {
  * re-validated at run time against the catalog when one exists.
  */
 const DEFAULT_PAID_BACKUPS: BackupCandidate[] = [
-  { model: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', org: 'google', hasVision: true },
-  { model: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', org: 'openai', hasVision: true },
-  { model: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', org: 'google', hasVision: true },
-  { model: 'deepseek/deepseek-chat', name: 'DeepSeek V3 Chat', org: 'deepseek', hasVision: false },
-  { model: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct', org: 'meta-llama', hasVision: false },
+  {
+    model: "google/gemini-3.7-flash",
+    name: "Gemini 3.7 Flash",
+    org: "google",
+    hasVision: true,
+  },
+  {
+    model: "openai/gpt-4o-mini",
+    name: "GPT-4o Mini",
+    org: "openai",
+    hasVision: true,
+  },
+  {
+    model: "google/gemini-2.5-flash",
+    name: "Gemini 2.5 Flash",
+    org: "google",
+    hasVision: true,
+  },
+  {
+    model: "deepseek/deepseek-chat",
+    name: "DeepSeek V3 Chat",
+    org: "deepseek",
+    hasVision: false,
+  },
+  {
+    model: "meta-llama/llama-3.3-70b-instruct",
+    name: "Llama 3.3 70B Instruct",
+    org: "meta-llama",
+    hasVision: false,
+  },
 ];
 
 const DEFAULT_FREE_BACKUPS: BackupCandidate[] = [
-  { model: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra 550B (Free)', org: 'nvidia', isFree: true, hasVision: false },
-  { model: 'openai/gpt-oss-120b:free', name: 'GPT-OSS 120B (Free)', org: 'openai', isFree: true, hasVision: false },
-  { model: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B (Free)', org: 'google', isFree: true, hasVision: false },
-  { model: 'qwen/qwen3-next-80b-a3b-instruct:free', name: 'Qwen3 Next 80B (Free)', org: 'qwen', isFree: true, hasVision: false },
+  {
+    model: "nvidia/nemotron-3-ultra-550b-a55b:free",
+    name: "Nemotron 3 Ultra 550B (Free)",
+    org: "nvidia",
+    isFree: true,
+    hasVision: false,
+  },
+  {
+    model: "openai/gpt-oss-120b:free",
+    name: "GPT-OSS 120B (Free)",
+    org: "openai",
+    isFree: true,
+    hasVision: false,
+  },
+  {
+    model: "google/gemma-4-31b-it:free",
+    name: "Gemma 4 31B (Free)",
+    org: "google",
+    isFree: true,
+    hasVision: false,
+  },
+  {
+    model: "qwen/qwen3-next-80b-a3b-instruct:free",
+    name: "Qwen3 Next 80B (Free)",
+    org: "qwen",
+    isFree: true,
+    hasVision: false,
+  },
   // Last-resort router: OpenRouter picks a live free model for you.
-  { model: 'openrouter/free', name: 'Free Models Router', org: 'openrouter', isFree: true, hasVision: true },
+  {
+    model: "openrouter/free",
+    name: "Free Models Router",
+    org: "openrouter",
+    isFree: true,
+    hasVision: true,
+  },
 ];
 
 /** Computes an ordered backup candidate list excluding failed/active models. */
-export function computeOrderedBackupList(options: OrderedBackupOptions): BackupCandidate[] {
-  const { activePersonas, failingPersonaId, rawModels, isFreeOnlyPreset = false, requireVision = false } = options;
+export function computeOrderedBackupList(
+  options: OrderedBackupOptions,
+): BackupCandidate[] {
+  const {
+    activePersonas,
+    failingPersonaId,
+    rawModels,
+    isFreeOnlyPreset = false,
+    requireVision = false,
+  } = options;
 
   const excluded = new Set<string>();
   const otherOrgs = new Set<string>();
   activePersonas.forEach((p) => {
     if (p.model) excluded.add(p.model.trim().toLowerCase());
     if (p.id !== failingPersonaId && p.model) {
-      const org = p.model.split('/')[0]?.toLowerCase();
+      const org = p.model.split("/")[0]?.toLowerCase();
       if (org) otherOrgs.add(org);
     }
   });
@@ -135,22 +227,27 @@ export function computeOrderedBackupList(options: OrderedBackupOptions): BackupC
   const isFreeOnly = isFreeOnlyPreset;
 
   const rank = (c: BackupCandidate): number => {
-    const org = (c.org || c.model.split('/')[0] || '').toLowerCase();
+    const org = (c.org || c.model.split("/")[0] || "").toLowerCase();
     if (otherOrgs.has(org)) return 2;
     return 0;
   };
 
   // Dynamic catalog prioritization when a valid rawModels list is provided.
-  if (rawModels && Array.isArray(rawModels) && rawModels.length > 0 && rawModels.some((m) => m?.id)) {
+  if (
+    rawModels &&
+    Array.isArray(rawModels) &&
+    rawModels.length > 0 &&
+    rawModels.some((m) => m?.id)
+  ) {
     const candidates: BackupCandidate[] = rawModels
       .filter((m) => m && m.id)
-      .filter((m) => requireVision ? modelHasVision(m) : true)
+      .filter((m) => (requireVision ? modelHasVision(m) : true))
       .map((m) => {
         const isFree = isFreeModelId(m.id, rawModels);
         return {
           model: m.id,
           name: m.name || m.id,
-          org: m.id.split('/')[0] || 'unknown',
+          org: m.id.split("/")[0] || "unknown",
           isFree,
         };
       })
@@ -159,14 +256,15 @@ export function computeOrderedBackupList(options: OrderedBackupOptions): BackupC
       .sort((a, b) => rank(a) - rank(b));
 
     const unusedOrg = candidates.filter((c) => rank(c) === 0);
-    if (unusedOrg.length > 0) return unusedOrg;
-    if (candidates.length > 0) return candidates;
+    const pool = unusedOrg.length > 0 ? unusedOrg : candidates;
+    // Bound the chain so a single failure never sweeps the full catalog.
+    return pool.slice(0, MAX_FALLBACK_ATTEMPTS);
   }
 
   // Hardcoded default pool fallback.
   const defaults = (isFreeOnly ? DEFAULT_FREE_BACKUPS : DEFAULT_PAID_BACKUPS)
     .filter((c) => !excluded.has(c.model.trim().toLowerCase()))
-    .filter((c) => requireVision ? c.hasVision : true)
+    .filter((c) => (requireVision ? c.hasVision : true))
     .sort((a, b) => rank(a) - rank(b));
   const unusedDefaults = defaults.filter((c) => rank(c) === 0);
   return unusedDefaults.length > 0 ? unusedDefaults : defaults;
@@ -174,7 +272,7 @@ export function computeOrderedBackupList(options: OrderedBackupOptions): BackupC
 
 export interface StreamPersonaWithFallbackOptions {
   persona: Persona;
-  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }>;
+  messages: Array<{ role: "system" | "user" | "assistant"; content: any }>;
   /** Execution policy governing budget constraints and provider fallback. */
   policy: ExecutionPolicy;
   rawModels?: RawOpenRouterModel[];
@@ -183,7 +281,7 @@ export interface StreamPersonaWithFallbackOptions {
   signal?: AbortSignal;
   maxTokens?: number;
   temperature?: number;
-  budget?: 'free' | 'cheap' | 'quality';
+  budget?: "free" | "cheap" | "quality";
   query?: string;
   webSearch?: boolean;
   onGrounding?: (grounding: GroundingData) => void;
@@ -199,7 +297,11 @@ export interface StreamPersonaWithFallbackResult {
   content: string;
   actualModel: string;
   fallbackOccurred: boolean;
-  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
   grounding?: GroundingData;
   finishReason?: string;
   cost?: number;
@@ -210,15 +312,35 @@ export interface StreamPersonaWithFallbackResult {
  * Every candidate model is validated against the execution policy before use.
  */
 export async function streamPersonaWithFallback(
-  options: StreamPersonaWithFallbackOptions
+  options: StreamPersonaWithFallbackOptions,
 ): Promise<StreamPersonaWithFallbackResult> {
-  const { persona, messages, policy, rawModels = [], sessionId, onToken, signal, maxTokens, temperature, budget, query, webSearch, onGrounding, disableFallback, roundKey, costCeilingUSD, plugins } = options;
+  const {
+    persona,
+    messages,
+    policy,
+    rawModels = [],
+    sessionId,
+    onToken,
+    signal,
+    maxTokens,
+    temperature,
+    budget,
+    query,
+    webSearch,
+    onGrounding,
+    disableFallback,
+    roundKey,
+    costCeilingUSD,
+    plugins,
+  } = options;
 
   const requireVision = messages.some(
-    (m) => Array.isArray(m.content) && m.content.some((c: any) => c.type === 'image_url')
+    (m) =>
+      Array.isArray(m.content) &&
+      m.content.some((c: any) => c.type === "image_url"),
   );
 
-  const isFreeOnlyPreset = policy.budget === 'free';
+  const isFreeOnlyPreset = policy.budget === "free";
   const originalModel = persona.model;
 
   // Free mode: never abort just because the configured model isn't verified
@@ -246,7 +368,11 @@ export async function streamPersonaWithFallback(
       plugins,
       sessionId,
     });
-    return { ...strictRes, actualModel: strictRes.actualModel || originalModel, fallbackOccurred: false };
+    return {
+      ...strictRes,
+      actualModel: strictRes.actualModel || originalModel,
+      fallbackOccurred: false,
+    };
   }
 
   if (isFreeOnlyPreset && !isFreeModelId(originalModel, rawModels)) {
@@ -260,7 +386,7 @@ export async function streamPersonaWithFallback(
     const replacement = freeCandidates[0]?.model;
     if (!replacement) {
       throw new Error(
-        `Free mode: "${originalModel}" is not verified free right now and no free models are available in the catalog. Try again in a moment or switch to a paid preset.`
+        `Free mode: "${originalModel}" is not verified free right now and no free models are available in the catalog. Try again in a moment or switch to a paid preset.`,
       );
     }
     policySubstituted = true;
@@ -272,35 +398,39 @@ export async function streamPersonaWithFallback(
       personaName: persona.name,
       originalModel,
       failedModel: originalModel,
-      triggerReason: 'Policy: not free — auto-switched',
+      triggerReason: "Policy: not free — auto-switched",
       errorMessage: `"${originalModel}" failed the verified-free check; free mode substituted a free model.`,
       replacementModel: replacement,
       replacementModelName: cleanName(replacement),
-      status: 'fallback_success',
+      status: "fallback_success",
     });
     console.warn(
-      `[FallbackManager] Free mode: "${originalModel}" is not verified free — auto-switching to "${replacement}".`
+      `[FallbackManager] Free mode: "${originalModel}" is not verified free — auto-switching to "${replacement}".`,
     );
   }
 
   // Free mode always allows free→free swaps even when provider fallback is
   // disabled; that ban exists to prevent silent paid upgrades.
-  const backups: BackupCandidate[] = (policy.allowProviderFallback || isFreeOnlyPreset)
-    ? computeOrderedBackupList({
-        activePersonas: [{ ...persona, model: startModel }],
-        failingPersonaId: persona.id,
-        rawModels,
-        isFreeOnlyPreset,
-        requireVision,
-      })
-    : [];
+  const backups: BackupCandidate[] =
+    policy.allowProviderFallback || isFreeOnlyPreset
+      ? computeOrderedBackupList({
+          activePersonas: [{ ...persona, model: startModel }],
+          failingPersonaId: persona.id,
+          rawModels,
+          isFreeOnlyPreset,
+          requireVision,
+        })
+      : [];
 
   const attemptChain: string[] = Array.from(
-    new Set([startModel, ...backups.map((b) => b.model)])
+    new Set([startModel, ...backups.map((b) => b.model)]),
   );
 
   if (signal?.aborted) {
-    const abortErr = new DOMException('The operation was aborted', 'AbortError');
+    const abortErr = new DOMException(
+      "The operation was aborted",
+      "AbortError",
+    );
     throw abortErr;
   }
 
@@ -309,15 +439,28 @@ export async function streamPersonaWithFallback(
 
   for (const currentModel of attemptChain) {
     if (signal?.aborted) {
-      const abortErr = new DOMException('The operation was aborted', 'AbortError');
+      const abortErr = new DOMException(
+        "The operation was aborted",
+        "AbortError",
+      );
       throw abortErr;
+    }
+
+    // Spend-guard: hard stop after MAX_FALLBACK_ATTEMPTS, regardless of how
+    // large the chain is. A quota/provider cascade must never sweep the full
+    // catalog — each attempt is a real paid upstream call.
+    if (attempts >= MAX_FALLBACK_ATTEMPTS) {
+      console.warn(
+        `[FallbackManager] Reached ${MAX_FALLBACK_ATTEMPTS} fallback attempts; stopping to cap spend. Last error: ${lastError?.message || "none"}`,
+      );
+      break;
     }
 
     // Enforce policy per attempt: in free mode, skip (don't abort on) any
     // candidate that isn't verified free in the live catalog.
     if (isFreeOnlyPreset && !isFreeModelId(currentModel, rawModels)) {
       console.warn(
-        `[FallbackManager] Skipping "${currentModel}" — not verified free in the live catalog.`
+        `[FallbackManager] Skipping "${currentModel}" — not verified free in the live catalog.`,
       );
       continue;
     }
@@ -348,7 +491,9 @@ export async function streamPersonaWithFallback(
 
       // Verify response validity
       if (!streamContent || streamContent.trim().length === 0) {
-        throw new Error('Invalid Response: Server returned empty output string.');
+        throw new Error(
+          "Invalid Response: Server returned empty output string.",
+        );
       }
 
       const actualExecutedModel = streamResult.actualModel || currentModel;
@@ -368,11 +513,11 @@ export async function streamPersonaWithFallback(
       // Immediately exit without fallback recursion or cycling backup models.
       if (
         signal?.aborted ||
-        error?.name === 'AbortError' ||
-        error?.code === 'ABORT_ERR' ||
-        error?.message === 'The operation was aborted' ||
-        error?.message?.includes('aborted') ||
-        error?.message?.includes('AbortError')
+        error?.name === "AbortError" ||
+        error?.code === "ABORT_ERR" ||
+        error?.message === "The operation was aborted" ||
+        error?.message?.includes("aborted") ||
+        error?.message?.includes("AbortError")
       ) {
         throw error;
       }
@@ -383,7 +528,7 @@ export async function streamPersonaWithFallback(
       if (error?.costCeilingExceeded || error?.isOwnerAuthError) throw error;
       lastError = error;
       const triggerReason = classifyTriggerReason(error, null);
-      const nextModel = attemptChain[attempts] || '';
+      const nextModel = attemptChain[attempts] || "";
       saveFallbackEvent({
         id: `fb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         timestamp: Date.now(),
@@ -394,10 +539,12 @@ export async function streamPersonaWithFallback(
         triggerReason,
         errorMessage: error?.message || String(error),
         replacementModel: nextModel,
-        replacementModelName: nextModel ? cleanName(nextModel) : 'None',
-        status: nextModel ? 'fallback_success' : 'no_fallback',
+        replacementModelName: nextModel ? cleanName(nextModel) : "None",
+        status: nextModel ? "fallback_success" : "no_fallback",
       });
-      console.warn(`[FallbackManager] Model "${currentModel}" failed (${triggerReason}). ${nextModel ? `Trying "${nextModel}"...` : 'No candidates remain.'}`);
+      console.warn(
+        `[FallbackManager] Model "${currentModel}" failed (${triggerReason}). ${nextModel ? `Trying "${nextModel}"...` : "No candidates remain."}`,
+      );
 
       if (!policy.allowProviderFallback) {
         throw error;
@@ -408,17 +555,17 @@ export async function streamPersonaWithFallback(
   throw new Error(
     isFreeOnlyPreset
       ? `Every candidate for "${originalModel}" failed or lost free status. Last error: ${
-          lastError?.message || 'unknown'
+          lastError?.message || "unknown"
         }. Try again shortly or switch to a paid preset.`
       : `No policy-compliant fallback for "${originalModel}". Last error: ${
-          lastError?.message || 'unknown'
-        }.`
+          lastError?.message || "unknown"
+        }.`,
   );
 }
 
 function cleanName(modelId: string): string {
-  if (!modelId) return 'None';
-  return modelId.split('/').pop() || modelId;
+  if (!modelId) return "None";
+  return modelId.split("/").pop() || modelId;
 }
 
 /** Backward-compatible singleton facade (audit logging kept in-memory). */
